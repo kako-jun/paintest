@@ -1,8 +1,8 @@
-# paintauri
+# paintest
 
-A pixel-perfect Paint clone for macOS, built with Tauri.
+A pixel-perfect Paint clone for macOS, built natively with Swift/AppKit.
 
-Classic Windows Paint has no macOS equivalent. `paintauri` reproduces the
+Classic Windows Paint has no macOS equivalent. `paintest` reproduces the
 classic toolset — pencil, brush, bucket fill, eraser, shapes, selection,
 color picker, text — with **dot-exact editing**: every stroke edits raw
 pixels with no anti-aliasing, and zoom uses nearest-neighbor scaling so
@@ -14,16 +14,16 @@ Early development. Not yet usable.
 
 ## Tech stack
 
-- Frontend: Vite + TypeScript, Canvas 2D (`image-rendering: pixelated`)
-- Desktop shell: Tauri v2
-- Primary target: macOS
+- Language: Swift
+- UI: AppKit
+- Drawing: Core Graphics (`interpolationQuality = .none`)
+- Platform: macOS (native only, no cross-platform wrapper)
 
 ## Local dev
 
 ```bash
-cd frontend && npm install
-npm run dev
-npm run tauri:dev
+swift build
+swift run
 ```
 
 ## License
