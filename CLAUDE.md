@@ -24,6 +24,14 @@ swift build
 swift run
 ```
 
+## テスト
+
+```bash
+swift test
+```
+
+ロジック本体は`paintestCore`（ライブラリターゲット）に置き、`paintest`（実行ターゲット）は起動のみを担う。XCTestが実行ターゲットを直接importできないための分割。UI依存（`NSAlert.runModal`・`NSEvent`・実描画）で単体テスト不可能な部分は無理にテスト化せず、実機確認に委ねる。
+
 ## 実装方針
 
 - キャンバスの内部解像度（ピクセルグリッド）とビュー表示サイズを分離し、拡大縮小は常に整数倍・ニアレストネイバーで行う
@@ -33,7 +41,7 @@ swift run
 ## リポジトリ方針
 
 - `README.md` はエンドユーザー向け。実装・設計判断は `docs/` とこのファイルに書く
-- `backend/`相当は置かず、Swift Package（`Sources/` 等）の標準構成にする
+- `backend/`相当は置かず、Swift Package標準構成にする（`paintestCore`ライブラリ + `paintest`実行 + `paintestCoreTests`テストの3ターゲット）
 
 ## 禁止事項
 
