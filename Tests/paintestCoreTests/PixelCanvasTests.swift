@@ -366,6 +366,75 @@ final class PixelCanvasTests: XCTestCase {
         return rep.representation(using: .png, properties: [:])
     }
 
+    /// Builds a 2-channel (gray + alpha), 8-bit grayscale+alpha PNG — a
+    /// second layout excluded by the same `samplesPerPixel == 3 || == 4`
+    /// gate that the single-channel grayscale fixture above exercises, but
+    /// with `samplesPerPixel == 2` this time. This is a legal PNG color
+    /// type (grayscale with alpha), so `load(from:)` must still fall back
+    /// to the safe `colorAt(x:y:)` path for it instead of misreading the
+    /// 2-byte-per-pixel source stride as 3/4 bytes per pixel.
+    private func makeGrayscaleWithAlphaPNGData(width: Int, height: Int, gray: UInt8, alpha: UInt8) -> Data? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 2,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceWhite,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let data = rep.bitmapData else { return nil }
+
+        let bytesPerRow = rep.bytesPerRow
+        let bytesPerPixel = rep.bitsPerPixel / 8
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = y * bytesPerRow + x * bytesPerPixel
+                data[offset] = gray
+                data[offset + 1] = alpha
+            }
+        }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    func testLoad_grayscaleWithAlphaPNG_everyPixelIsUniformGrayWithNoChannelBleed() {
+        // Fully opaque and a non-uniform gray value, for the same reason as
+        // the single-channel grayscale fixture: any bleed from a
+        // neighboring pixel's bytes into G/B would be visible, and this
+        // isn't a coincidental 0/255 result.
+        let gray: UInt8 = 137
+        let alpha: UInt8 = 255
+        guard let data = makeGrayscaleWithAlphaPNGData(width: 4, height: 4, gray: gray, alpha: alpha) else {
+            XCTFail("failed to build grayscale+alpha PNG fixture")
+            return
+        }
+        guard let loaded = PixelCanvas.load(from: data) else {
+            XCTFail("load(from:) returned nil for grayscale+alpha PNG")
+            return
+        }
+        XCTAssertEqual(loaded.width, 4)
+        XCTAssertEqual(loaded.height, 4)
+        guard let anchor = loaded.rawPixel(x: 0, y: 0) else {
+            XCTFail("expected pixel (0,0) to be readable")
+            return
+        }
+        XCTAssertEqual(anchor.r, anchor.g, "pixel (0,0) should be a neutral gray: r should equal g")
+        XCTAssertEqual(anchor.g, anchor.b, "pixel (0,0) should be a neutral gray: g should equal b")
+        XCTAssertEqual(anchor.a, 255, "pixel (0,0) alpha should be fully opaque")
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let pixel = loaded.rawPixel(x: x, y: y)
+                XCTAssertEqual(pixel?.r, anchor.r, "pixel (\(x),\(y)) red channel should match the uniform gray, not bleed from a neighbor")
+                XCTAssertEqual(pixel?.g, anchor.g, "pixel (\(x),\(y)) green channel should match the uniform gray, not bleed from a neighbor")
+                XCTAssertEqual(pixel?.b, anchor.b, "pixel (\(x),\(y)) blue channel should match the uniform gray, not bleed from a neighbor")
+                XCTAssertEqual(pixel?.a, 255, "pixel (\(x),\(y)) alpha should be fully opaque")
+            }
+        }
+    }
+
     func testLoad_grayscalePNG_everyPixelIsUniformGrayWithNoChannelBleed() {
         // A non-uniform gray value (not 0 or 255) makes any bleed from a
         // neighboring pixel's byte into G/B visible, since a real bug would
