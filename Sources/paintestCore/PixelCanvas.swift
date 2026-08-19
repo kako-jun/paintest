@@ -118,6 +118,19 @@ final class PixelCanvas {
         bitmap.cgImage
     }
 
+    /// Reads the raw RGBA bytes written at a pixel, bypassing `NSColor`
+    /// conversion so tests can assert byte-exact values (no anti-aliasing,
+    /// no premultiplication, no rounding surprises from color-space
+    /// conversion). Returns `nil` if the coordinate is out of bounds.
+    func rawPixel(x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+        guard x >= 0, x < width, y >= 0, y < height else { return nil }
+        guard let data = bitmap.bitmapData else { return nil }
+        let bytesPerRow = bitmap.bytesPerRow
+        let bpp = bitmap.bitsPerPixel / 8
+        let offset = y * bytesPerRow + x * bpp
+        return (data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+    }
+
     // MARK: - PNG I/O
 
     func pngData() -> Data? {

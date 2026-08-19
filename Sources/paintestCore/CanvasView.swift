@@ -15,7 +15,7 @@ final class CanvasView: NSView {
     var penColor: NSColor = .black
     var onZoomChanged: ((Int) -> Void)?
 
-    private static let zoomLevels = [1, 2, 4, 8, 16, 32]
+    static let zoomLevels = [1, 2, 4, 8, 16, 32]
     private var lastPixel: (x: Int, y: Int)?
 
     override var isFlipped: Bool { true }
@@ -79,11 +79,20 @@ final class CanvasView: NSView {
 
     // MARK: - Pencil tool (mouse-driven, 1px, no anti-aliasing)
 
-    private func pixelCoordinate(for event: NSEvent) -> (x: Int, y: Int) {
-        let point = convert(event.locationInWindow, from: nil)
+    /// Converts a view-space point into pixel-space coordinates at the given
+    /// zoom scale. Pulled out as a pure function (no `NSEvent`/window
+    /// dependency) so the floor/scale math can be unit tested directly;
+    /// `pixelCoordinate(for:)` is the thin `NSEvent`-driven wrapper used at
+    /// runtime.
+    static func pixelCoordinate(forPoint point: NSPoint, zoomScale: Int) -> (x: Int, y: Int) {
         let x = Int(floor(point.x / CGFloat(zoomScale)))
         let y = Int(floor(point.y / CGFloat(zoomScale)))
         return (x, y)
+    }
+
+    private func pixelCoordinate(for event: NSEvent) -> (x: Int, y: Int) {
+        let point = convert(event.locationInWindow, from: nil)
+        return CanvasView.pixelCoordinate(forPoint: point, zoomScale: zoomScale)
     }
 
     override func mouseDown(with event: NSEvent) {

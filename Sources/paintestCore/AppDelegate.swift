@@ -1,6 +1,21 @@
 import AppKit
 import UniformTypeIdentifiers
 
+/// Boots the app. This is the only symbol `paintestCore` exposes publicly —
+/// `AppDelegate` and friends stay internal to this module, so the thin
+/// `paintest` executable target (whose `main.swift` calls this) never needs
+/// to expose AppKit delegate protocol conformances across a module boundary.
+/// Keeping this as a plain function (not top-level code in a `main.swift`)
+/// also means the `paintestTests` target can `@testable import paintestCore`
+/// without inadvertently launching the app's run loop.
+public func runPaintestApp() {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.regular)
+    app.run()
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var canvasView: CanvasView!
