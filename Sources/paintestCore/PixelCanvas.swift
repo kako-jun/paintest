@@ -24,6 +24,12 @@ final class PixelCanvas {
     }
 
     private static func makeBitmap(width: Int, height: Int) -> NSBitmapImageRep {
+        // `.alphaNonpremultiplied` must be declared explicitly: without it,
+        // AppKit's PNG encoder assumes the raw bytes we write are
+        // premultiplied alpha and un-premultiplies them (dividing each
+        // channel by alpha/255) while writing straight-alpha PNG data. That
+        // silently drifts every non-opaque, non-black/white color and
+        // zeroes RGB entirely when alpha is 0.
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: width,
@@ -33,6 +39,7 @@ final class PixelCanvas {
             hasAlpha: true,
             isPlanar: false,
             colorSpaceName: .deviceRGB,
+            bitmapFormat: [.alphaNonpremultiplied],
             bytesPerRow: 0,
             bitsPerPixel: 0
         ) else {
@@ -139,17 +146,57 @@ final class PixelCanvas {
 
     /// Loads a PNG into a fresh pixel-exact canvas.
     ///
-    /// Pixels are copied one at a time via `colorAt(x:y:)`, which is
-    /// format-agnostic (works regardless of the source's bit depth, color
-    /// space, or palette) and — unlike drawing through a `CGContext` — has no
-    /// ambiguity about which edge row 0 corresponds to. This keeps the
-    /// save/load round trip byte-exact without any flip bookkeeping.
+    /// Pixels are copied byte-for-byte straight out of the decoded
+    /// `NSBitmapImageRep`'s buffer whenever its layout is the common 8-bit,
+    /// non-planar RGB(A) case (which is what our own `pngData()` always
+    /// produces). This avoids `colorAt(x:y:)`, which returns an `NSColor` in
+    /// the *source* rep's own color space (`calibratedRGB` after a PNG
+    /// round trip) — routing that through `setPixel`'s `.deviceRGB`
+    /// conversion is a second, unnecessary color-space conversion that
+    /// drifts channel values on top of the byte-copy above.
     static func load(from data: Data) -> PixelCanvas? {
         guard let sourceRep = NSBitmapImageRep(data: data) else { return nil }
         let width = sourceRep.pixelsWide
         let height = sourceRep.pixelsHigh
         let canvas = PixelCanvas(bitmap: makeBitmap(width: width, height: height), width: width, height: height)
 
+        if sourceRep.bitsPerSample == 8, !sourceRep.isPlanar,
+           let sourceData = sourceRep.bitmapData, let destData = canvas.bitmap.bitmapData {
+            let sourceBpp = sourceRep.bitsPerPixel / 8
+            let sourceBytesPerRow = sourceRep.bytesPerRow
+            let destBpp = canvas.bitmap.bitsPerPixel / 8
+            let destBytesPerRow = canvas.bitmap.bytesPerRow
+            let sourceHasAlpha = sourceRep.samplesPerPixel >= 4
+            // PNG itself only stores straight alpha, but be defensive about
+            // any decoder that hands back a premultiplied buffer anyway.
+            let isPremultiplied = sourceHasAlpha && !sourceRep.bitmapFormat.contains(.alphaNonpremultiplied)
+
+            for y in 0..<height {
+                let srcRowStart = y * sourceBytesPerRow
+                let dstRowStart = y * destBytesPerRow
+                for x in 0..<width {
+                    let srcOffset = srcRowStart + x * sourceBpp
+                    let dstOffset = dstRowStart + x * destBpp
+                    var r = sourceData[srcOffset]
+                    var g = sourceData[srcOffset + 1]
+                    var b = sourceData[srcOffset + 2]
+                    let a: UInt8 = sourceHasAlpha ? sourceData[srcOffset + 3] : 255
+                    if isPremultiplied, a > 0, a < 255 {
+                        r = UInt8(max(0, min(255, (Double(r) * 255.0 / Double(a)).rounded())))
+                        g = UInt8(max(0, min(255, (Double(g) * 255.0 / Double(a)).rounded())))
+                        b = UInt8(max(0, min(255, (Double(b) * 255.0 / Double(a)).rounded())))
+                    }
+                    destData[dstOffset] = r
+                    destData[dstOffset + 1] = g
+                    destData[dstOffset + 2] = b
+                    destData[dstOffset + 3] = a
+                }
+            }
+            return canvas
+        }
+
+        // Fallback for layouts we don't special-case (16-bit samples,
+        // planar, indexed, etc. — not something our own writer produces).
         for y in 0..<height {
             for x in 0..<width {
                 let color = sourceRep.colorAt(x: x, y: y) ?? .white

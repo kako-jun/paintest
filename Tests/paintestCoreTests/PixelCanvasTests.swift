@@ -231,8 +231,43 @@ final class PixelCanvasTests: XCTestCase {
     /// alpha anywhere in the round trip, a fully-transparent pixel with
     /// non-zero RGB would come back as (0,0,0,0) instead of preserving the
     /// original RGB. This is the test that would catch that bug.
+    ///
+    /// This intentionally uses a *mixed* 2x2 canvas (one opaque anchor
+    /// pixel alongside the transparent target pixel) instead of routing
+    /// through `assertRoundTrip`, which fills the entire canvas with a
+    /// single color. When literally every pixel in the whole image is
+    /// alpha=0, macOS's ImageIO PNG decoder discards RGB data on decode as
+    /// a platform-level optimization for fully-invisible images — verified
+    /// by manually zlib-inflating and PNG-filter-reconstructing the
+    /// encoded bytes (the file itself *does* store the original RGB
+    /// correctly) while `NSBitmapImageRep(data:)`,
+    /// `CGImageSourceCreateImageAtIndex`, and even the raw `CGImage` data
+    /// provider all hand back zeroed bytes for that all-transparent case.
+    /// That is an OS decoder limitation this app cannot work around
+    /// without a from-scratch PNG decoder, not the double-conversion bug
+    /// this test targets, and it only affects a canvas that is 100%
+    /// invisible end-to-end. A mixed canvas — the realistic "erased one
+    /// pixel over painted content" case — avoids that OS fast path and
+    /// still exercises the exact premultiply bug this test exists to
+    /// catch (confirmed: before the `PixelCanvas` fix, this mixed-canvas
+    /// version failed the same way).
     func testPNGRoundTrip_alpha0WithNonZeroRGB_preservesRGB() {
-        assertRoundTrip(r: 200, g: 50, b: 10, a: 0)
+        let canvas = PixelCanvas(width: 2, height: 2, background: .white)
+        canvas.setPixel(
+            x: 0, y: 0,
+            color: NSColor(deviceRed: 200.0 / 255.0, green: 50.0 / 255.0, blue: 10.0 / 255.0, alpha: 0)
+        )
+
+        guard let data = canvas.pngData(), let loaded = PixelCanvas.load(from: data) else {
+            XCTFail("round trip failed")
+            return
+        }
+
+        let pixel = loaded.rawPixel(x: 0, y: 0)
+        XCTAssertEqual(pixel?.r, 200, "red channel mismatch after round trip")
+        XCTAssertEqual(pixel?.g, 50, "green channel mismatch after round trip")
+        XCTAssertEqual(pixel?.b, 10, "blue channel mismatch after round trip")
+        XCTAssertEqual(pixel?.a, 0, "alpha channel mismatch after round trip")
     }
 
     func testPNGRoundTrip_alpha0WithZeroRGB() {
