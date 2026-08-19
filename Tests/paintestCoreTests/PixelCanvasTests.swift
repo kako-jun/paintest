@@ -331,4 +331,83 @@ final class PixelCanvasTests: XCTestCase {
     func testLoad_emptyData_returnsNil() {
         XCTAssertNil(PixelCanvas.load(from: Data()))
     }
+
+    // MARK: - load(from:) grayscale PNG (regression: fast path must reject
+    // non-RGB(A) sample layouts, not just non-8-bit/non-planar ones)
+
+    /// Builds a single-channel (no alpha), 8-bit grayscale PNG — the layout
+    /// that used to slip into `load(from:)`'s fast RGB(A) byte-copy path
+    /// because that path only checked `bitsPerSample == 8` and `!isPlanar`,
+    /// not `samplesPerPixel`. With a 1-byte-per-pixel source stride, reading
+    /// `r`/`g`/`b` at `srcOffset`/`+1`/`+2` pulled in neighboring pixels'
+    /// gray values as the G/B channels instead of replicating the single
+    /// gray sample across R/G/B.
+    private func makeGrayscalePNGData(width: Int, height: Int, gray: UInt8) -> Data? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 1,
+            hasAlpha: false,
+            isPlanar: false,
+            colorSpaceName: .deviceWhite,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let data = rep.bitmapData else { return nil }
+
+        let bytesPerRow = rep.bytesPerRow
+        for y in 0..<height {
+            for x in 0..<width {
+                data[y * bytesPerRow + x] = gray
+            }
+        }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    func testLoad_grayscalePNG_everyPixelIsUniformGrayWithNoChannelBleed() {
+        // A non-uniform gray value (not 0 or 255) makes any bleed from a
+        // neighboring pixel's byte into G/B visible, since a real bug would
+        // otherwise coincidentally still read 0/255 for an all-black or
+        // all-white image.
+        //
+        // This intentionally does not assert the loaded byte equals the
+        // literal 137 written into the source bitmap: the corrected code
+        // path routes grayscale through `colorAt(x:y:)` and a `.deviceRGB`
+        // color-space conversion (see `load(from:)`'s doc comment), which
+        // is free to apply gamma/profile adjustment to the gray value. What
+        // matters for this regression — that the fast RGB(A) byte-copy path
+        // no longer misreads a 1-byte-per-pixel grayscale buffer as 3/4
+        // bytes per pixel — is that every pixel decodes to the exact same
+        // r==g==b gray, with no per-position drift from reading a
+        // neighbor's byte as G or B.
+        let gray: UInt8 = 137
+        guard let data = makeGrayscalePNGData(width: 4, height: 4, gray: gray) else {
+            XCTFail("failed to build grayscale PNG fixture")
+            return
+        }
+        guard let loaded = PixelCanvas.load(from: data) else {
+            XCTFail("load(from:) returned nil for grayscale PNG")
+            return
+        }
+        XCTAssertEqual(loaded.width, 4)
+        XCTAssertEqual(loaded.height, 4)
+        guard let anchor = loaded.rawPixel(x: 0, y: 0) else {
+            XCTFail("expected pixel (0,0) to be readable")
+            return
+        }
+        XCTAssertEqual(anchor.r, anchor.g, "pixel (0,0) should be a neutral gray: r should equal g")
+        XCTAssertEqual(anchor.g, anchor.b, "pixel (0,0) should be a neutral gray: g should equal b")
+        XCTAssertEqual(anchor.a, 255, "pixel (0,0) alpha should be fully opaque")
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let pixel = loaded.rawPixel(x: x, y: y)
+                XCTAssertEqual(pixel?.r, anchor.r, "pixel (\(x),\(y)) red channel should match the uniform gray, not bleed from a neighbor")
+                XCTAssertEqual(pixel?.g, anchor.g, "pixel (\(x),\(y)) green channel should match the uniform gray, not bleed from a neighbor")
+                XCTAssertEqual(pixel?.b, anchor.b, "pixel (\(x),\(y)) blue channel should match the uniform gray, not bleed from a neighbor")
+                XCTAssertEqual(pixel?.a, 255, "pixel (\(x),\(y)) alpha should be fully opaque")
+            }
+        }
+    }
 }
