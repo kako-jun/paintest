@@ -20,7 +20,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var canvasView: CanvasView!
     private var scrollView: NSScrollView!
-    private var zoomLabelItem: NSToolbarItem!
+    // The toolbar's zoom-scale label, stored directly as its concrete type
+    // at creation time (see `zoomLabel` case below) rather than re-derived
+    // later by digging into the owning `NSToolbarItem.view`'s subviews.
+    // `NewCanvasDialog.promptForSize` follows the same "keep the direct
+    // reference from creation, don't search for it later" approach for its
+    // accessory view's fields.
+    private var zoomLabelField: NSTextField!
 
     private static let defaultCanvasSize = 64
 
@@ -30,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let initialCanvas = PixelCanvas(width: Self.defaultCanvasSize, height: Self.defaultCanvasSize, background: .white)
         canvasView = CanvasView(canvas: initialCanvas)
         canvasView.onZoomChanged = { [weak self] scale in
-            self?.zoomLabelItem?.view?.subviews.compactMap { $0 as? NSTextField }.first?.stringValue = "\(scale)x"
+            self?.zoomLabelField?.stringValue = "\(scale)x"
         }
 
         scrollView = NSScrollView()
@@ -195,7 +201,7 @@ extension AppDelegate: NSToolbarDelegate {
             field.frame = NSRect(x: 0, y: 0, width: 40, height: 20)
             item.view = field
             item.label = "ズーム"
-            zoomLabelItem = item
+            zoomLabelField = field
             return item
         default:
             return nil

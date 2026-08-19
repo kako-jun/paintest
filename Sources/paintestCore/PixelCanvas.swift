@@ -51,6 +51,12 @@ final class PixelCanvas {
     // MARK: - Pixel access
 
     private func components(of color: NSColor) -> (UInt8, UInt8, UInt8, UInt8) {
+        // Falling back to `color` itself when the `.deviceRGB` conversion
+        // fails only works because every caller today passes a color we
+        // built ourselves (already RGB-based). A color from a non-RGB space
+        // (e.g. a pattern color from a color picker) would have no
+        // `redComponent`/`greenComponent`/etc. and this fallback would be
+        // wrong; revisit if `NSColor` values start flowing in from UI.
         let rgba = color.usingColorSpace(.deviceRGB) ?? color
         let r = UInt8(max(0, min(255, (rgba.redComponent * 255).rounded())))
         let g = UInt8(max(0, min(255, (rgba.greenComponent * 255).rounded())))
@@ -148,10 +154,15 @@ final class PixelCanvas {
     ///
     /// Pixels are copied byte-for-byte straight out of the decoded
     /// `NSBitmapImageRep`'s buffer whenever its layout is the common 8-bit,
-    /// non-planar RGB(A) case (which is what our own `pngData()` always
-    /// produces). This avoids `colorAt(x:y:)`, which returns an `NSColor` in
-    /// the *source* rep's own color space (`calibratedRGB` after a PNG
-    /// round trip) — routing that through `setPixel`'s `.deviceRGB`
+    /// non-planar, 3- or 4-samples-per-pixel RGB(A) case (which is what our
+    /// own `pngData()` always produces). Grayscale PNGs (1 or 2 samples per
+    /// pixel) are deliberately excluded from this fast path — their
+    /// `bitsPerPixel / 8` stride is 1 or 2 bytes, not 3 or 4, so reading
+    /// `r`/`g`/`b` at `srcOffset`/`+1`/`+2` would read into neighboring
+    /// pixels (and past the end of the last row) and fall through to the
+    /// slow path below instead. This avoids `colorAt(x:y:)`, which returns
+    /// an `NSColor` in the *source* rep's own color space (`calibratedRGB`
+    /// after a PNG round trip) — routing that through `setPixel`'s `.deviceRGB`
     /// conversion is a second, unnecessary color-space conversion that
     /// drifts channel values on top of the byte-copy above.
     static func load(from data: Data) -> PixelCanvas? {
@@ -161,11 +172,16 @@ final class PixelCanvas {
         let canvas = PixelCanvas(bitmap: makeBitmap(width: width, height: height), width: width, height: height)
 
         if sourceRep.bitsPerSample == 8, !sourceRep.isPlanar,
+           sourceRep.samplesPerPixel == 3 || sourceRep.samplesPerPixel == 4,
            let sourceData = sourceRep.bitmapData, let destData = canvas.bitmap.bitmapData {
             let sourceBpp = sourceRep.bitsPerPixel / 8
             let sourceBytesPerRow = sourceRep.bytesPerRow
             let destBpp = canvas.bitmap.bitsPerPixel / 8
             let destBytesPerRow = canvas.bitmap.bytesPerRow
+            // `samplesPerPixel >= 4` is equivalent to `== 4` here (grayscale
+            // and grayscale+alpha are excluded above by the RGB/RGBA gate,
+            // so the only two layouts that reach this point are 3-channel
+            // RGB and 4-channel RGBA).
             let sourceHasAlpha = sourceRep.samplesPerPixel >= 4
             // PNG itself only stores straight alpha, but be defensive about
             // any decoder that hands back a premultiplied buffer anyway.
