@@ -42,6 +42,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let colorIndicatorWidth: CGFloat = 48
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Classic Paint's chrome (Windows Classic silver/gray) is always a
+        // light theme. Without this, macOS Dark Mode recolors the window
+        // frame/controls dark and clashes with the reference screenshots'
+        // fixed light impression (issue #2 follow-up).
+        NSApp.appearance = NSAppearance(named: .aqua)
+
         buildMainMenu()
 
         let initialCanvas = PixelCanvas(width: Self.defaultCanvasSize, height: Self.defaultCanvasSize, background: .white)
@@ -64,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "untitled - paintest"
+        window.appearance = NSAppearance(named: .aqua)
         window.center()
         window.contentView = makeRootView()
         window.minSize = NSSize(width: 420, height: 320)
