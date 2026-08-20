@@ -46,4 +46,15 @@ final class ToolboxViewTests: XCTestCase {
             XCTAssertNil(button.action, "tool buttons are visual placeholders; wiring is out of scope")
         }
     }
+
+    // Not independently unit-tested here: `Self.tools` is a private static
+    // constant, so exercising `pencilIndex`'s `?? 0` fallback or
+    // `buildGrid()`'s odd-count trailing row would require refactoring
+    // ToolboxView to accept an injectable tool list, which is out of scope
+    // for this fix (see review notes on ToolboxView.swift). Both fixes were
+    // manually verified with scratch edits (reverted before commit):
+    // temporarily changing the "鉛筆" label confirmed the fallback selects
+    // index 0 instead of crashing, and temporarily appending a 17th tool
+    // (making the count odd) confirmed all 17 buttons render, including the
+    // trailing unpaired one in its own row.
 }

@@ -35,7 +35,10 @@ final class ToolboxView: NSView {
         Tool(symbol: "capsule", label: "角丸四角形")
     ]
 
-    private static let pencilIndex = tools.firstIndex { $0.label == "鉛筆" }!
+    // `?? 0` guards against a future label rename/removal for "鉛筆": if the
+    // lookup ever fails, fall back to the first button instead of crashing
+    // the app at launch.
+    private static let pencilIndex = tools.firstIndex { $0.label == "鉛筆" } ?? 0
     static let buttonSide: CGFloat = 30
 
     init() {
@@ -60,6 +63,14 @@ final class ToolboxView: NSView {
                 grid.addRow(with: rowButtons)
                 rowButtons = []
             }
+        }
+        // `tools` currently has an even count (16), so this never fires today.
+        // If a future tool addition/removal makes it odd, the leftover button
+        // would otherwise be silently dropped instead of rendered. NSGridView
+        // accepts fewer views than there are columns and pads the remaining
+        // cell(s) as empty, so this is safe to call unconditionally.
+        if !rowButtons.isEmpty {
+            grid.addRow(with: rowButtons)
         }
 
         for column in 0..<2 {
