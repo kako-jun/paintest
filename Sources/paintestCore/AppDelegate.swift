@@ -20,15 +20,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var canvasView: CanvasView!
     private var scrollView: NSScrollView!
-    // The toolbar's zoom-scale label, stored directly as its concrete type
-    // at creation time (see `zoomLabel` case below) rather than re-derived
-    // later by digging into the owning `NSToolbarItem.view`'s subviews.
-    // `NewCanvasDialog.promptForSize` follows the same "keep the direct
-    // reference from creation, don't search for it later" approach for its
-    // accessory view's fields.
+    private var toolboxView: ToolboxView!
+    private var colorPaletteView: ColorPaletteView!
+    private var currentColorIndicator: CurrentColorIndicatorView!
+    // The status bar's zoom readout, kept as a direct reference from
+    // creation time rather than re-derived later by digging through the
+    // view hierarchy. `NewCanvasDialog.promptForSize` follows the same
+    // "keep the direct reference, don't search for it later" approach for
+    // its accessory view's fields.
     private var zoomLabelField: NSTextField!
 
     private static let defaultCanvasSize = 64
+
+    // Classic Windows chrome gray (192, 192, 192) — the background behind
+    // the toolbox / palette / status bar, distinct from the white canvas.
+    private static let chromeColor = NSColor(calibratedWhite: 0.753, alpha: 1)
+
+    private static let toolboxWidth: CGFloat = 70
+    private static let colorBarHeight: CGFloat = 44
+    private static let statusBarHeight: CGFloat = 22
+    private static let colorIndicatorWidth: CGFloat = 48
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
@@ -52,11 +63,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "paintest"
+        window.title = "untitled - paintest"
         window.center()
-        window.contentView = scrollView
-        window.toolbarStyle = .unified
-        window.toolbar = makeToolbar()
+        window.contentView = makeRootView()
+        window.minSize = NSSize(width: 420, height: 320)
         window.makeKeyAndOrderFront(nil)
 
         NSApp.activate(ignoringOtherApps: true)
@@ -64,6 +74,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    // MARK: - Root layout (issue #2: classic Paint's toolbox + canvas +
+    // color palette + status bar impression, replacing #1's NSToolbar).
+
+    private func makeRootView() -> NSView {
+        let root = NSView()
+        root.wantsLayer = true
+        root.layer?.backgroundColor = Self.chromeColor.cgColor
+
+        toolboxView = ToolboxView()
+        toolboxView.translatesAutoresizingMaskIntoConstraints = false
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let colorBar = makeColorBar()
+        colorBar.translatesAutoresizingMaskIntoConstraints = false
+
+        let statusBar = makeStatusBar()
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
+
+        root.addSubview(toolboxView)
+        root.addSubview(scrollView)
+        root.addSubview(colorBar)
+        root.addSubview(statusBar)
+
+        NSLayoutConstraint.activate([
+            toolboxView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolboxView.topAnchor.constraint(equalTo: root.topAnchor),
+            toolboxView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
+            toolboxView.widthAnchor.constraint(equalToConstant: Self.toolboxWidth),
+
+            scrollView.leadingAnchor.constraint(equalTo: toolboxView.trailingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: root.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
+
+            colorBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            colorBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            colorBar.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            colorBar.heightAnchor.constraint(equalToConstant: Self.colorBarHeight),
+
+            statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            statusBar.heightAnchor.constraint(equalToConstant: Self.statusBarHeight)
+        ])
+
+        return root
+    }
+
+    private func makeColorBar() -> NSView {
+        let bar = NSView()
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = Self.chromeColor.cgColor
+
+        currentColorIndicator = CurrentColorIndicatorView()
+        currentColorIndicator.translatesAutoresizingMaskIntoConstraints = false
+
+        colorPaletteView = ColorPaletteView()
+        colorPaletteView.translatesAutoresizingMaskIntoConstraints = false
+
+        bar.addSubview(currentColorIndicator)
+        bar.addSubview(colorPaletteView)
+
+        NSLayoutConstraint.activate([
+            currentColorIndicator.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            currentColorIndicator.topAnchor.constraint(equalTo: bar.topAnchor),
+            currentColorIndicator.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
+            currentColorIndicator.widthAnchor.constraint(equalToConstant: Self.colorIndicatorWidth),
+
+            colorPaletteView.leadingAnchor.constraint(equalTo: currentColorIndicator.trailingAnchor),
+            colorPaletteView.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            colorPaletteView.topAnchor.constraint(equalTo: bar.topAnchor),
+            colorPaletteView.bottomAnchor.constraint(equalTo: bar.bottomAnchor)
+        ])
+
+        return bar
+    }
+
+    private func makeStatusBar() -> NSView {
+        let bar = NSView()
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = Self.chromeColor.cgColor
+
+        let hintLabel = NSTextField(labelWithString: "作業を始めるには、[ヘルプ] メニューをクリックしてください。")
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let zoomField = NSTextField(labelWithString: "\(canvasView.zoomScale)x")
+        zoomField.font = .systemFont(ofSize: 11)
+        zoomField.alignment = .right
+        zoomField.translatesAutoresizingMaskIntoConstraints = false
+        zoomLabelField = zoomField
+
+        bar.addSubview(hintLabel)
+        bar.addSubview(zoomField)
+
+        NSLayoutConstraint.activate([
+            hintLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 6),
+            hintLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+
+            zoomField.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -6),
+            zoomField.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            zoomField.widthAnchor.constraint(equalToConstant: 48)
+        ])
+
+        return bar
     }
 
     // MARK: - Menu
@@ -77,41 +195,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
-        let fileMenuItem = NSMenuItem()
-        let fileMenu = NSMenu(title: "ファイル")
-        fileMenu.addItem(withTitle: "新規", action: #selector(newCanvas), keyEquivalent: "n")
-        fileMenu.addItem(withTitle: "開く…", action: #selector(openCanvas), keyEquivalent: "o")
-        fileMenu.addItem(withTitle: "保存…", action: #selector(saveCanvas), keyEquivalent: "s")
-        fileMenuItem.submenu = fileMenu
-        mainMenu.addItem(fileMenuItem)
+        mainMenu.addItem(makeMenuItem(title: "ファイル", items: [
+            ("新規", #selector(newCanvas), "n"),
+            ("開く…", #selector(openCanvas), "o"),
+            ("保存…", #selector(saveCanvas), "s")
+        ]))
 
-        let viewMenuItem = NSMenuItem()
-        let viewMenu = NSMenu(title: "表示")
-        viewMenu.addItem(withTitle: "拡大", action: #selector(zoomIn), keyEquivalent: "+")
-        viewMenu.addItem(withTitle: "縮小", action: #selector(zoomOut), keyEquivalent: "-")
-        viewMenuItem.submenu = viewMenu
-        mainMenu.addItem(viewMenuItem)
+        // Edit / Image / Colors / Help: labels + a handful of decorative
+        // items to match the reference screenshots' impression. None of
+        // these are wired to real behavior (out of scope for #2).
+        mainMenu.addItem(makeMenuItem(title: "編集", placeholders: ["元に戻す", "切り取り", "コピー", "貼り付け", "選択の解除"]))
+
+        mainMenu.addItem(makeMenuItem(title: "表示", items: [
+            ("拡大", #selector(zoomIn), "+"),
+            ("縮小", #selector(zoomOut), "-")
+        ], placeholders: ["ツール バー", "カラー ボックス", "ステータス バー"]))
+
+        mainMenu.addItem(makeMenuItem(title: "イメージ", placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…"]))
+        mainMenu.addItem(makeMenuItem(title: "色", placeholders: ["色の編集…"]))
+        mainMenu.addItem(makeMenuItem(title: "ヘルプ", placeholders: ["ヘルプ トピック", "paintestのバージョン情報"]))
 
         NSApp.mainMenu = mainMenu
     }
 
-    // MARK: - Toolbar
-
-    private enum ToolbarItem {
-        static let newCanvas = NSToolbarItem.Identifier("newCanvas")
-        static let open = NSToolbarItem.Identifier("open")
-        static let save = NSToolbarItem.Identifier("save")
-        static let zoomIn = NSToolbarItem.Identifier("zoomIn")
-        static let zoomOut = NSToolbarItem.Identifier("zoomOut")
-        static let zoomLabel = NSToolbarItem.Identifier("zoomLabel")
-    }
-
-    private func makeToolbar() -> NSToolbar {
-        let toolbar = NSToolbar(identifier: "MainToolbar")
-        toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
-        toolbar.allowsUserCustomization = false
-        return toolbar
+    /// Builds a top-level menu item whose submenu mixes real, wired items
+    /// (`items`) with purely decorative ones (`placeholders`, `action: nil`)
+    /// — the latter exist only to make the menu bar look populated like
+    /// classic Paint's, per issue #2's "labels only" scope.
+    private func makeMenuItem(
+        title: String,
+        items: [(String, Selector, String)] = [],
+        placeholders: [String] = []
+    ) -> NSMenuItem {
+        let menuItem = NSMenuItem()
+        let menu = NSMenu(title: title)
+        for (label, action, keyEquivalent) in items {
+            menu.addItem(withTitle: label, action: action, keyEquivalent: keyEquivalent)
+        }
+        for label in placeholders {
+            menu.addItem(withTitle: label, action: nil, keyEquivalent: "")
+        }
+        menuItem.submenu = menu
+        return menuItem
     }
 
     @objc private func newCanvas() {
@@ -166,55 +291,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
         alert.messageText = message
         alert.runModal()
-    }
-}
-
-extension AppDelegate: NSToolbarDelegate {
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [ToolbarItem.newCanvas, ToolbarItem.open, ToolbarItem.save, .flexibleSpace, ToolbarItem.zoomOut, ToolbarItem.zoomLabel, ToolbarItem.zoomIn]
-    }
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
-    }
-
-    func toolbar(
-        _ toolbar: NSToolbar,
-        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-        willBeInsertedIntoToolbar flag: Bool
-    ) -> NSToolbarItem? {
-        switch itemIdentifier {
-        case ToolbarItem.newCanvas:
-            return makeButtonItem(id: itemIdentifier, label: "新規", symbol: "doc.badge.plus", action: #selector(newCanvas))
-        case ToolbarItem.open:
-            return makeButtonItem(id: itemIdentifier, label: "開く", symbol: "folder", action: #selector(openCanvas))
-        case ToolbarItem.save:
-            return makeButtonItem(id: itemIdentifier, label: "保存", symbol: "square.and.arrow.down", action: #selector(saveCanvas))
-        case ToolbarItem.zoomIn:
-            return makeButtonItem(id: itemIdentifier, label: "拡大", symbol: "plus.magnifyingglass", action: #selector(zoomIn))
-        case ToolbarItem.zoomOut:
-            return makeButtonItem(id: itemIdentifier, label: "縮小", symbol: "minus.magnifyingglass", action: #selector(zoomOut))
-        case ToolbarItem.zoomLabel:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let field = NSTextField(labelWithString: "\(canvasView.zoomScale)x")
-            field.alignment = .center
-            field.frame = NSRect(x: 0, y: 0, width: 40, height: 20)
-            item.view = field
-            item.label = "ズーム"
-            zoomLabelField = field
-            return item
-        default:
-            return nil
-        }
-    }
-
-    private func makeButtonItem(id: NSToolbarItem.Identifier, label: String, symbol: String, action: Selector) -> NSToolbarItem {
-        let item = NSToolbarItem(itemIdentifier: id)
-        item.label = label
-        item.paletteLabel = label
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        item.target = self
-        item.action = action
-        return item
     }
 }
