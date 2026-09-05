@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var toolboxView: ToolboxView!
     private var colorPaletteView: ColorPaletteView!
     private var currentColorIndicator: CurrentColorIndicatorView!
+    private var layerPanelView: LayerPanelView!
     // The status bar's zoom readout, kept as a direct reference from
     // creation time rather than re-derived later by digging through the
     // view hierarchy. `NewCanvasDialog.promptForSize` follows the same
@@ -40,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let colorBarHeight: CGFloat = 44
     private static let statusBarHeight: CGFloat = 22
     private static let colorIndicatorWidth: CGFloat = 48
+    private static let layerPanelWidth: CGFloat = 180
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Classic Paint's chrome (Windows Classic silver/gray) is always a
@@ -50,8 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         buildMainMenu()
 
-        let initialCanvas = PixelCanvas(width: Self.defaultCanvasSize, height: Self.defaultCanvasSize, background: .white)
-        canvasView = CanvasView(canvas: initialCanvas)
+        let initialLayerStack = LayerStack(width: Self.defaultCanvasSize, height: Self.defaultCanvasSize, background: .white)
+        canvasView = CanvasView(layerStack: initialLayerStack)
         canvasView.onZoomChanged = { [weak self] scale in
             self?.zoomLabelField?.stringValue = "\(scale)x"
         }
@@ -96,6 +98,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        // Provisional placement (issue #8): a fixed-width panel docked to
+        // the right of the canvas. Reproducing the full Photoshop layout is
+        // issue #7's scope, not this one.
+        layerPanelView = LayerPanelView(layerStack: canvasView.layerStack)
+        layerPanelView.onChange = { [weak self] in
+            self?.canvasView.needsDisplay = true
+        }
+        layerPanelView.translatesAutoresizingMaskIntoConstraints = false
+        layerPanelView.wantsLayer = true
+        layerPanelView.layer?.backgroundColor = Self.chromeColor.cgColor
+
         let colorBar = makeColorBar()
         colorBar.translatesAutoresizingMaskIntoConstraints = false
 
@@ -104,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         root.addSubview(toolboxView)
         root.addSubview(scrollView)
+        root.addSubview(layerPanelView)
         root.addSubview(colorBar)
         root.addSubview(statusBar)
 
@@ -114,9 +128,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             toolboxView.widthAnchor.constraint(equalToConstant: Self.toolboxWidth),
 
             scrollView.leadingAnchor.constraint(equalTo: toolboxView.trailingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: layerPanelView.leadingAnchor),
             scrollView.topAnchor.constraint(equalTo: root.topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
+
+            layerPanelView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            layerPanelView.topAnchor.constraint(equalTo: root.topAnchor),
+            layerPanelView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
+            layerPanelView.widthAnchor.constraint(equalToConstant: Self.layerPanelWidth),
 
             colorBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             colorBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -205,7 +224,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(makeMenuItem(title: "ファイル", items: [
             ("新規", #selector(newCanvas), "n"),
             ("開く…", #selector(openCanvas), "o"),
-            ("保存…", #selector(saveCanvas), "s")
+            ("保存…", #selector(saveCanvas), "s"),
+            ("名前を付けて保存（レイヤー保持）…", #selector(saveLayeredCanvas), "")
         ]))
 
         // Edit / Image / Colors / Help: labels + a handful of decorative
@@ -248,29 +268,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func newCanvas() {
         guard let size = NewCanvasDialog.promptForSize() else { return }
-        let canvas = PixelCanvas(width: size.width, height: size.height, background: .white)
-        canvasView.replaceCanvas(canvas)
+        let layerStack = LayerStack(width: size.width, height: size.height, background: .white)
+        canvasView.replaceLayerStack(layerStack)
+        layerPanelView.replaceLayerStack(layerStack)
     }
 
     @objc private func openCanvas() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png]
+        let paintestDocType = UTType(filenameExtension: "paintestdoc") ?? .data
+        panel.allowedContentTypes = [.png, paintestDocType]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        if url.pathExtension.lowercased() == "paintestdoc" {
+            guard let layerStack = PaintestDocument.read(from: url) else {
+                presentError("ドキュメントの読み込みに失敗しました。")
+                return
+            }
+            canvasView.replaceLayerStack(layerStack)
+            layerPanelView.replaceLayerStack(layerStack)
+            return
+        }
+
         do {
             let data = try Data(contentsOf: url)
             guard let canvas = PixelCanvas.load(from: data) else {
                 presentError("PNGの読み込みに失敗しました。")
                 return
             }
-            canvasView.replaceCanvas(canvas)
+            let layerStack = LayerStack(width: canvas.width, height: canvas.height, layers: [Layer(canvas: canvas, name: "レイヤー1")])
+            canvasView.replaceLayerStack(layerStack)
+            layerPanelView.replaceLayerStack(layerStack)
         } catch {
             presentError("ファイルの読み込みに失敗しました: \(error.localizedDescription)")
         }
     }
 
+    /// PNG export: flattens all layers into a single image, since PNG can't
+    /// hold layer structure. "名前を付けて保存（レイヤー保持）…" is the
+    /// counterpart that keeps layers intact.
     @objc private func saveCanvas() {
-        guard let data = canvasView.canvas.pngData() else {
+        guard let data = canvasView.layerStack.flattenedPNGData() else {
             presentError("PNGへの変換に失敗しました。")
             return
         }
@@ -282,6 +320,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try data.write(to: url)
         } catch {
             presentError("ファイルの保存に失敗しました: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func saveLayeredCanvas() {
+        let panel = NSSavePanel()
+        let paintestDocType = UTType(filenameExtension: "paintestdoc") ?? .data
+        panel.allowedContentTypes = [paintestDocType]
+        panel.nameFieldStringValue = "untitled.paintestdoc"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try PaintestDocument.write(canvasView.layerStack, to: url)
+        } catch {
+            presentError("ドキュメントの保存に失敗しました: \(error.localizedDescription)")
         }
     }
 
