@@ -296,9 +296,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ("タブを閉じる", #selector(closeActiveTab), "w")
         ]))
 
-        // Edit / Image / Colors / Help: labels + a handful of decorative
-        // items to match the reference screenshots' impression. None of
-        // these are wired to real behavior (out of scope for #2).
+        // Edit / Image / Layer / Select / Window / Help: labels + a handful
+        // of decorative items to match Photoshop's menu bar impression
+        // (issue #7). None of these are wired to real behavior — that's
+        // each feature's own issue — except View's zoom items, which carry
+        // over from #2.
         mainMenu.addItem(makeMenuItem(title: "編集", placeholders: ["元に戻す", "切り取り", "コピー", "貼り付け", "選択の解除"]))
 
         mainMenu.addItem(makeMenuItem(title: "表示", items: [
@@ -306,8 +308,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ("縮小", #selector(zoomOut), "-")
         ], placeholders: ["ツール バー", "カラー ボックス", "ステータス バー"]))
 
-        mainMenu.addItem(makeMenuItem(title: "イメージ", placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…"]))
-        mainMenu.addItem(makeMenuItem(title: "色", placeholders: ["色の編集…"]))
+        // "色" (issue #2's standalone Colors menu) is folded into "イメージ"
+        // here (issue #7): Photoshop has no top-level Colors menu, so its
+        // one placeholder item joins Image's placeholders instead of
+        // staying a separate top-level menu.
+        mainMenu.addItem(makeMenuItem(title: "イメージ", placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…", "色の編集…"]))
+        mainMenu.addItem(makeMenuItem(title: "レイヤー", placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
+        mainMenu.addItem(makeMenuItem(title: "選択範囲", placeholders: ["すべてを選択", "選択を解除", "選択範囲を反転"]))
+        mainMenu.addItem(makeMenuItem(title: "ウインドウ", placeholders: ["レイヤー", "プロパティ", "ヒストリー"]))
         mainMenu.addItem(makeMenuItem(title: "ヘルプ", placeholders: ["ヘルプ トピック", "paintestのバージョン情報"]))
 
         NSApp.mainMenu = mainMenu
