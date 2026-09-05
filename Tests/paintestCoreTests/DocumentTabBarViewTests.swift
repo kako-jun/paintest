@@ -30,9 +30,19 @@ final class DocumentTabBarViewTests: XCTestCase {
     }
 
     /// The tab strip's rows, top to bottom, in document order.
+    ///
+    /// `rowsStack` (the `documentView`) now also carries the "+" new-document
+    /// button as its last arranged subview, wrapped in a plain `NSView`
+    /// container that gives it a left inset (kako-jun review on #15: same
+    /// width as a tab row, directly below the last one, with its own left
+    /// margin). That container isn't a row, but this file can't name the
+    /// private `DocumentTabRowView` type to filter for it directly — instead
+    /// it filters by `isAccessibilityElement()`, which `DocumentTabRowView`
+    /// overrides to `true` (see issue #15 review round 2) while a plain
+    /// `NSView` container defaults to `false`.
     private func rows(in tabBar: DocumentTabBarView) -> [NSView] {
         guard let scrollView = findScrollView(in: tabBar), let documentView = scrollView.documentView else { return [] }
-        return documentView.subviews
+        return documentView.subviews.filter { $0.isAccessibilityElement() }
     }
 
     private func findButtons(titled title: String, in view: NSView) -> [NSButton] {
