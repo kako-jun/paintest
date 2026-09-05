@@ -8,7 +8,7 @@ import AppKit
 /// extra coordinate flipping anywhere in the drawing or hit-testing code.
 final class CanvasView: NSView {
     private(set) var layerStack: LayerStack
-    private(set) var zoomScale: Int = 4 {
+    private(set) var zoomScale: Int = CanvasView.defaultZoomScale {
         didSet { onZoomChanged?(zoomScale) }
     }
 
@@ -23,6 +23,7 @@ final class CanvasView: NSView {
     var onLayerContentChanged: (() -> Void)?
 
     static let zoomLevels = [1, 2, 4, 8, 16, 32]
+    static let defaultZoomScale = 4
     private var lastPixel: (x: Int, y: Int)?
 
     override var isFlipped: Bool { true }
@@ -67,6 +68,18 @@ final class CanvasView: NSView {
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
+    }
+
+    /// Directly sets the zoom level, bypassing the `zoomLevels` step
+    /// sequence `zoomIn()`/`zoomOut()` walk. Used by `AppDelegate` to
+    /// restore a document's own remembered zoom when switching tabs, since
+    /// zoom is per-`Document` state rather than shared across the single
+    /// `CanvasView` instance (issue #15 follow-up).
+    func setZoomScale(_ newZoomScale: Int) {
+        guard CanvasView.zoomLevels.contains(newZoomScale) else { return }
+        zoomScale = newZoomScale
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
     }
 
     // MARK: - Drawing
