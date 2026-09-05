@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let colorIndicatorWidth: CGFloat = 48
     // Width of the whole right column — レイヤー/プロパティ/ヒストリー stacked
     // together, not just `layerPanelView` on its own (issue #7 self-review
-    // must-4: this used to be named `layerPanelWidth` back when the layer
+    // should-4: this used to be named `layerPanelWidth` back when the layer
     // panel was the column's only occupant).
     private static let rightPanelWidth: CGFloat = 180
     private static let documentTabBarWidth: CGFloat = 140
@@ -77,9 +77,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // this, `layerPanelView`'s height is whatever's left after subtracting
     // `propertyPanelHeight` + `historyPanelHeight` from the group's total
     // height, which goes negative once the window shrinks enough — Auto
-    // Layout has no lower bound on it otherwise. 60pt is enough to keep the
-    // title label and button bar from overlapping even at the floor.
-    private static let layerPanelMinHeight: CGFloat = 60
+    // Layout has no lower bound on it otherwise.
+    //
+    // 110pt is derived from `LayerPanelView.buildLayout()`'s own internal
+    // required-priority constraint chain (issue #7 re-review): panelPadding
+    // (6, top) + titleLabel (bold 11pt, intrinsic height ≈14) + gap (4) +
+    // scrollView (flexible — can compress all the way to 0) + gap (4) +
+    // buttonBar (28, fixed) + gap (4) + opacityRow (a label + slider row,
+    // intrinsic height ≈12 + 2 + 20 = 34) + panelPadding (6, bottom) = 100pt
+    // minimum with the scroll view fully collapsed. 110pt keeps a small
+    // margin above that hard floor for font-rendering differences across
+    // environments. Below the true 100pt floor, `LayerPanelView`'s own
+    // internal required constraints would conflict with each other — a
+    // silent breakage that doesn't show up in build/test logs, only as a
+    // constraint-conflict warning and visible mis-layout at runtime. The
+    // previous 60pt was well under that floor.
+    private static let layerPanelMinHeight: CGFloat = 110
     // Thickness of the 1pt divider lines between レイヤー/プロパティ/ヒスト
     // リー (issue #7 self-review must-2).
     private static let panelDividerThickness: CGFloat = 1
@@ -151,17 +164,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Height is the sum of every fixed-height band stacked in the
         // center row, each of which is a `required`-priority constraint
         // that Auto Layout cannot shrink below (issue #7 self-review
-        // must-1): `optionBarView` (30) + `colorBar` (44) + `statusBar`
-        // (22) + `propertyPanelHeight` (140) + `historyPanelHeight` (140) +
-        // `layerPanelMinHeight` (60) = 436. Below that, `layerPanelView`'s
-        // height (`rightPanelGroup`'s total minus the two fixed panels)
-        // would have to go negative to satisfy every constraint at once,
-        // which Auto Layout cannot do — it would instead break one of the
-        // "required" constraints and log a constraint-conflict warning
-        // while visibly mis-laying-out the right column. The previous 320
-        // predated `layerPanelMinHeight` and left the center row 56pt short
-        // of that floor.
-        window.minSize = NSSize(width: 560, height: 436)
+        // must-1, recomputed in re-review): `optionBarView` (30) +
+        // `colorBar` (44) + `statusBar` (22) + `propertyPanelHeight` (140) +
+        // `historyPanelHeight` (140) + `panelDividerThickness` × 2 (2, the
+        // two 1pt divider lines between レイヤー/プロパティ/ヒストリー) +
+        // `layerPanelMinHeight` (110) = 488. Below that, `layerPanelView`'s
+        // height (`rightPanelGroup`'s total minus the two fixed panels and
+        // the two dividers) would have to go negative to satisfy every
+        // constraint at once, which Auto Layout cannot do — it would
+        // instead break one of the "required" constraints and log a
+        // constraint-conflict warning while visibly mis-laying-out the
+        // right column. The previous 436 omitted the two divider lines'
+        // 2pt and used the too-small 60pt `layerPanelMinHeight`.
+        window.minSize = NSSize(width: 560, height: 488)
         window.makeKeyAndOrderFront(nil)
 
         NSApp.activate(ignoringOtherApps: true)
