@@ -275,8 +275,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openCanvas() {
         let panel = NSOpenPanel()
-        let paintestDocType = UTType(filenameExtension: "paintestdoc") ?? .data
-        panel.allowedContentTypes = [.png, paintestDocType]
+        // `.paintestdoc` is written out as a plain directory (a package),
+        // and this project has no `.app` bundle/Info.plist to declare it as
+        // a proper package UTI (SwiftPM executable target only — see issue
+        // #8 review). Without that declaration, a dynamic
+        // `UTType(filenameExtension:)` doesn't reliably let the panel treat
+        // a `.paintestdoc` as a selectable "file": `allowedContentTypes`
+        // filtering and directory selection don't mix well. So instead of
+        // fighting that, leave `allowedContentTypes` unset (allow any file)
+        // and just allow choosing directories too, so both a `.png` file and
+        // a `.paintestdoc` directory can be picked here. The existing
+        // extension-based branch below still decides how to read whatever
+        // was chosen.
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
