@@ -211,6 +211,16 @@ final class ColorPaletteView: NSView {
             display += Array(repeating: NSColor.clear, count: columnCount - display.count)
         }
 
+        // `NSGridView.removeRow(at:)` detaches the row/cells from the grid's
+        // *layout*, but does not remove the cells' `contentView`s from the
+        // grid's `subviews` — those orphaned `ColorSwatchView`s would
+        // otherwise silently accumulate, 14 at a time, on every color pick
+        // (issue #5 self-review), since this method is called once per
+        // `AppDelegate.setColor(_:secondary:)`.
+        let oldRow = grid.row(at: Self.recentRowIndex)
+        for index in 0..<oldRow.numberOfCells {
+            oldRow.cell(at: index).contentView?.removeFromSuperview()
+        }
         grid.removeRow(at: Self.recentRowIndex)
         grid.insertRow(at: Self.recentRowIndex, with: display.map(makeSwatch))
     }
