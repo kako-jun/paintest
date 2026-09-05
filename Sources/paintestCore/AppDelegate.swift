@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var colorPaletteView: ColorPaletteView!
     private var currentColorIndicator: CurrentColorIndicatorView!
     private var layerPanelView: LayerPanelView!
+    private var optionBarView: OptionBarView!
     private var documentTabBarView: DocumentTabBarView!
     private var documentManager: DocumentManager!
     // The document currently shown by `canvasView`, tracked separately from
@@ -56,6 +57,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let colorIndicatorWidth: CGFloat = 48
     private static let layerPanelWidth: CGFloat = 180
     private static let documentTabBarWidth: CGFloat = 140
+    // Fixed heights for the right column's two frame-only panels (issue
+    // #7): レイヤー stays the flexible one, growing/shrinking with the
+    // window; プロパティ/ヒストリー are pinned to these heights as a plain
+    // frame until their own issues give them real content.
+    private static let propertyPanelHeight: CGFloat = 140
+    private static let historyPanelHeight: CGFloat = 140
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Classic Paint's chrome (Windows Classic silver/gray) is always a
@@ -138,11 +145,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         root.wantsLayer = true
         root.layer?.backgroundColor = Self.chromeColor.cgColor
 
-        // Provisional placement (issue #15): the document tab strip is the
-        // leftmost element, further left than the toolbox — Edge's vertical
-        // tabs, not Photoshop's horizontal tabs along the top. Reconciling
-        // this with the full Photoshop layout is issue #7's scope, not this
-        // one.
+        // Photoshop's options bar (issue #7): spans the full window width,
+        // above everything else — the document tab strip, toolbox, canvas,
+        // and right panel group all sit below it. Empty frame for now; each
+        // tool's own issue populates it once tool-switching exists.
+        optionBarView = OptionBarView()
+        optionBarView.translatesAutoresizingMaskIntoConstraints = false
+        optionBarView.layer?.backgroundColor = Self.chromeColor.cgColor
+
+        // The document tab strip is the leftmost element of the main
+        // content row, further left than the toolbox — Edge's vertical
+        // tabs, not Photoshop's horizontal tabs along the top (issue #15,
+        // kept as-is per issue #7's explicit constraint not to change it).
         documentTabBarView = DocumentTabBarView(documentManager: documentManager)
         documentTabBarView.onSelect = { [weak self] in
             self?.activateActiveDocument()
@@ -162,16 +176,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Provisional placement (issue #8): a fixed-width panel docked to
-        // the right of the canvas. Reproducing the full Photoshop layout is
-        // issue #7's scope, not this one.
-        layerPanelView = LayerPanelView(layerStack: canvasView.layerStack)
-        layerPanelView.onChange = { [weak self] in
-            self?.canvasView.needsDisplay = true
-        }
-        layerPanelView.translatesAutoresizingMaskIntoConstraints = false
-        layerPanelView.wantsLayer = true
-        layerPanelView.layer?.backgroundColor = Self.chromeColor.cgColor
+        // Right panel group (issue #7): レイヤー (existing, real
+        // functionality, flexible height) stacked above プロパティ /
+        // ヒストリー (frame-only placeholders, fixed height each), replacing
+        // #8's single-panel-fills-the-column layout.
+        let rightPanelGroup = makeRightPanelGroup()
+        rightPanelGroup.translatesAutoresizingMaskIntoConstraints = false
 
         let colorBar = makeColorBar()
         colorBar.translatesAutoresizingMaskIntoConstraints = false
@@ -179,33 +189,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusBar = makeStatusBar()
         statusBar.translatesAutoresizingMaskIntoConstraints = false
 
+        root.addSubview(optionBarView)
         root.addSubview(documentTabBarView)
         root.addSubview(toolboxView)
         root.addSubview(scrollView)
-        root.addSubview(layerPanelView)
+        root.addSubview(rightPanelGroup)
         root.addSubview(colorBar)
         root.addSubview(statusBar)
 
         NSLayoutConstraint.activate([
+            optionBarView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            optionBarView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            optionBarView.topAnchor.constraint(equalTo: root.topAnchor),
+            optionBarView.heightAnchor.constraint(equalToConstant: OptionBarView.height),
+
             documentTabBarView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            documentTabBarView.topAnchor.constraint(equalTo: root.topAnchor),
+            documentTabBarView.topAnchor.constraint(equalTo: optionBarView.bottomAnchor),
             documentTabBarView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
             documentTabBarView.widthAnchor.constraint(equalToConstant: Self.documentTabBarWidth),
 
             toolboxView.leadingAnchor.constraint(equalTo: documentTabBarView.trailingAnchor),
-            toolboxView.topAnchor.constraint(equalTo: root.topAnchor),
+            toolboxView.topAnchor.constraint(equalTo: optionBarView.bottomAnchor),
             toolboxView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
             toolboxView.widthAnchor.constraint(equalToConstant: Self.toolboxWidth),
 
             scrollView.leadingAnchor.constraint(equalTo: toolboxView.trailingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: layerPanelView.leadingAnchor),
-            scrollView.topAnchor.constraint(equalTo: root.topAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: rightPanelGroup.leadingAnchor),
+            scrollView.topAnchor.constraint(equalTo: optionBarView.bottomAnchor),
             scrollView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
 
-            layerPanelView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            layerPanelView.topAnchor.constraint(equalTo: root.topAnchor),
-            layerPanelView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
-            layerPanelView.widthAnchor.constraint(equalToConstant: Self.layerPanelWidth),
+            rightPanelGroup.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            rightPanelGroup.topAnchor.constraint(equalTo: optionBarView.bottomAnchor),
+            rightPanelGroup.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
+            rightPanelGroup.widthAnchor.constraint(equalToConstant: Self.layerPanelWidth),
 
             colorBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             colorBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -219,6 +235,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ])
 
         return root
+    }
+
+    /// Builds the right column's panel group: レイヤー (existing
+    /// `LayerPanelView`, untouched, flexible height) stacked above two
+    /// frame-only placeholders — プロパティ / ヒストリー — each pinned to a
+    /// fixed height (issue #7). Thin dividers between panels reuse
+    /// `chromeColor` at a darker shade so the three panels read as visually
+    /// distinct sections even though none of them draws its own border.
+    private func makeRightPanelGroup() -> NSView {
+        let group = NSView()
+        group.wantsLayer = true
+        group.layer?.backgroundColor = Self.chromeColor.cgColor
+
+        // Provisional placement carried over from issue #8: a fixed-width
+        // column docked to the right of the canvas. Reproducing the full
+        // Photoshop layout is issue #7's scope; `LayerPanelView` itself is
+        // untouched here.
+        layerPanelView = LayerPanelView(layerStack: canvasView.layerStack)
+        layerPanelView.onChange = { [weak self] in
+            self?.canvasView.needsDisplay = true
+        }
+        layerPanelView.translatesAutoresizingMaskIntoConstraints = false
+        layerPanelView.wantsLayer = true
+        layerPanelView.layer?.backgroundColor = Self.chromeColor.cgColor
+
+        let propertyPanelView = PlaceholderPanelView(title: "プロパティ")
+        propertyPanelView.translatesAutoresizingMaskIntoConstraints = false
+
+        let historyPanelView = PlaceholderPanelView(title: "ヒストリー")
+        historyPanelView.translatesAutoresizingMaskIntoConstraints = false
+
+        group.addSubview(layerPanelView)
+        group.addSubview(propertyPanelView)
+        group.addSubview(historyPanelView)
+
+        NSLayoutConstraint.activate([
+            layerPanelView.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            layerPanelView.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            layerPanelView.topAnchor.constraint(equalTo: group.topAnchor),
+            layerPanelView.bottomAnchor.constraint(equalTo: propertyPanelView.topAnchor),
+
+            propertyPanelView.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            propertyPanelView.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            propertyPanelView.bottomAnchor.constraint(equalTo: historyPanelView.topAnchor),
+            propertyPanelView.heightAnchor.constraint(equalToConstant: Self.propertyPanelHeight),
+
+            historyPanelView.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            historyPanelView.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            historyPanelView.bottomAnchor.constraint(equalTo: group.bottomAnchor),
+            historyPanelView.heightAnchor.constraint(equalToConstant: Self.historyPanelHeight)
+        ])
+
+        return group
     }
 
     private func makeColorBar() -> NSView {
