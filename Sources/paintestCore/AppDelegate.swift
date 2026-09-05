@@ -74,6 +74,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         canvasView.onLayerContentChanged = { [weak self] in
             self?.layerPanelView.reload()
+            // Keeps the tab strip's thumbnail in sync with in-progress
+            // edits, not just with tab switches/new documents (review S1 on
+            // #18): without this, a document's thumbnail only updated the
+            // next time some other action happened to call
+            // `documentTabBarView.reload()`.
+            self?.documentTabBarView.reload()
         }
 
         scrollView = NSScrollView()
