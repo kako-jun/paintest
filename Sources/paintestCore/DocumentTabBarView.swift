@@ -125,7 +125,11 @@ final class DocumentTabBarView: NSView {
         row.layer?.backgroundColor = isActive ? Self.selectedRowColor.cgColor : NSColor.clear.cgColor
         row.onSelectRow = { [weak self] in
             self?.documentManager.selectDocument(at: index)
-            self?.reload()
+            // Not calling `reload()` here: `onSelect` leads back to
+            // `AppDelegate.activateActiveDocument()`, which already calls
+            // `documentTabBarView.reload()` once the canvas/layer panel have
+            // been swapped over. Reloading here too would rebuild every row
+            // twice per click (review S2 on #18).
             self?.onSelect?()
         }
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -186,7 +190,10 @@ final class DocumentTabBarView: NSView {
     /// target document has unsaved edits.
     @objc private func closeTapped(_ sender: NSButton) {
         documentManager.closeDocument(at: sender.tag)
-        reload()
+        // Not calling `reload()` here for the same reason as
+        // `onSelectRow` above: `onClose` leads back to
+        // `AppDelegate.activateActiveDocument()`, which reloads the tab
+        // strip itself (review S2 on #18).
         onClose?()
     }
 }
