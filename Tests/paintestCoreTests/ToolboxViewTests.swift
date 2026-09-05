@@ -18,6 +18,22 @@ final class ToolboxViewTests: XCTestCase {
         return result
     }
 
+    private func findScrollView(in view: NSView) -> NSScrollView? {
+        for subview in view.subviews {
+            if let scrollView = subview as? NSScrollView { return scrollView }
+            if let found = findScrollView(in: subview) { return found }
+        }
+        return nil
+    }
+
+    private func findGridView(in view: NSView) -> NSGridView? {
+        for subview in view.subviews {
+            if let grid = subview as? NSGridView { return grid }
+            if let found = findGridView(in: subview) { return found }
+        }
+        return nil
+    }
+
     func testInit_doesNotCrash() {
         _ = makeView()
     }
@@ -45,6 +61,31 @@ final class ToolboxViewTests: XCTestCase {
             XCTAssertNil(button.target, "tool buttons are visual placeholders; wiring is out of scope")
             XCTAssertNil(button.action, "tool buttons are visual placeholders; wiring is out of scope")
         }
+    }
+
+    // MARK: - Single-column layout + scroll wrapping (issue #7)
+
+    func testToolboxIsWrappedInScrollView() {
+        let view = makeView()
+        XCTAssertNotNil(findScrollView(in: view), "the toolbox column should be wrapped in an NSScrollView")
+    }
+
+    func testScrollView_hasVerticalScrollerEnabled() {
+        let view = makeView()
+        guard let scrollView = findScrollView(in: view) else {
+            XCTFail("could not find the toolbox's scroll view")
+            return
+        }
+        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 16 buttons in one column run taller than the window")
+    }
+
+    func testGrid_hasSingleColumn() {
+        let view = makeView()
+        guard let grid = findGridView(in: view) else {
+            XCTFail("could not find the toolbox's grid view")
+            return
+        }
+        XCTAssertEqual(grid.numberOfColumns, 1, "the toolbox should be a single vertical column, matching Photoshop's layout")
     }
 
     // Not independently unit-tested here: `Self.tools` is a private static
