@@ -115,29 +115,40 @@ final class LayerPanelView: NSView {
         ])
     }
 
+    // A single row of small SF Symbols icon buttons (issue #22), matching
+    // `ToolboxView`'s established icon-button look (`.smallSquare` bezel,
+    // `NSImage(systemSymbolName:)`) instead of the previous two-row text
+    // button layout. `accessibilityDescription` on each symbol image keeps
+    // the original Japanese label available to VoiceOver even though the
+    // button itself now shows only an icon; `toolTip` mirrors it for sighted
+    // hover discovery, same as `ToolboxView`.
+    private static let buttonBarSide: CGFloat = 28
+
     private func makeButtonBar() -> NSView {
-        let addButton = NSButton(title: "追加", target: self, action: #selector(addLayerTapped))
-        let removeButton = NSButton(title: "削除", target: self, action: #selector(removeLayerTapped))
-        let duplicateButton = NSButton(title: "複製", target: self, action: #selector(duplicateLayerTapped))
-        let moveUpButton = NSButton(title: "上へ", target: self, action: #selector(moveLayerUpTapped))
-        let moveDownButton = NSButton(title: "下へ", target: self, action: #selector(moveLayerDownTapped))
-        for button in [addButton, removeButton, duplicateButton, moveUpButton, moveDownButton] {
-            button.bezelStyle = .rounded
-            button.font = .systemFont(ofSize: 10)
-        }
+        let addButton = makeIconButton(symbol: "plus", label: "追加", action: #selector(addLayerTapped))
+        let removeButton = makeIconButton(symbol: "minus", label: "削除", action: #selector(removeLayerTapped))
+        let duplicateButton = makeIconButton(symbol: "plus.square.on.square", label: "複製", action: #selector(duplicateLayerTapped))
+        let moveUpButton = makeIconButton(symbol: "chevron.up", label: "上へ", action: #selector(moveLayerUpTapped))
+        let moveDownButton = makeIconButton(symbol: "chevron.down", label: "下へ", action: #selector(moveLayerDownTapped))
 
-        let row1 = NSStackView(views: [addButton, removeButton, duplicateButton])
-        row1.orientation = .horizontal
-        row1.spacing = 4
-        let row2 = NSStackView(views: [moveUpButton, moveDownButton])
-        row2.orientation = .horizontal
-        row2.spacing = 4
-
-        let stack = NSStackView(views: [row1, row2])
-        stack.orientation = .vertical
-        stack.alignment = .leading
+        let stack = NSStackView(views: [addButton, removeButton, duplicateButton, moveUpButton, moveDownButton])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
         stack.spacing = 4
         return stack
+    }
+
+    private func makeIconButton(symbol: String, label: String, action: Selector) -> NSButton {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage()
+        let button = NSButton(image: image, target: self, action: action)
+        button.bezelStyle = .smallSquare
+        button.imageScaling = .scaleProportionallyDown
+        button.toolTip = label
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: Self.buttonBarSide),
+            button.heightAnchor.constraint(equalToConstant: Self.buttonBarSide)
+        ])
+        return button
     }
 
     private func makeOpacityRow() -> NSView {

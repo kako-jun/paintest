@@ -85,7 +85,18 @@ final class ColorPaletteView: NSView {
 
         addSubview(grid)
         NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            // constant: 0, not some extra padding (issue #22 follow-up): the
+            // gap this panel visually needs on its left is already supplied
+            // by `CurrentColorIndicatorView`'s own drawing, not by padding
+            // here. That view is `colorBarHeight`-independent-width 48pt,
+            // and draws its two 20pt swatches centered, so their bounding
+            // box (32pt) sits with an 8pt margin on *both* of the
+            // indicator's own edges. Adding padding here on top of that
+            // trailing 8pt would make the indicator-to-palette gap wider
+            // than the color-bar's leading edge to the indicator's drawn
+            // square — an asymmetry kako-jun flagged. Zero here keeps both
+            // gaps equal at 8pt.
+            grid.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
             grid.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
