@@ -12,22 +12,27 @@ import XCTest
 /// actually invoke the corresponding `LayerStack` method with the expected
 /// argument (observed through its effect on `layerStack`, since the
 /// button's `@objc` action methods themselves are private).
+///
+/// The button-bar buttons are icon-only (issue #22: SF Symbols, no text
+/// `title`), so lookups here go by `toolTip` — set alongside each icon's
+/// `accessibilityDescription` in `LayerPanelView.makeIconButton` — instead
+/// of the `title` string this suite originally matched on.
 final class LayerPanelViewTests: XCTestCase {
-    private func findButton(titled title: String, in view: NSView) -> NSButton? {
+    private func findButton(toolTip: String, in view: NSView) -> NSButton? {
         for subview in view.subviews {
-            if let button = subview as? NSButton, button.title == title {
+            if let button = subview as? NSButton, button.toolTip == toolTip {
                 return button
             }
-            if let found = findButton(titled: title, in: subview) {
+            if let found = findButton(toolTip: toolTip, in: subview) {
                 return found
             }
         }
         return nil
     }
 
-    private func tap(_ title: String, on panel: LayerPanelView, file: StaticString = #filePath, line: UInt = #line) {
-        guard let button = findButton(titled: title, in: panel) else {
-            XCTFail("could not find a button titled \"\(title)\"", file: file, line: line)
+    private func tap(_ toolTip: String, on panel: LayerPanelView, file: StaticString = #filePath, line: UInt = #line) {
+        guard let button = findButton(toolTip: toolTip, in: panel) else {
+            XCTFail("could not find a button with toolTip \"\(toolTip)\"", file: file, line: line)
             return
         }
         button.performClick(nil)
