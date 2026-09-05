@@ -144,6 +144,21 @@ final class PixelCanvas {
         return (data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
     }
 
+    // MARK: - Duplication
+
+    /// Returns a byte-for-byte independent copy of this canvas (same pixel
+    /// data, no shared storage with the original). Used by
+    /// `LayerStack.duplicateLayer(at:)` so editing the copy never mutates
+    /// the source layer.
+    func copy() -> PixelCanvas {
+        let duplicate = PixelCanvas(bitmap: PixelCanvas.makeBitmap(width: width, height: height), width: width, height: height)
+        if let sourceData = bitmap.bitmapData, let destData = duplicate.bitmap.bitmapData {
+            let byteCount = bitmap.bytesPerRow * height
+            destData.update(from: sourceData, count: byteCount)
+        }
+        return duplicate
+    }
+
     // MARK: - PNG I/O
 
     func pngData() -> Data? {
