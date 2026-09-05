@@ -7,10 +7,10 @@ final class ColorPaletteViewTests: XCTestCase {
         ColorPaletteView()
     }
 
-    /// Swatches are plain `NSView`s that opt into a backed layer with a
-    /// solid fill color — that combination is how `ColorPaletteView`
-    /// constructs them (`makeSwatch`), so it identifies them independently
-    /// of their position in the `NSGridView` hierarchy.
+    /// Swatches (`ColorSwatchView`, issue #5) are plain `NSView`s — not
+    /// `NSControl`s — that opt into a backed layer with a solid fill color;
+    /// that combination identifies them independently of their position in
+    /// the `NSGridView` hierarchy.
     private func colorSwatches(in view: NSView) -> [NSView] {
         var result: [NSView] = []
         for subview in view.subviews {
@@ -26,9 +26,10 @@ final class ColorPaletteViewTests: XCTestCase {
         _ = makeView()
     }
 
-    func testSwatchCount_equals28() {
+    // 2 classic-palette rows + 1 recent-colors row (issue #5), 14 columns each.
+    func testSwatchCount_equals42() {
         let view = makeView()
-        XCTAssertEqual(colorSwatches(in: view).count, 28, "2 rows x 14 columns")
+        XCTAssertEqual(colorSwatches(in: view).count, 42, "3 rows x 14 columns")
     }
 
     func testRows_haveEqualColumnCount() {
@@ -44,12 +45,14 @@ final class ColorPaletteViewTests: XCTestCase {
         )
     }
 
-    func testSwatches_haveNoClickTarget() {
+    // Swatches pick their color via overridden mouseDown/rightMouseDown
+    // (issue #5), not via NSControl's target/action mechanism.
+    func testSwatches_areNotNSControls() {
         let view = makeView()
         let swatches = colorSwatches(in: view)
         XCTAssertFalse(swatches.isEmpty)
         for swatch in swatches {
-            XCTAssertFalse(swatch is NSControl, "swatches are plain NSViews, not clickable controls")
+            XCTAssertFalse(swatch is NSControl, "swatches pick colors via mouseDown/rightMouseDown, not NSControl target/action")
         }
     }
 }
