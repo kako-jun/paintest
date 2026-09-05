@@ -103,6 +103,78 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(grid.numberOfColumns, 1, "the toolbox should be a single vertical column, matching Photoshop's layout")
     }
 
+    // MARK: - Pencil/eraser exclusive tool selection (issue #5)
+    //
+    // Uses `performClick(nil)`, the same pattern `LayerPanelViewTests`
+    // already uses to drive an `NSButton`'s real target/action wiring
+    // without needing an actual window/event.
+
+    private func button(toolTip: String, in view: NSView) -> NSButton? {
+        allButtons(in: view).first { $0.toolTip == toolTip }
+    }
+
+    func testEraserClick_firesOnToolSelectedWithEraser_andTogglesPressedStates() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let eraser = button(toolTip: "消しゴム", in: view) else {
+            XCTFail("could not find pencil/eraser buttons")
+            return
+        }
+        var selected: Tool?
+        view.onToolSelected = { selected = $0 }
+
+        eraser.performClick(nil)
+
+        XCTAssertEqual(selected, .eraser)
+        XCTAssertEqual(eraser.state, .on)
+        XCTAssertEqual(pencil.state, .off)
+    }
+
+    func testPencilClickWhileEraserIsActive_firesOnToolSelectedWithPencil_andTogglesPressedStates() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let eraser = button(toolTip: "消しゴム", in: view) else {
+            XCTFail("could not find pencil/eraser buttons")
+            return
+        }
+        eraser.performClick(nil) // switch to eraser first
+        var selected: Tool?
+        view.onToolSelected = { selected = $0 }
+
+        pencil.performClick(nil)
+
+        XCTAssertEqual(selected, .pencil)
+        XCTAssertEqual(pencil.state, .on)
+        XCTAssertEqual(eraser.state, .off)
+    }
+
+    func testReclickingTheAlreadyActivePencil_staysPressed_neitherButtonEndsUpOff() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let eraser = button(toolTip: "消しゴム", in: view) else {
+            XCTFail("could not find pencil/eraser buttons")
+            return
+        }
+        XCTAssertEqual(pencil.state, .on, "precondition: pencil starts pressed by default")
+
+        pencil.performClick(nil) // re-click the already-active pencil
+
+        XCTAssertEqual(pencil.state, .on, "re-clicking the active pencil must not toggle it off, leaving no tool pressed")
+        XCTAssertEqual(eraser.state, .off)
+    }
+
+    func testRepeatedToolSwitching_alwaysLeavesExactlyOneOfPencilOrEraserPressed() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let eraser = button(toolTip: "消しゴム", in: view) else {
+            XCTFail("could not find pencil/eraser buttons")
+            return
+        }
+
+        eraser.performClick(nil)
+        pencil.performClick(nil)
+        eraser.performClick(nil)
+
+        XCTAssertEqual(eraser.state, .on)
+        XCTAssertEqual(pencil.state, .off)
+    }
+
     // Not independently unit-tested here: `Self.tools` is a private static
     // constant, so exercising `pencilIndex`'s `?? 0` fallback or
     // `buildGrid()`'s odd-count trailing row would require refactoring

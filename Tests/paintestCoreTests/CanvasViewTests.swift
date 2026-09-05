@@ -360,4 +360,70 @@ final class CanvasViewTests: XCTestCase {
 
         XCTAssertEqual(notifiedCount, 1, "onLayerContentChanged should fire once after a mouseDragged paints along the stroke")
     }
+
+    // MARK: - activeTool / paintColor (issue #5)
+    //
+    // The eraser is not a separate "make transparent" code path — it's the
+    // pencil, but painting with `backgroundColor` instead of
+    // `foregroundColor` (see `CanvasView.paintColor`). These tests drive
+    // that through the real `mouseDown`/`mouseDragged` entry points, reusing
+    // the off-screen-window helpers above.
+
+    func testActiveTool_defaultIsPencil() {
+        let view = makeView()
+        XCTAssertEqual(view.activeTool, .pencil)
+    }
+
+    func testBackgroundColor_defaultIsWhite() {
+        let view = makeView()
+        XCTAssertEqual(view.backgroundColor, .white)
+    }
+
+    func testMouseDown_withPencilActive_paintsWithForegroundColor() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pencil
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let pixel = view.layerStack.activeLayer.canvas.rawPixel(x: 2, y: 2)
+        XCTAssertEqual(pixel?.r, 0, "the pencil should paint with the foreground color")
+    }
+
+    func testMouseDown_withEraserActive_paintsWithBackgroundColorNotForeground() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .eraser
+        view.foregroundColor = .black
+        view.backgroundColor = NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let pixel = view.layerStack.activeLayer.canvas.rawPixel(x: 2, y: 2)
+        XCTAssertEqual(pixel?.r, 255, "the eraser should paint with the background color, not the foreground color")
+        XCTAssertEqual(pixel?.g, 0)
+        XCTAssertEqual(pixel?.b, 0)
+    }
+
+    func testMouseDragged_withEraserActive_paintsTheLineWithBackgroundColor() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .eraser
+        view.foregroundColor = .black
+        view.backgroundColor = NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)
+
+        let startPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: startPoint, in: view.window!))
+        let dragPoint = windowPoint(forPixelCol: 4, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: view.window!))
+
+        let midPixel = view.layerStack.activeLayer.canvas.rawPixel(x: 3, y: 2)
+        XCTAssertEqual(midPixel?.r, 255, "the line drawn between mouseDown and mouseDragged must use the background color, not the foreground color")
+        XCTAssertEqual(midPixel?.g, 0)
+        XCTAssertEqual(midPixel?.b, 0)
+    }
 }
