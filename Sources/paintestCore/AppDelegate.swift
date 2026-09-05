@@ -47,7 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // the toolbox / palette / status bar, distinct from the white canvas.
     private static let chromeColor = NSColor(calibratedWhite: 0.753, alpha: 1)
 
-    private static let toolboxWidth: CGFloat = 70
+    // Single column of buttons (issue #7; was 2 columns' worth under #2):
+    // button width + a little breathing room on each side, plus the
+    // vertical scroller's own track width.
+    private static let toolboxWidth: CGFloat = ToolboxView.buttonSide + 20
     private static let colorBarHeight: CGFloat = 44
     private static let statusBarHeight: CGFloat = 22
     private static let colorIndicatorWidth: CGFloat = 48

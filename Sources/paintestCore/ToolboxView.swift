@@ -1,21 +1,26 @@
 import AppKit
 
-/// Classic Paint's left-hand toolbox: a fixed 2-column grid of tool icons
-/// (issue #2). Only the pencil is wired to real behavior — `CanvasView`
-/// always paints with the pencil regardless of which button is showing —
-/// so every other button here is a purely visual placeholder with no
-/// target/action. The pencil cell renders pressed (`state == .on`) by
-/// default so the grid still communicates "this is the active tool" the
-/// way the reference screenshots do, without pretending tool-switching is
-/// implemented (that lands in a later issue).
+/// Photoshop's left-hand toolbox: a single vertical column of tool icons
+/// (issue #7; was a 2-column grid under issue #2). Only the pencil is wired
+/// to real behavior — `CanvasView` always paints with the pencil regardless
+/// of which button is showing — so every other button here is a purely
+/// visual placeholder with no target/action. The pencil cell renders
+/// pressed (`state == .on`) by default so the column still communicates
+/// "this is the active tool" the way the reference screenshots do, without
+/// pretending tool-switching is implemented (that lands in a later issue).
+///
+/// A single column of 16 icons runs taller than the window at typical
+/// sizes, so (like `DocumentTabBarView`) the column is wrapped in a
+/// vertically-scrolling `NSScrollView` rather than widened back into extra
+/// columns.
 final class ToolboxView: NSView {
     private struct Tool {
         let symbol: String
         let label: String
     }
 
-    // Row-major, 2 per row, matching the layout in
-    // docs/reference/classic-paint-1.png top to bottom.
+    // Top to bottom, one per row, matching Photoshop's single-column
+    // toolbar layout.
     private static let tools: [Tool] = [
         Tool(symbol: "lasso", label: "自由選択"),
         Tool(symbol: "rectangle.dashed", label: "選択"),
@@ -43,44 +48,44 @@ final class ToolboxView: NSView {
 
     init() {
         super.init(frame: .zero)
-        buildGrid()
+        buildColumn()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private func buildGrid() {
-        let grid = NSGridView(numberOfColumns: 2, rows: 0)
+    private func buildColumn() {
+        let grid = NSGridView(numberOfColumns: 1, rows: 0)
         grid.rowSpacing = 1
-        grid.columnSpacing = 1
         grid.translatesAutoresizingMaskIntoConstraints = false
 
-        var rowButtons: [NSButton] = []
         for (index, tool) in Self.tools.enumerated() {
-            rowButtons.append(makeButton(for: tool, isPencil: index == Self.pencilIndex))
-            if rowButtons.count == 2 {
-                grid.addRow(with: rowButtons)
-                rowButtons = []
-            }
-        }
-        // `tools` currently has an even count (16), so this never fires today.
-        // If a future tool addition/removal makes it odd, the leftover button
-        // would otherwise be silently dropped instead of rendered. NSGridView
-        // accepts fewer views than there are columns and pads the remaining
-        // cell(s) as empty, so this is safe to call unconditionally.
-        if !rowButtons.isEmpty {
-            grid.addRow(with: rowButtons)
+            grid.addRow(with: [makeButton(for: tool, isPencil: index == Self.pencilIndex)])
         }
 
-        for column in 0..<2 {
-            grid.column(at: column).width = Self.buttonSide
-        }
+        grid.column(at: 0).width = Self.buttonSide
 
-        addSubview(grid)
+        // Wrapped in a scroll view (same pattern as `DocumentTabBarView`):
+        // 16 buttons in a single column run taller than the window at
+        // typical sizes, so the column scrolls vertically instead of
+        // widening back into extra columns.
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = grid
         NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-            grid.centerXAnchor.constraint(equalTo: centerXAnchor)
+            grid.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor, constant: 4),
+            grid.centerXAnchor.constraint(equalTo: scrollView.contentView.centerXAnchor)
+        ])
+
+        addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
     }
 
