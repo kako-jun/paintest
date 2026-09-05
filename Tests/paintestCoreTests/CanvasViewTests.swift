@@ -105,6 +105,57 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(view.zoomScale, 16)
     }
 
+    // MARK: - setZoomScale(_:) — direct zoom assignment (issue #15 follow-up)
+
+    func testSetZoomScale_validValueInZoomLevels_isAccepted() {
+        let view = makeView()
+
+        view.setZoomScale(16)
+
+        XCTAssertEqual(view.zoomScale, 16)
+    }
+
+    func testSetZoomScale_invalidValueNotInZoomLevels_isIgnored() {
+        let view = makeView()
+        XCTAssertEqual(view.zoomScale, 4, "precondition: default zoom")
+
+        view.setZoomScale(3) // not in CanvasView.zoomLevels [1, 2, 4, 8, 16, 32]
+
+        XCTAssertEqual(view.zoomScale, 4, "an invalid zoom value must be ignored, not clamped or applied")
+    }
+
+    // MARK: - Per-document zoom independence across tab switches (issue #15 follow-up)
+    //
+    // `CanvasView` itself only ever holds one `zoomScale` at a time — the
+    // per-document memory lives on `Document.zoomScale`, and it's
+    // `AppDelegate.activateActiveDocument()` that writes the outgoing
+    // document's zoom back before applying the incoming one's. That method
+    // is private on `AppDelegate` (a whole `NSApplicationDelegate` that
+    // builds a real window/menu bar, not practical to unit test directly),
+    // so this test reproduces its exact write-back-then-apply protocol
+    // directly against `Document` + `CanvasView` to pin down the contract
+    // those two types must honor for tab switching to keep zoom independent.
+
+    private func activate(_ incoming: Document, previouslyDisplayed: Document?, on view: CanvasView) {
+        previouslyDisplayed?.zoomScale = view.zoomScale
+        view.replaceLayerStack(incoming.layerStack)
+        view.setZoomScale(incoming.zoomScale)
+    }
+
+    func testZoom_perDocument_staysIndependentAcrossTabSwitches() {
+        let docA = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "b")
+        let view = CanvasView(layerStack: docA.layerStack)
+
+        view.setZoomScale(8) // "a" zoomed to 200% while it's the displayed document
+
+        activate(docB, previouslyDisplayed: docA, on: view) // switch to "b"
+        XCTAssertEqual(view.zoomScale, CanvasView.defaultZoomScale, "\"b\" has never been zoomed and must show its own default, not \"a\"'s 200%")
+
+        activate(docA, previouslyDisplayed: docB, on: view) // switch back to "a"
+        XCTAssertEqual(view.zoomScale, 8, "\"a\"'s 200% zoom must be restored, not reset to the default")
+    }
+
     // MARK: - onZoomChanged callback
 
     func testOnZoomChanged_firesOnceWithNewScale_onZoomIn() {
