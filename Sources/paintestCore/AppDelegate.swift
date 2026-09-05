@@ -99,7 +99,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.appearance = NSAppearance(named: .aqua)
         window.center()
         window.contentView = makeRootView()
-        window.minSize = NSSize(width: 500, height: 320)
+        // Width increment matches the default window width's own increment
+        // for the document tab strip (720 -> 860, i.e. +140pt for
+        // `documentTabBarWidth`): 420 + 140 = 560. The previous 500 only
+        // accounted for part of the tab strip's width, so shrinking to the
+        // minimum squeezed the rest of the layout (review S3 on #18).
+        window.minSize = NSSize(width: 560, height: 320)
         window.makeKeyAndOrderFront(nil)
 
         NSApp.activate(ignoringOtherApps: true)
