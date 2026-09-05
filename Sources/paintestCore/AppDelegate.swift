@@ -63,7 +63,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        // No horizontal scroller (issue #22): with it enabled, AppKit
+        // permanently reserves a scroller-track strip along the *bottom*
+        // edge of the scroll view — confirmed via Accessibility as a
+        // dedicated `AXScrollBar` frame sitting flush above `colorBar` — even
+        // when the canvas is smaller than the viewport and nothing is
+        // scrollable in that direction (the common case: a 64x64 canvas at
+        // the default zoom). That reserved strip reads as an extra, uneven
+        // margin between the canvas and the color bar below it, one that has
+        // no counterpart on the toolbox/layer-panel sides (which butt
+        // directly against the canvas with no reserved chrome). Horizontal
+        // panning for wider canvases is still available via trackpad/scroll
+        // wheel; only the always-visible drag handle is gone. The vertical
+        // scroller stays on, since tall canvases needing it are common.
+        scrollView.hasHorizontalScroller = false
         scrollView.allowsMagnification = false
         scrollView.documentView = canvasView
         scrollView.backgroundColor = .windowBackgroundColor
