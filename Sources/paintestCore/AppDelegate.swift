@@ -42,6 +42,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // its accessory view's fields.
     private var zoomLabelField: NSTextField!
 
+    // Foreground/background color and recent-colors history: app-wide
+    // state (issue #5), not per-document like `Document.zoomScale` — shared
+    // across `canvasView`, `currentColorIndicator` and `colorPaletteView`,
+    // the same as classic Paint/Photoshop's single current-color model.
+    private var foregroundColor: NSColor = .black
+    private var backgroundColor: NSColor = .white
+    private var recentColors: [NSColor] = []
+
     private static let defaultCanvasSize = 64
 
     // Classic Windows chrome gray (192, 192, 192) — the background behind
@@ -58,7 +66,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // button width + a little breathing room on each side, plus the
     // vertical scroller's own track width.
     private static let toolboxWidth: CGFloat = ToolboxView.buttonSide + 20
-    private static let colorBarHeight: CGFloat = 44
+    // Derived, not guessed (issue #5 — the exact bug class from #7's
+    // self-review: a fixed-height constant that silently stops matching the
+    // content it wraps). `ColorPaletteView`'s swatch grid grew from 2 rows
+    // to 3 (issue #5's "recent colors" row): swatchSide (18) * 3 rows +
+    // rowSpacing (1) * 2 gaps = 56pt tall, up from the old 2-row grid's
+    // 18*2+1 = 37pt. At the old colorBarHeight (44), the grid was centered
+    // with an implicit (44-37)/2 = 3.5pt margin above and below (see
+    // `ColorPaletteView.buildSwatches()`'s `grid.centerYAnchor` constraint).
+    // Keeping that same ~3.5pt margin on the new 56pt-tall grid gives
+    // 56 + 3.5*2 = 63.
+    private static let colorBarHeight: CGFloat = 63
     private static let statusBarHeight: CGFloat = 22
     private static let colorIndicatorWidth: CGFloat = 48
     // Width of the whole right column — レイヤー/プロパティ/ヒストリー stacked
@@ -155,6 +173,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.appearance = NSAppearance(named: .aqua)
         window.center()
         window.contentView = makeRootView()
+
+        wireColorAndToolCallbacks()
+
         // Width increment matches the default window width's own increment
         // for the document tab strip (720 -> 860, i.e. +140pt for
         // `documentTabBarWidth`): 420 + 140 = 560. The previous 500 only
@@ -164,19 +185,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Height is the sum of every fixed-height band stacked in the
         // center row, each of which is a `required`-priority constraint
         // that Auto Layout cannot shrink below (issue #7 self-review
-        // must-1, recomputed in re-review): `optionBarView` (30) +
-        // `colorBar` (44) + `statusBar` (22) + `propertyPanelHeight` (140) +
-        // `historyPanelHeight` (140) + `panelDividerThickness` × 2 (2, the
-        // two 1pt divider lines between レイヤー/プロパティ/ヒストリー) +
-        // `layerPanelMinHeight` (110) = 488. Below that, `layerPanelView`'s
-        // height (`rightPanelGroup`'s total minus the two fixed panels and
-        // the two dividers) would have to go negative to satisfy every
-        // constraint at once, which Auto Layout cannot do — it would
-        // instead break one of the "required" constraints and log a
-        // constraint-conflict warning while visibly mis-laying-out the
-        // right column. The previous 436 omitted the two divider lines'
-        // 2pt and used the too-small 60pt `layerPanelMinHeight`.
-        window.minSize = NSSize(width: 560, height: 488)
+        // must-1, recomputed for issue #5's `colorBarHeight` change):
+        // `optionBarView` (30) + `colorBar` (63) + `statusBar` (22) +
+        // `propertyPanelHeight` (140) + `historyPanelHeight` (140) +
+        // `panelDividerThickness` × 2 (2, the two 1pt divider lines between
+        // レイヤー/プロパティ/ヒストリー) + `layerPanelMinHeight` (110) = 507.
+        // Below that, `layerPanelView`'s height (`rightPanelGroup`'s total
+        // minus the two fixed panels and the two dividers) would have to go
+        // negative to satisfy every constraint at once, which Auto Layout
+        // cannot do — it would instead break one of the "required"
+        // constraints and log a constraint-conflict warning while visibly
+        // mis-laying-out the right column. The previous 488 used the old
+        // 44pt `colorBarHeight`, from before issue #5 grew the color
+        // palette's swatch grid from 2 rows to 3 — the exact same "fixed
+        // constant drifts out of sync with what it wraps" bug #7's
+        // self-review already caught once (must-1 above).
+        window.minSize = NSSize(width: 560, height: 507)
         window.makeKeyAndOrderFront(nil)
 
         NSApp.activate(ignoringOtherApps: true)
@@ -648,5 +672,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
         alert.messageText = message
         alert.runModal()
+    }
+
+    // MARK: - Color and tool wiring (issue #5)
+
+    /// Wires `toolboxView`/`colorPaletteView`/`currentColorIndicator`'s
+    /// callbacks to this delegate's `foregroundColor`/`backgroundColor`/
+    /// `recentColors` state, and pushes the initial black/white colors onto
+    /// `canvasView` and `currentColorIndicator` so both start in sync with
+    /// this delegate before the user picks anything.
+    private func wireColorAndToolCallbacks() {
+        canvasView.foregroundColor = foregroundColor
+        canvasView.backgroundColor = backgroundColor
+        currentColorIndicator.foregroundColor = foregroundColor
+        currentColorIndicator.backgroundColor = backgroundColor
+
+        toolboxView.onToolSelected = { [weak self] tool in
+            self?.canvasView.activeTool = tool
+        }
+
+        colorPaletteView.onSwatchSelected = { [weak self] color, isSecondary in
+            self?.setColor(color, secondary: isSecondary)
+        }
+
+        currentColorIndicator.onForegroundSwatchTapped = { [weak self] in
+            guard let self else { return }
+            if let picked = ColorPickerDialog.promptForColor(initial: self.foregroundColor) {
+                self.setColor(picked, secondary: false)
+            }
+        }
+        currentColorIndicator.onBackgroundSwatchTapped = { [weak self] in
+            guard let self else { return }
+            if let picked = ColorPickerDialog.promptForColor(initial: self.backgroundColor) {
+                self.setColor(picked, secondary: true)
+            }
+        }
+        currentColorIndicator.onResetToDefaultTapped = { [weak self] in
+            self?.resetColorsToDefault()
+        }
+    }
+
+    /// Updates the foreground (`secondary == false`) or background
+    /// (`secondary == true`) color, propagating it to `canvasView` and
+    /// `currentColorIndicator`, and records it in `recentColors` (issue #5).
+    private func setColor(_ color: NSColor, secondary: Bool) {
+        if secondary {
+            backgroundColor = color
+            canvasView.backgroundColor = color
+            currentColorIndicator.backgroundColor = color
+        } else {
+            foregroundColor = color
+            canvasView.foregroundColor = color
+            currentColorIndicator.foregroundColor = color
+        }
+        currentColorIndicator.needsDisplay = true
+
+        recentColors = ColorPaletteView.updatedRecentColors(
+            adding: color,
+            to: recentColors,
+            capacity: ColorPaletteView.recentColorsCapacity
+        )
+        colorPaletteView.updateRecentColors(recentColors)
+    }
+
+    /// Restores foreground/background to classic Paint's black/white
+    /// default (issue #5). Deliberately does not touch `recentColors` —
+    /// resetting to the default isn't "using" a color the way picking one
+    /// from the picker or palette is.
+    private func resetColorsToDefault() {
+        foregroundColor = .black
+        backgroundColor = .white
+        canvasView.foregroundColor = .black
+        canvasView.backgroundColor = .white
+        currentColorIndicator.foregroundColor = .black
+        currentColorIndicator.backgroundColor = .white
+        currentColorIndicator.needsDisplay = true
     }
 }
