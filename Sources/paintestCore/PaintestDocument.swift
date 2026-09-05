@@ -28,33 +28,69 @@ enum PaintestDocument {
 
     /// Writes `layerStack` to `url` as a `.paintestdoc` package, creating
     /// the package directory (and any of its ancestors) if needed.
+    ///
+    /// This is atomic with respect to `url`: the whole package (every layer
+    /// PNG plus `manifest.json`) is assembled first in a temporary sibling
+    /// directory, and `url` itself is only touched once that temporary
+    /// package is complete (issue #8 review). If anything fails partway
+    /// through — disk full, permission error, a layer that fails to encode
+    /// — only the temporary directory ends up incomplete; whatever was
+    /// already saved at `url` is left untouched right up until the final
+    /// swap at the bottom. Writing new layer PNGs directly into `url` and
+    /// relying on a fresh `removeItem`/`createDirectory` there (this
+    /// function's previous approach — see the orphaned-PNG fix below) would
+    /// instead destroy the existing save before the replacement is known to
+    /// be good.
     static func write(_ layerStack: LayerStack, to url: URL) throws {
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let tempURL = url.appendingPathExtension("tmp")
+        // Clear out any stale leftover from a previous write that crashed
+        // mid-way, so the temporary package always starts from empty.
+        try? FileManager.default.removeItem(at: tempURL)
 
-        var entries: [LayerManifestEntry] = []
-        for (index, layer) in layerStack.layers.enumerated() {
-            let fileName = "layer_\(index).png"
-            guard let pngData = layer.canvas.pngData() else {
-                throw PaintestDocumentError.pngEncodingFailed(layerName: layer.name)
+        do {
+            try FileManager.default.createDirectory(at: tempURL, withIntermediateDirectories: true)
+
+            var entries: [LayerManifestEntry] = []
+            for (index, layer) in layerStack.layers.enumerated() {
+                let fileName = "layer_\(index).png"
+                guard let pngData = layer.canvas.pngData() else {
+                    throw PaintestDocumentError.pngEncodingFailed(layerName: layer.name)
+                }
+                try pngData.write(to: tempURL.appendingPathComponent(fileName))
+                entries.append(LayerManifestEntry(
+                    name: layer.name,
+                    isVisible: layer.isVisible,
+                    opacity: layer.opacity,
+                    order: index,
+                    fileName: fileName
+                ))
             }
-            try pngData.write(to: url.appendingPathComponent(fileName))
-            entries.append(LayerManifestEntry(
-                name: layer.name,
-                isVisible: layer.isVisible,
-                opacity: layer.opacity,
-                order: index,
-                fileName: fileName
-            ))
+
+            let manifest = DocumentManifest(
+                width: layerStack.width,
+                height: layerStack.height,
+                layers: entries,
+                activeLayerIndex: layerStack.activeLayerIndex
+            )
+            let manifestData = try JSONEncoder().encode(manifest)
+            try manifestData.write(to: tempURL.appendingPathComponent(manifestFileName))
+        } catch {
+            // Don't leave a half-written temporary package lying around.
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
         }
 
-        let manifest = DocumentManifest(
-            width: layerStack.width,
-            height: layerStack.height,
-            layers: entries,
-            activeLayerIndex: layerStack.activeLayerIndex
-        )
-        let manifestData = try JSONEncoder().encode(manifest)
-        try manifestData.write(to: url.appendingPathComponent(manifestFileName))
+        // The temporary package is now complete and self-consistent. Only
+        // now do we touch the real destination: remove whatever was there
+        // before — this is also what fixes the orphaned-layer-PNG bug
+        // (issue #8 review S2), since re-saving with fewer layers than
+        // before no longer leaves the old save's higher-numbered
+        // `layer_N.png` files behind, as nothing of the old package
+        // survives this swap — and move the new package into place.
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        try FileManager.default.moveItem(at: tempURL, to: url)
     }
 
     /// Reads a `.paintestdoc` package at `url` back into a `LayerStack`.

@@ -232,6 +232,54 @@ final class PaintestDocumentTests: XCTestCase {
         XCTAssertNil(PaintestDocument.read(from: url))
     }
 
+    // MARK: - Re-save with fewer layers (issue #8 review S2)
+
+    /// Fixed behavior (was the bug this test locks in): re-saving to the
+    /// same `.paintestdoc` path with fewer layers than before used to leave
+    /// the previous save's higher-numbered `layer_N.png` files behind as
+    /// orphaned garbage, since `write` only overwrote `layer_0.png`...
+    /// `layer_(newCount-1).png` and never touched anything beyond that.
+    func testWrite_resavingWithFewerLayers_removesOrphanedLayerPNGs() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer(name: "中")
+        stack.addLayer(name: "上")
+        let url = makeTempDocumentURL()
+        XCTAssertNoThrow(try PaintestDocument.write(stack, to: url))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.appendingPathComponent("layer_2.png").path))
+
+        stack.removeLayer(at: 2)
+        stack.removeLayer(at: 1)
+        XCTAssertNoThrow(try PaintestDocument.write(stack, to: url))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.appendingPathComponent("layer_1.png").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.appendingPathComponent("layer_2.png").path))
+        guard let loaded = PaintestDocument.read(from: url) else {
+            XCTFail("read(from:) returned nil")
+            return
+        }
+        XCTAssertEqual(loaded.layers.count, 1)
+    }
+
+    // MARK: - Atomic write success path (issue #8 review "should": rollback safety)
+    //
+    // The failure-mid-write path (disk full / permission error partway
+    // through) isn't practically reproducible from a unit test without
+    // faking the filesystem, so per this project's usual policy for
+    // unreachable failure paths, that half is not tested here. What *is*
+    // tested is that a normal, successful write leaves no trace of the
+    // temporary package it assembled along the way — only the final `url`.
+    func testWrite_succeedsAtomically_leavesNoTemporaryPackageBehind() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let url = makeTempDocumentURL()
+        let tempURL = url.appendingPathExtension("tmp")
+        tempURLs.append(tempURL) // safety net: clean up even if the assertion below fails
+
+        XCTAssertNoThrow(try PaintestDocument.write(stack, to: url))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "the final package should exist at url")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tempURL.path), "the temporary in-progress package should not linger after a successful write")
+    }
+
     // MARK: - PNG-only open path (decision table 2-2 rows 6-7)
     // These are exercised through `PixelCanvas.load(from:)` directly
     // (already covered exhaustively by `PixelCanvasTests`' PNG round-trip
