@@ -58,7 +58,13 @@ enum PaintestDocument {
     }
 
     /// Reads a `.paintestdoc` package at `url` back into a `LayerStack`.
-    /// Returns `nil` if the manifest or any layer PNG can't be read/decoded.
+    /// Returns `nil` if the manifest or any layer PNG can't be read/decoded,
+    /// or if any layer's actual PNG dimensions don't match `manifest.width`/
+    /// `manifest.height` — a mismatch means the manifest and pixel data have
+    /// drifted apart (tampering/corruption), and opening it anyway would
+    /// silently stretch a wrong-sized layer to fit, breaking dot-exact
+    /// editing. Better to refuse the whole document, matching the existing
+    /// "manifest missing/undecodable" policy.
     static func read(from url: URL) -> LayerStack? {
         guard let manifestData = try? Data(contentsOf: url.appendingPathComponent(manifestFileName)),
               let manifest = try? JSONDecoder().decode(DocumentManifest.self, from: manifestData) else {
@@ -70,6 +76,9 @@ enum PaintestDocument {
         for entry in sortedEntries {
             guard let pngData = try? Data(contentsOf: url.appendingPathComponent(entry.fileName)),
                   let canvas = PixelCanvas.load(from: pngData) else {
+                return nil
+            }
+            guard canvas.width == manifest.width, canvas.height == manifest.height else {
                 return nil
             }
             layers.append(Layer(canvas: canvas, name: entry.name, isVisible: entry.isVisible, opacity: entry.opacity))
