@@ -4,7 +4,7 @@ import XCTest
 
 final class CanvasViewTests: XCTestCase {
     private func makeView() -> CanvasView {
-        CanvasView(canvas: PixelCanvas(width: 8, height: 8))
+        CanvasView(layerStack: LayerStack(width: 8, height: 8))
     }
 
     // MARK: - Zoom transitions (decision table 2-2, all 12 states)
