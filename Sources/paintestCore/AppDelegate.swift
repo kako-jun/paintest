@@ -339,13 +339,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         canvasView.setZoomScale(document.zoomScale)
         layerPanelView.replaceLayerStack(document.layerStack)
         documentTabBarView.reload()
-        updateWindowTitle()
+        updateWindowTitle(for: document)
 
         displayedDocument = document
     }
 
-    private func updateWindowTitle() {
-        window.title = "\(documentManager.activeDocument.displayName) - paintest"
+    /// Takes the `Document` to title for explicitly, rather than re-reading
+    /// `documentManager.activeDocument` itself (review S4 on #18):
+    /// `saveCanvas`/`saveLayeredCanvas` capture `document` before showing a
+    /// modal save panel and write results back onto that same reference
+    /// afterward, so titling from that captured reference keeps this in
+    /// lock-step with whichever document was actually just saved instead of
+    /// relying on it still being the active one by the time the panel closes.
+    private func updateWindowTitle(for document: Document) {
+        window.title = "\(document.displayName) - paintest"
     }
 
     /// Creates a new blank document and opens it in a new tab (issue #15:
@@ -431,7 +438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             document.displayName = url.deletingPathExtension().lastPathComponent
             document.fileURL = url
             documentTabBarView.reload()
-            updateWindowTitle()
+            updateWindowTitle(for: document)
         } catch {
             presentError("ファイルの保存に失敗しました: \(error.localizedDescription)")
         }
@@ -449,7 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             document.displayName = url.deletingPathExtension().lastPathComponent
             document.fileURL = url
             documentTabBarView.reload()
-            updateWindowTitle()
+            updateWindowTitle(for: document)
         } catch {
             presentError("ドキュメントの保存に失敗しました: \(error.localizedDescription)")
         }
