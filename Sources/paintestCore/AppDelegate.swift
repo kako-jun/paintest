@@ -26,6 +26,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var layerPanelView: LayerPanelView!
     private var documentTabBarView: DocumentTabBarView!
     private var documentManager: DocumentManager!
+    // The document currently shown by `canvasView`, tracked separately from
+    // `documentManager.activeDocument` because by the time
+    // `activateActiveDocument()` runs, `documentManager` has already moved
+    // on to the new active document (`DocumentTabBarView`/`closeDocument(at:)`
+    // update it before invoking the `onSelect`/`onClose` callback). Without
+    // this, there would be no way to know which document's zoom to write
+    // `canvasView.zoomScale` back into before swapping to the new one.
+    private var displayedDocument: Document!
     // The status bar's zoom readout, kept as a direct reference from
     // creation time rather than re-derived later by digging through the
     // view hierarchy. `NewCanvasDialog.promptForSize` follows the same
@@ -58,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let initialLayerStack = LayerStack(width: Self.defaultCanvasSize, height: Self.defaultCanvasSize, background: .white)
         let initialDocument = Document(layerStack: initialLayerStack, displayName: "untitled")
         documentManager = DocumentManager(initialDocument: initialDocument)
+        displayedDocument = initialDocument
 
         canvasView = CanvasView(layerStack: documentManager.activeDocument.layerStack)
         canvasView.onZoomChanged = { [weak self] scale in
@@ -303,12 +312,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Rewires the canvas/layer panel/tab strip to the now-active document.
     /// Called whenever `documentManager.activeDocumentIndex` changes for any
     /// reason (tab clicked, tab closed, new document created, file opened).
+    ///
+    /// Zoom is per-document state (issue #15 follow-up): before swapping the
+    /// canvas over, the previously displayed document's zoom is written back
+    /// from `canvasView`, then the newly active document's own remembered
+    /// zoom is applied. Without this, zoom would leak across tabs as shared
+    /// state on the single `CanvasView` instance instead of following each
+    /// document independently.
     private func activateActiveDocument() {
+        displayedDocument?.zoomScale = canvasView.zoomScale
+
         let document = documentManager.activeDocument
         canvasView.replaceLayerStack(document.layerStack)
+        canvasView.setZoomScale(document.zoomScale)
         layerPanelView.replaceLayerStack(document.layerStack)
         documentTabBarView.reload()
         updateWindowTitle()
+
+        displayedDocument = document
     }
 
     private func updateWindowTitle() {
