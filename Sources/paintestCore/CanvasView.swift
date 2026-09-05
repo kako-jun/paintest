@@ -1,27 +1,34 @@
 import AppKit
 
-/// Displays a `PixelCanvas` at an integer zoom factor and routes mouse
-/// input into pencil strokes.
+/// Displays a `LayerStack`'s composited image at an integer zoom factor and
+/// routes mouse input into pencil strokes on the active layer.
 ///
 /// The view is flipped (origin top-left, y grows downward) so that pixel
 /// row 0 in `PixelCanvas` maps directly onto the view's top row with no
 /// extra coordinate flipping anywhere in the drawing or hit-testing code.
 final class CanvasView: NSView {
-    private(set) var canvas: PixelCanvas
+    private(set) var layerStack: LayerStack
     private(set) var zoomScale: Int = 4 {
         didSet { onZoomChanged?(zoomScale) }
     }
 
     var penColor: NSColor = .black
     var onZoomChanged: ((Int) -> Void)?
+    /// Fired after a pixel-editing gesture (`mouseDown`/`mouseDragged`)
+    /// writes to the active layer's canvas, so `AppDelegate` can refresh
+    /// anything showing a snapshot of that layer's contents — currently
+    /// `LayerPanelView`'s thumbnails, which otherwise only redraw in
+    /// response to their own panel's buttons (issue #8 review S4). Follows
+    /// the same callback pattern as `onZoomChanged`.
+    var onLayerContentChanged: (() -> Void)?
 
     static let zoomLevels = [1, 2, 4, 8, 16, 32]
     private var lastPixel: (x: Int, y: Int)?
 
     override var isFlipped: Bool { true }
 
-    init(canvas: PixelCanvas) {
-        self.canvas = canvas
+    init(layerStack: LayerStack) {
+        self.layerStack = layerStack
         super.init(frame: .zero)
         wantsLayer = true
     }
@@ -31,11 +38,15 @@ final class CanvasView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: canvas.width * zoomScale, height: canvas.height * zoomScale)
+        NSSize(width: layerStack.width * zoomScale, height: layerStack.height * zoomScale)
     }
 
-    func replaceCanvas(_ newCanvas: PixelCanvas) {
-        canvas = newCanvas
+    /// Swaps in a whole new document (new canvas / opened file). The
+    /// caller (`AppDelegate`) is responsible for pointing any other view
+    /// that references the old `LayerStack` (e.g. `LayerPanelView`) at the
+    /// new one too.
+    func replaceLayerStack(_ newLayerStack: LayerStack) {
+        layerStack = newLayerStack
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -61,7 +72,7 @@ final class CanvasView: NSView {
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let context = NSGraphicsContext.current?.cgContext, let image = canvas.cgImage else { return }
+        guard let context = NSGraphicsContext.current?.cgContext, let image = layerStack.compositeImage() else { return }
 
         // Dot-perfect scaling: no interpolation, no anti-aliasing, anywhere
         // in this transfer path.
@@ -71,8 +82,8 @@ final class CanvasView: NSView {
         let destRect = CGRect(
             x: 0,
             y: 0,
-            width: canvas.width * zoomScale,
-            height: canvas.height * zoomScale
+            width: layerStack.width * zoomScale,
+            height: layerStack.height * zoomScale
         )
         context.draw(image, in: destRect)
     }
@@ -97,20 +108,22 @@ final class CanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let pixel = pixelCoordinate(for: event)
-        canvas.setPixel(x: pixel.x, y: pixel.y, color: penColor)
+        layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: penColor)
         lastPixel = pixel
         needsDisplay = true
+        onLayerContentChanged?()
     }
 
     override func mouseDragged(with event: NSEvent) {
         let pixel = pixelCoordinate(for: event)
         if let last = lastPixel {
-            canvas.drawLine(from: last, to: pixel, color: penColor)
+            layerStack.activeLayer.canvas.drawLine(from: last, to: pixel, color: penColor)
         } else {
-            canvas.setPixel(x: pixel.x, y: pixel.y, color: penColor)
+            layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: penColor)
         }
         lastPixel = pixel
         needsDisplay = true
+        onLayerContentChanged?()
     }
 
     override func mouseUp(with event: NSEvent) {

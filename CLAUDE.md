@@ -18,7 +18,7 @@ Windows 11 の Paint 相当のクラシックツールに加え、**Photoshopで
 - **UI**: AppKit（`NSWindow` / `NSView`ベース。SwiftUIは補助的に検討可）
 - **描画**: Core Graphics（`CGContext`）
 - **第一対応 OS**: macOS
-- **保存形式**: PNG（将来的にBMP検討）
+- **保存形式**: PNG（フラット統合出力、将来的にBMP検討）に加え、レイヤー構造を保持する独自パッケージ形式`.paintestdoc`（ディレクトリ+`manifest.json`+レイヤーごとのPNG）
 
 ## ローカル起動
 

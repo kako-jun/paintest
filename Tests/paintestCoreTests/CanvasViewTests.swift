@@ -4,7 +4,7 @@ import XCTest
 
 final class CanvasViewTests: XCTestCase {
     private func makeView() -> CanvasView {
-        CanvasView(canvas: PixelCanvas(width: 8, height: 8))
+        CanvasView(layerStack: LayerStack(width: 8, height: 8))
     }
 
     // MARK: - Zoom transitions (decision table 2-2, all 12 states)
@@ -174,5 +174,139 @@ final class CanvasViewTests: XCTestCase {
         let result = CanvasView.pixelCoordinate(forPoint: NSPoint(x: 40, y: 12), zoomScale: 4)
         XCTAssertEqual(result.x, 10)
         XCTAssertEqual(result.y, 3)
+    }
+
+    // MARK: - mouseDown routes to the active layer only (test list 44-45)
+    //
+    // Driving `mouseDown(with:)` for real requires an actual `NSEvent` and
+    // an `NSWindow` (the view's `convert(_:from:)` needs a window to
+    // resolve coordinates), which is more than the rest of this file's
+    // pure-function tests need. It is NOT "impossible to unit test" in the
+    // sense this project's CLAUDE.md carves out for e.g. `NSAlert.runModal`
+    // — it just needs a headless, off-screen window, built here once.
+    //
+    // Coordinate math: `CanvasView.isFlipped == true` (origin top-left, y
+    // grows downward), but `NSEvent.locationInWindow` is always in the
+    // window's own bottom-left-origin coordinate system. Since this test's
+    // view fills its window exactly, `convert(_:from: nil)` maps a window
+    // point (wx, wy) to the flipped view point (wx, viewHeight - wy).
+    // `windowPoint(forPixelCol:row:)` below inverts that so the caller can
+    // specify the *target pixel*, not the window-space point.
+
+    private func makeViewInWindow(width: Int, height: Int, zoomScale: Int = 4) -> CanvasView {
+        let stack = LayerStack(width: width, height: height, background: .white)
+        let view = CanvasView(layerStack: stack)
+        let viewSize = NSSize(width: width * zoomScale, height: height * zoomScale)
+        view.frame = NSRect(origin: .zero, size: viewSize)
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        return view
+    }
+
+    private func windowPoint(forPixelCol col: Int, row: Int, zoomScale: Int, viewHeight: CGFloat) -> NSPoint {
+        let x = CGFloat(col * zoomScale) + 1 // +1: anywhere inside the target pixel's cell, not on its edge
+        let y = viewHeight - CGFloat(row * zoomScale) - 1
+        return NSPoint(x: x, y: y)
+    }
+
+    private func mouseDownEvent(at windowPoint: NSPoint, in window: NSWindow) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: windowPoint,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )!
+    }
+
+    private func mouseDraggedEvent(at windowPoint: NSPoint, in window: NSWindow) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: .leftMouseDragged,
+            location: windowPoint,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )!
+    }
+
+    func testMouseDown_paintsOnlyTheActiveLayer_leavesOtherLayersUntouched() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.addLayer() // index 1, becomes active; bottom layer (index 0) is white
+        view.penColor = .black
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let activePixel = view.layerStack.activeLayer.canvas.rawPixel(x: 2, y: 2)
+        XCTAssertEqual(activePixel?.r, 0, "mouseDown should paint onto the active layer")
+
+        let bottomLayerPixel = view.layerStack.layers[0].canvas.rawPixel(x: 2, y: 2)
+        XCTAssertEqual(bottomLayerPixel?.r, 255, "the non-active bottom layer must be left untouched")
+    }
+
+    func testMouseDown_onHiddenActiveLayer_writesThePixelButCompositeIsUnaffected() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.addLayer() // index 1, becomes active
+        view.layerStack.setVisibility(false, at: view.layerStack.activeLayerIndex)
+        view.penColor = .black
+
+        let targetPoint = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let activePixel = view.layerStack.activeLayer.canvas.rawPixel(x: 3, y: 3)
+        XCTAssertEqual(activePixel?.r, 0, "the pixel write itself still happens on the hidden layer's own canvas")
+
+        guard let composite = view.layerStack.compositeImage() else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        let rep = NSBitmapImageRep(cgImage: composite)
+        let compositeColor = rep.colorAt(x: 3, y: 3)?.usingColorSpace(.deviceRGB)?.redComponent
+        XCTAssertEqual(compositeColor ?? 0, 1, accuracy: 0.01, "a hidden layer's paint must not show up in the composite")
+    }
+
+    // MARK: - onLayerContentChanged callback (issue #8 review S4)
+    //
+    // Mirrors the `onZoomChanged` callback tests above: `onLayerContentChanged`
+    // previously had no direct test at all, even though `LayerPanelView`'s
+    // thumbnails depend entirely on it firing after every pixel-editing
+    // gesture.
+
+    func testMouseDown_notifiesOnLayerContentChanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.penColor = .black
+        var notifiedCount = 0
+        view.onLayerContentChanged = { notifiedCount += 1 }
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(notifiedCount, 1, "onLayerContentChanged should fire once after a mouseDown paints a pixel")
+    }
+
+    func testMouseDragged_notifiesOnLayerContentChanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.penColor = .black
+        let startPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: startPoint, in: view.window!))
+        var notifiedCount = 0
+        view.onLayerContentChanged = { notifiedCount += 1 }
+
+        let dragPoint = windowPoint(forPixelCol: 3, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: view.window!))
+
+        XCTAssertEqual(notifiedCount, 1, "onLayerContentChanged should fire once after a mouseDragged paints along the stroke")
     }
 }
