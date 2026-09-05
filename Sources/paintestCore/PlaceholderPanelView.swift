@@ -7,6 +7,12 @@ import AppKit
 /// content — the same "枠だけ先に用意" treatment issue #7 gives the option
 /// bar.
 final class PlaceholderPanelView: NSView {
+    // Matches `LayerPanelView.panelPadding` (issue #7 self-review
+    // should-3): the two panels sit stacked in the same right-hand column,
+    // so their title labels need the same top inset to line up instead of
+    // drifting a couple points apart.
+    private static let titleTopPadding: CGFloat = 6
+
     init(title: String) {
         super.init(frame: .zero)
         wantsLayer = true
@@ -17,7 +23,7 @@ final class PlaceholderPanelView: NSView {
 
         addSubview(titleLabel)
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: Self.titleTopPadding),
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6)
         ])
     }

@@ -7,6 +7,13 @@ import AppKit
 /// isn't implemented yet, this stays an empty chrome-colored frame — each
 /// tool's own issue is responsible for populating it once that tool is
 /// selectable.
+///
+/// Unlike `PlaceholderPanelView` (プロパティ/ヒストリー), this carries no
+/// title label of its own (issue #7 self-review question-5): the real
+/// Photoshop options bar has no fixed heading either — it's just a bare
+/// strip of whatever settings the active tool contributes, so a permanent
+/// "オプション"-style label here would misrepresent what this chrome
+/// actually becomes once populated.
 final class OptionBarView: NSView {
     static let height: CGFloat = 30
 

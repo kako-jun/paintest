@@ -48,6 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // the toolbox / palette / status bar, distinct from the white canvas.
     private static let chromeColor = NSColor(calibratedWhite: 0.753, alpha: 1)
 
+    // A shade darker than `chromeColor`, used only for the thin divider
+    // lines between レイヤー/プロパティ/ヒストリー (issue #7 self-review
+    // must-2) so the three stacked panels read as visually distinct
+    // sections instead of one undifferentiated gray block.
+    private static let panelDividerColor = NSColor(calibratedWhite: 0.6, alpha: 1)
+
     // Single column of buttons (issue #7; was 2 columns' worth under #2):
     // button width + a little breathing room on each side, plus the
     // vertical scroller's own track width.
@@ -55,7 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let colorBarHeight: CGFloat = 44
     private static let statusBarHeight: CGFloat = 22
     private static let colorIndicatorWidth: CGFloat = 48
-    private static let layerPanelWidth: CGFloat = 180
+    // Width of the whole right column — レイヤー/プロパティ/ヒストリー stacked
+    // together, not just `layerPanelView` on its own (issue #7 self-review
+    // must-4: this used to be named `layerPanelWidth` back when the layer
+    // panel was the column's only occupant).
+    private static let rightPanelWidth: CGFloat = 180
     private static let documentTabBarWidth: CGFloat = 140
     // Fixed heights for the right column's two frame-only panels (issue
     // #7): レイヤー stays the flexible one, growing/shrinking with the
@@ -63,6 +73,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // frame until their own issues give them real content.
     private static let propertyPanelHeight: CGFloat = 140
     private static let historyPanelHeight: CGFloat = 140
+    // Floor on レイヤー's own height (issue #7 self-review must-1): without
+    // this, `layerPanelView`'s height is whatever's left after subtracting
+    // `propertyPanelHeight` + `historyPanelHeight` from the group's total
+    // height, which goes negative once the window shrinks enough — Auto
+    // Layout has no lower bound on it otherwise. 60pt is enough to keep the
+    // title label and button bar from overlapping even at the floor.
+    private static let layerPanelMinHeight: CGFloat = 60
+    // Thickness of the 1pt divider lines between レイヤー/プロパティ/ヒスト
+    // リー (issue #7 self-review must-2).
+    private static let panelDividerThickness: CGFloat = 1
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Classic Paint's chrome (Windows Classic silver/gray) is always a
@@ -127,7 +147,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `documentTabBarWidth`): 420 + 140 = 560. The previous 500 only
         // accounted for part of the tab strip's width, so shrinking to the
         // minimum squeezed the rest of the layout (review S3 on #18).
-        window.minSize = NSSize(width: 560, height: 320)
+        //
+        // Height is the sum of every fixed-height band stacked in the
+        // center row, each of which is a `required`-priority constraint
+        // that Auto Layout cannot shrink below (issue #7 self-review
+        // must-1): `optionBarView` (30) + `colorBar` (44) + `statusBar`
+        // (22) + `propertyPanelHeight` (140) + `historyPanelHeight` (140) +
+        // `layerPanelMinHeight` (60) = 436. Below that, `layerPanelView`'s
+        // height (`rightPanelGroup`'s total minus the two fixed panels)
+        // would have to go negative to satisfy every constraint at once,
+        // which Auto Layout cannot do — it would instead break one of the
+        // "required" constraints and log a constraint-conflict warning
+        // while visibly mis-laying-out the right column. The previous 320
+        // predated `layerPanelMinHeight` and left the center row 56pt short
+        // of that floor.
+        window.minSize = NSSize(width: 560, height: 436)
         window.makeKeyAndOrderFront(nil)
 
         NSApp.activate(ignoringOtherApps: true)
@@ -221,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rightPanelGroup.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             rightPanelGroup.topAnchor.constraint(equalTo: optionBarView.bottomAnchor),
             rightPanelGroup.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
-            rightPanelGroup.widthAnchor.constraint(equalToConstant: Self.layerPanelWidth),
+            rightPanelGroup.widthAnchor.constraint(equalToConstant: Self.rightPanelWidth),
 
             colorBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             colorBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -238,11 +272,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Builds the right column's panel group: レイヤー (existing
-    /// `LayerPanelView`, untouched, flexible height) stacked above two
+    /// `LayerPanelView`, untouched, flexible height, with a
+    /// `layerPanelMinHeight` floor so it can never be squeezed to zero or
+    /// negative — issue #7 self-review must-1) stacked above two
     /// frame-only placeholders — プロパティ / ヒストリー — each pinned to a
-    /// fixed height (issue #7). Thin dividers between panels reuse
-    /// `chromeColor` at a darker shade so the three panels read as visually
-    /// distinct sections even though none of them draws its own border.
+    /// fixed height (issue #7). Thin 1pt divider views between panels use
+    /// `panelDividerColor`, a darker shade than `chromeColor`, so the three
+    /// panels read as visually distinct sections even though none of them
+    /// draws its own border (issue #7 self-review must-2).
     private func makeRightPanelGroup() -> NSView {
         let group = NSView()
         group.wantsLayer = true
@@ -260,6 +297,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layerPanelView.wantsLayer = true
         layerPanelView.layer?.backgroundColor = Self.chromeColor.cgColor
 
+        let topDivider = makePanelDivider()
+        let bottomDivider = makePanelDivider()
+
         let propertyPanelView = PlaceholderPanelView(title: "プロパティ")
         propertyPanelView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -267,19 +307,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         historyPanelView.translatesAutoresizingMaskIntoConstraints = false
 
         group.addSubview(layerPanelView)
+        group.addSubview(topDivider)
         group.addSubview(propertyPanelView)
+        group.addSubview(bottomDivider)
         group.addSubview(historyPanelView)
 
         NSLayoutConstraint.activate([
             layerPanelView.leadingAnchor.constraint(equalTo: group.leadingAnchor),
             layerPanelView.trailingAnchor.constraint(equalTo: group.trailingAnchor),
             layerPanelView.topAnchor.constraint(equalTo: group.topAnchor),
-            layerPanelView.bottomAnchor.constraint(equalTo: propertyPanelView.topAnchor),
+            layerPanelView.bottomAnchor.constraint(equalTo: topDivider.topAnchor),
+            layerPanelView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.layerPanelMinHeight),
+
+            topDivider.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            topDivider.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            topDivider.bottomAnchor.constraint(equalTo: propertyPanelView.topAnchor),
+            topDivider.heightAnchor.constraint(equalToConstant: Self.panelDividerThickness),
 
             propertyPanelView.leadingAnchor.constraint(equalTo: group.leadingAnchor),
             propertyPanelView.trailingAnchor.constraint(equalTo: group.trailingAnchor),
-            propertyPanelView.bottomAnchor.constraint(equalTo: historyPanelView.topAnchor),
+            propertyPanelView.bottomAnchor.constraint(equalTo: bottomDivider.topAnchor),
             propertyPanelView.heightAnchor.constraint(equalToConstant: Self.propertyPanelHeight),
+
+            bottomDivider.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            bottomDivider.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            bottomDivider.bottomAnchor.constraint(equalTo: historyPanelView.topAnchor),
+            bottomDivider.heightAnchor.constraint(equalToConstant: Self.panelDividerThickness),
 
             historyPanelView.leadingAnchor.constraint(equalTo: group.leadingAnchor),
             historyPanelView.trailingAnchor.constraint(equalTo: group.trailingAnchor),
@@ -288,6 +341,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ])
 
         return group
+    }
+
+    /// A 1pt divider strip between two stacked right-column panels (issue
+    /// #7 self-review must-2). `translatesAutoresizingMaskIntoConstraints`
+    /// is set here rather than at each call site since every use is
+    /// identical — pinned on all four edges by the caller.
+    private func makePanelDivider() -> NSView {
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = Self.panelDividerColor.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        return divider
     }
 
     private func makeColorBar() -> NSView {
