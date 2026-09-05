@@ -166,6 +166,30 @@ final class ColorPaletteViewTests: XCTestCase {
         XCTAssertEqual(colorSwatches(in: view).count, 42, "updating the recent-colors row must not change the overall 3x14 grid shape")
     }
 
+    // A single call to `updateRecentColors(_:)` passes even without the
+    // `removeFromSuperview()` fix in the same method (issue #5 self-review):
+    // `NSGridView.removeRow(at:)` detaches the old row's cells from the
+    // grid's *layout*, so `colorSwatches(in:)` — which walks `subviews`, not
+    // the grid's row/cell model — still reports 42 after just one call, even
+    // while the old row's `ColorSwatchView`s are actually still attached as
+    // orphaned subviews underneath. Calling it repeatedly with different
+    // colors is what makes the leak visible: each call would add 14 more
+    // orphaned subviews on top of the previous ones, so the total would grow
+    // without bound instead of staying at 42.
+    func testUpdateRecentColors_calledRepeatedly_doesNotLeakOldSwatchViews() {
+        let view = makeView()
+
+        for round in 0..<8 {
+            let colors = (0...2).map { NSColor(calibratedWhite: CGFloat(round * 3 + $0) / 30, alpha: 1) }
+            view.updateRecentColors(colors)
+        }
+
+        XCTAssertEqual(
+            colorSwatches(in: view).count, 42,
+            "repeated updateRecentColors(_:) calls must not accumulate orphaned ColorSwatchViews from previous rows"
+        )
+    }
+
     // MARK: - updatedRecentColors(adding:to:capacity:) — pure recency-list logic (issue #5)
 
     func testUpdatedRecentColors_addingToEmptyList_resultsInOneColor() {
