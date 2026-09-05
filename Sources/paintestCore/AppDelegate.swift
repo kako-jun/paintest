@@ -279,7 +279,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ("新規", #selector(newCanvas), "n"),
             ("開く…", #selector(openCanvas), "o"),
             ("保存…", #selector(saveCanvas), "s"),
-            ("名前を付けて保存（レイヤー保持）…", #selector(saveLayeredCanvas), "")
+            ("名前を付けて保存（レイヤー保持）…", #selector(saveLayeredCanvas), ""),
+            ("タブを閉じる", #selector(closeActiveTab), "w")
         ]))
 
         // Edit / Image / Colors / Help: labels + a handful of decorative
@@ -400,6 +401,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             presentError("ファイルの読み込みに失敗しました: \(error.localizedDescription)")
         }
+    }
+
+    /// Closes the currently active tab (issue #18 review S5: "タブを閉じる"
+    /// / Cmd+W). `DocumentManager.closeDocument(at:)` never leaves zero open
+    /// documents — closing the last tab replaces it with a fresh blank one
+    /// — so this is always safe to invoke, the same as clicking a tab's own
+    /// close button.
+    @objc private func closeActiveTab() {
+        documentManager.closeDocument(at: documentManager.activeDocumentIndex)
+        activateActiveDocument()
     }
 
     /// PNG export: flattens all layers into a single image, since PNG can't
