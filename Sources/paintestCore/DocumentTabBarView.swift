@@ -52,15 +52,6 @@ final class DocumentTabBarView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Points this tab strip at a different `DocumentManager` (not
-    /// expected in normal use — `AppDelegate` owns one `DocumentManager`
-    /// for the app's lifetime — but mirrors the `replace...` pattern used
-    /// elsewhere for consistency and testability).
-    func replaceDocumentManager(_ newManager: DocumentManager) {
-        documentManager = newManager
-        reload()
-    }
-
     // MARK: - Layout
 
     private func buildLayout() {
