@@ -194,7 +194,13 @@ final class LayerPanelView: NSView {
         // Display order is top-to-bottom in the panel, i.e. the reverse of
         // `layers`' bottom-to-top storage order.
         for index in layerStack.layers.indices.reversed() {
-            rowsStack.addArrangedSubview(makeRow(for: index))
+            let row = makeRow(for: index)
+            rowsStack.addArrangedSubview(row)
+            // Activated only after `row` joins `rowsStack`'s view hierarchy:
+            // AppKit can't resolve a common ancestor for this constraint
+            // while `row` is still unparented, and activating it any
+            // earlier (e.g. inside `makeRow`) throws "no common ancestor".
+            row.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         }
 
         let active = layerStack.activeLayer
