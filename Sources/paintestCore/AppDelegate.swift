@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var colorPaletteView: ColorPaletteView!
     private var currentColorIndicator: CurrentColorIndicatorView!
     private var layerPanelView: LayerPanelView!
+    private var documentTabBarView: DocumentTabBarView!
+    private var documentManager: DocumentManager!
     // The status bar's zoom readout, kept as a direct reference from
     // creation time rather than re-derived later by digging through the
     // view hierarchy. `NewCanvasDialog.promptForSize` follows the same
@@ -42,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let statusBarHeight: CGFloat = 22
     private static let colorIndicatorWidth: CGFloat = 48
     private static let layerPanelWidth: CGFloat = 180
+    private static let documentTabBarWidth: CGFloat = 140
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Classic Paint's chrome (Windows Classic silver/gray) is always a
@@ -53,7 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMainMenu()
 
         let initialLayerStack = LayerStack(width: Self.defaultCanvasSize, height: Self.defaultCanvasSize, background: .white)
-        canvasView = CanvasView(layerStack: initialLayerStack)
+        let initialDocument = Document(layerStack: initialLayerStack, displayName: "untitled")
+        documentManager = DocumentManager(initialDocument: initialDocument)
+
+        canvasView = CanvasView(layerStack: documentManager.activeDocument.layerStack)
         canvasView.onZoomChanged = { [weak self] scale in
             self?.zoomLabelField?.stringValue = "\(scale)x"
         }
@@ -69,16 +75,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scrollView.backgroundColor = .windowBackgroundColor
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "untitled - paintest"
+        window.title = "\(documentManager.activeDocument.displayName) - paintest"
         window.appearance = NSAppearance(named: .aqua)
         window.center()
         window.contentView = makeRootView()
-        window.minSize = NSSize(width: 420, height: 320)
+        window.minSize = NSSize(width: 500, height: 320)
         window.makeKeyAndOrderFront(nil)
 
         NSApp.activate(ignoringOtherApps: true)
@@ -95,6 +101,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let root = NSView()
         root.wantsLayer = true
         root.layer?.backgroundColor = Self.chromeColor.cgColor
+
+        // Provisional placement (issue #15): the document tab strip is the
+        // leftmost element, further left than the toolbox — Edge's vertical
+        // tabs, not Photoshop's horizontal tabs along the top. Reconciling
+        // this with the full Photoshop layout is issue #7's scope, not this
+        // one.
+        documentTabBarView = DocumentTabBarView(documentManager: documentManager)
+        documentTabBarView.onSelect = { [weak self] in
+            self?.activateActiveDocument()
+        }
+        documentTabBarView.onClose = { [weak self] in
+            self?.activateActiveDocument()
+        }
+        documentTabBarView.onNewDocumentRequested = { [weak self] in
+            self?.newCanvas()
+        }
+        documentTabBarView.translatesAutoresizingMaskIntoConstraints = false
+        documentTabBarView.wantsLayer = true
+        documentTabBarView.layer?.backgroundColor = Self.chromeColor.cgColor
 
         toolboxView = ToolboxView()
         toolboxView.translatesAutoresizingMaskIntoConstraints = false
@@ -118,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusBar = makeStatusBar()
         statusBar.translatesAutoresizingMaskIntoConstraints = false
 
+        root.addSubview(documentTabBarView)
         root.addSubview(toolboxView)
         root.addSubview(scrollView)
         root.addSubview(layerPanelView)
@@ -125,7 +151,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         root.addSubview(statusBar)
 
         NSLayoutConstraint.activate([
-            toolboxView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            documentTabBarView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            documentTabBarView.topAnchor.constraint(equalTo: root.topAnchor),
+            documentTabBarView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
+            documentTabBarView.widthAnchor.constraint(equalToConstant: Self.documentTabBarWidth),
+
+            toolboxView.leadingAnchor.constraint(equalTo: documentTabBarView.trailingAnchor),
             toolboxView.topAnchor.constraint(equalTo: root.topAnchor),
             toolboxView.bottomAnchor.constraint(equalTo: colorBar.topAnchor),
             toolboxView.widthAnchor.constraint(equalToConstant: Self.toolboxWidth),
@@ -269,13 +300,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menuItem
     }
 
+    /// Rewires the canvas/layer panel/tab strip to the now-active document.
+    /// Called whenever `documentManager.activeDocumentIndex` changes for any
+    /// reason (tab clicked, tab closed, new document created, file opened).
+    private func activateActiveDocument() {
+        let document = documentManager.activeDocument
+        canvasView.replaceLayerStack(document.layerStack)
+        layerPanelView.replaceLayerStack(document.layerStack)
+        documentTabBarView.reload()
+        updateWindowTitle()
+    }
+
+    private func updateWindowTitle() {
+        window.title = "\(documentManager.activeDocument.displayName) - paintest"
+    }
+
+    /// Creates a new blank document and opens it in a new tab (issue #15:
+    /// "新規作成…で新しいタブが追加される" — this does not replace the
+    /// currently active tab).
     @objc private func newCanvas() {
         guard let size = NewCanvasDialog.promptForSize() else { return }
         let layerStack = LayerStack(width: size.width, height: size.height, background: .white)
-        canvasView.replaceLayerStack(layerStack)
-        layerPanelView.replaceLayerStack(layerStack)
+        documentManager.addDocument(Document(layerStack: layerStack, displayName: "untitled"))
+        activateActiveDocument()
     }
 
+    /// Opens a file into a new tab (issue #15: "開く…で新しいタブが追加
+    /// される" — this does not replace the currently active tab).
     @objc private func openCanvas() {
         let panel = NSOpenPanel()
         // `.paintestdoc` is written out as a plain directory (a package),
@@ -300,8 +351,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 presentError("ドキュメントの読み込みに失敗しました。")
                 return
             }
-            canvasView.replaceLayerStack(layerStack)
-            layerPanelView.replaceLayerStack(layerStack)
+            documentManager.addDocument(Document(layerStack: layerStack, displayName: url.deletingPathExtension().lastPathComponent, fileURL: url))
+            activateActiveDocument()
             return
         }
 
@@ -312,8 +363,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             let layerStack = LayerStack(width: canvas.width, height: canvas.height, layers: [Layer(canvas: canvas, name: "レイヤー1")])
-            canvasView.replaceLayerStack(layerStack)
-            layerPanelView.replaceLayerStack(layerStack)
+            documentManager.addDocument(Document(layerStack: layerStack, displayName: url.deletingPathExtension().lastPathComponent, fileURL: url))
+            activateActiveDocument()
         } catch {
             presentError("ファイルの読み込みに失敗しました: \(error.localizedDescription)")
         }
@@ -323,29 +374,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// hold layer structure. "名前を付けて保存（レイヤー保持）…" is the
     /// counterpart that keeps layers intact.
     @objc private func saveCanvas() {
-        guard let data = canvasView.layerStack.flattenedPNGData() else {
+        let document = documentManager.activeDocument
+        guard let data = document.layerStack.flattenedPNGData() else {
             presentError("PNGへの変換に失敗しました。")
             return
         }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
-        panel.nameFieldStringValue = "untitled.png"
+        panel.nameFieldStringValue = "\(document.displayName).png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try data.write(to: url)
+            document.displayName = url.deletingPathExtension().lastPathComponent
+            document.fileURL = url
+            documentTabBarView.reload()
+            updateWindowTitle()
         } catch {
             presentError("ファイルの保存に失敗しました: \(error.localizedDescription)")
         }
     }
 
     @objc private func saveLayeredCanvas() {
+        let document = documentManager.activeDocument
         let panel = NSSavePanel()
         let paintestDocType = UTType(filenameExtension: "paintestdoc") ?? .data
         panel.allowedContentTypes = [paintestDocType]
-        panel.nameFieldStringValue = "untitled.paintestdoc"
+        panel.nameFieldStringValue = "\(document.displayName).paintestdoc"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try PaintestDocument.write(canvasView.layerStack, to: url)
+            try PaintestDocument.write(document.layerStack, to: url)
+            document.displayName = url.deletingPathExtension().lastPathComponent
+            document.fileURL = url
+            documentTabBarView.reload()
+            updateWindowTitle()
         } catch {
             presentError("ドキュメントの保存に失敗しました: \(error.localizedDescription)")
         }
