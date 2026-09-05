@@ -286,6 +286,14 @@ final class LayerPanelView: NSView {
         onChange?()
     }
 
+    // Unlike every other action above, this one intentionally does NOT call
+    // `reload()` — opacity isn't shown anywhere in a row today, so rebuilding
+    // the rows would be pure wasted work on every slider tick, and skipping
+    // it doesn't leave any visible state stale. `onChange?()` alone is
+    // enough to get the canvas repainted at the new opacity. If a per-row
+    // opacity indicator is ever added to `makeRow(for:)`, this will need a
+    // `reload()` call too, or that indicator will silently go stale while
+    // dragging the slider.
     @objc private func opacitySliderChanged() {
         layerStack.setOpacity(opacitySlider.doubleValue / 100, at: layerStack.activeLayerIndex)
         opacityValueLabel.stringValue = "\(Int(opacitySlider.doubleValue.rounded()))%"
