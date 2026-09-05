@@ -57,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         canvasView.onZoomChanged = { [weak self] scale in
             self?.zoomLabelField?.stringValue = "\(scale)x"
         }
+        canvasView.onLayerContentChanged = { [weak self] in
+            self?.layerPanelView.reload()
+        }
 
         scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true

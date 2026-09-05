@@ -14,6 +14,13 @@ final class CanvasView: NSView {
 
     var penColor: NSColor = .black
     var onZoomChanged: ((Int) -> Void)?
+    /// Fired after a pixel-editing gesture (`mouseDown`/`mouseDragged`)
+    /// writes to the active layer's canvas, so `AppDelegate` can refresh
+    /// anything showing a snapshot of that layer's contents — currently
+    /// `LayerPanelView`'s thumbnails, which otherwise only redraw in
+    /// response to their own panel's buttons (issue #8 review S4). Follows
+    /// the same callback pattern as `onZoomChanged`.
+    var onLayerContentChanged: (() -> Void)?
 
     static let zoomLevels = [1, 2, 4, 8, 16, 32]
     private var lastPixel: (x: Int, y: Int)?
@@ -104,6 +111,7 @@ final class CanvasView: NSView {
         layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: penColor)
         lastPixel = pixel
         needsDisplay = true
+        onLayerContentChanged?()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -115,6 +123,7 @@ final class CanvasView: NSView {
         }
         lastPixel = pixel
         needsDisplay = true
+        onLayerContentChanged?()
     }
 
     override func mouseUp(with event: NSEvent) {

@@ -223,6 +223,20 @@ final class CanvasViewTests: XCTestCase {
         )!
     }
 
+    private func mouseDraggedEvent(at windowPoint: NSPoint, in window: NSWindow) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: .leftMouseDragged,
+            location: windowPoint,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )!
+    }
+
     func testMouseDown_paintsOnlyTheActiveLayer_leavesOtherLayersUntouched() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
@@ -259,5 +273,40 @@ final class CanvasViewTests: XCTestCase {
         let rep = NSBitmapImageRep(cgImage: composite)
         let compositeColor = rep.colorAt(x: 3, y: 3)?.usingColorSpace(.deviceRGB)?.redComponent
         XCTAssertEqual(compositeColor ?? 0, 1, accuracy: 0.01, "a hidden layer's paint must not show up in the composite")
+    }
+
+    // MARK: - onLayerContentChanged callback (issue #8 review S4)
+    //
+    // Mirrors the `onZoomChanged` callback tests above: `onLayerContentChanged`
+    // previously had no direct test at all, even though `LayerPanelView`'s
+    // thumbnails depend entirely on it firing after every pixel-editing
+    // gesture.
+
+    func testMouseDown_notifiesOnLayerContentChanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.penColor = .black
+        var notifiedCount = 0
+        view.onLayerContentChanged = { notifiedCount += 1 }
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(notifiedCount, 1, "onLayerContentChanged should fire once after a mouseDown paints a pixel")
+    }
+
+    func testMouseDragged_notifiesOnLayerContentChanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.penColor = .black
+        let startPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: startPoint, in: view.window!))
+        var notifiedCount = 0
+        view.onLayerContentChanged = { notifiedCount += 1 }
+
+        let dragPoint = windowPoint(forPixelCol: 3, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: view.window!))
+
+        XCTAssertEqual(notifiedCount, 1, "onLayerContentChanged should fire once after a mouseDragged paints along the stroke")
     }
 }

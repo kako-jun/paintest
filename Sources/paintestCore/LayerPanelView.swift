@@ -170,7 +170,11 @@ final class LayerPanelView: NSView {
     /// Rebuilds every row from the current `layerStack` state. Called after
     /// every mutation instead of trying to patch individual rows in place —
     /// simple and correct beats incremental diffing for a list this size.
-    private func reload() {
+    /// Also called externally by `AppDelegate` (via `CanvasView`'s
+    /// `onLayerContentChanged`) to refresh thumbnails after pixel edits made
+    /// directly on the canvas, which don't go through any of this panel's
+    /// own mutating actions below.
+    func reload() {
         for view in rowsStack.arrangedSubviews {
             rowsStack.removeArrangedSubview(view)
             view.removeFromSuperview()
