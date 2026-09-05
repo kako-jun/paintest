@@ -3,10 +3,45 @@ import AppKit
 /// A row in the document tab strip: click-anywhere-on-the-row selection,
 /// same pattern as `LayerPanelView`'s `LayerRowView` (the close button
 /// intercepts its own clicks before they reach this).
+///
+/// Also exposes itself as an `NSAccessibility` button (issue #15 review
+/// round 2): a plain `NSView` with only `mouseDown` overridden has no way
+/// to be "clicked" from outside real mouse hardware — VoiceOver, UI test
+/// automation, and `osascript`'s `click`/`AXPress` all go through the
+/// accessibility tree, which this view didn't participate in at all.
+/// `accessibilityPerformPress()` runs the exact same selection logic as
+/// `mouseDown`, via the shared `selectRow()` method, so neither path can
+/// drift from the other.
 private final class DocumentTabRowView: NSView {
     var onSelectRow: (() -> Void)?
 
+    /// The document this row represents, surfaced as the row's
+    /// accessibility label so VoiceOver/AX clients can tell rows apart.
+    var displayName: String = ""
+
+    override func isAccessibilityElement() -> Bool {
+        true
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? {
+        .button
+    }
+
+    override func accessibilityLabel() -> String? {
+        displayName
+    }
+
     override func mouseDown(with event: NSEvent) {
+        selectRow()
+    }
+
+    @discardableResult
+    override func accessibilityPerformPress() -> Bool {
+        selectRow()
+        return true
+    }
+
+    private func selectRow() {
         onSelectRow?()
     }
 }
@@ -114,6 +149,7 @@ final class DocumentTabBarView: NSView {
         let row = DocumentTabRowView()
         row.wantsLayer = true
         row.layer?.backgroundColor = isActive ? Self.selectedRowColor.cgColor : NSColor.clear.cgColor
+        row.displayName = document.displayName
         row.onSelectRow = { [weak self] in
             self?.documentManager.selectDocument(at: index)
             // Not calling `reload()` here: `onSelect` leads back to

@@ -115,6 +115,35 @@ final class DocumentTabBarViewTests: XCTestCase {
         XCTAssertEqual(selectCount, 1, "onSelect should fire exactly once")
     }
 
+    // MARK: - Row accessibility (AXPress -> onSelect, issue #15 review round 2)
+
+    /// Real mouse hardware isn't the only way to "click" a row: VoiceOver,
+    /// UI test automation, and `osascript`'s `click`/`AXPress` action all
+    /// go through `NSAccessibility.accessibilityPerformPress()` instead of
+    /// `mouseDown`. This asserts that path runs the same selection logic,
+    /// independent of `testRowClick_invokesOnSelectWithClickedRowsDocumentIndex`
+    /// above, which only exercises `mouseDown`.
+    func testRowAccessibilityPerformPress_invokesOnSelectWithClickedRowsDocumentIndex() {
+        let manager = DocumentManager(initialDocument: makeDocument("a"))
+        manager.addDocument(makeDocument("b"))
+        manager.selectDocument(at: 0) // "a" active, so pressing row 1 actually changes something
+        let tabBar = DocumentTabBarView(documentManager: manager)
+        var selectCount = 0
+        tabBar.onSelect = { selectCount += 1 }
+
+        let allRows = rows(in: tabBar)
+        XCTAssertEqual(allRows.count, 2, "precondition: two rows")
+        XCTAssertTrue(allRows[1].isAccessibilityElement(), "a tab row must expose itself as an accessibility element to be reachable by AXPress")
+        XCTAssertEqual(allRows[1].accessibilityRole(), .button, "a tab row should read as a button to accessibility clients")
+        XCTAssertEqual(allRows[1].accessibilityLabel(), "b", "a tab row's accessibility label should be its document's display name")
+
+        _ = allRows[1].accessibilityPerformPress() // AXPress the row for "b"
+
+        XCTAssertEqual(manager.activeDocumentIndex, 1, "AXPress on row 1 should select the document at index 1")
+        XCTAssertEqual(manager.activeDocument.displayName, "b")
+        XCTAssertEqual(selectCount, 1, "onSelect should fire exactly once")
+    }
+
     // MARK: - Close button -> closeDocument + onClose
 
     func testCloseButtonTap_closesTheCorrectDocumentAndFiresOnClose() {
