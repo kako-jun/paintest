@@ -61,10 +61,24 @@ final class LayerStack {
     /// Removes the layer at `index`. No-ops if it's the only remaining
     /// layer — a `LayerStack` always has at least one layer — or if `index`
     /// is out of range.
+    ///
+    /// Like `moveLayer`, the layer that was active before the removal (if it
+    /// still exists) is tracked by object identity, not by re-clamping the
+    /// old index — a plain index clamp would silently point
+    /// `activeLayerIndex` at the wrong layer whenever a layer *below* the
+    /// active one is removed and the array shifts underneath it. If the
+    /// removed layer was itself the active one, there's no previously-active
+    /// layer left to find, so `activeLayerIndex` falls back to the index the
+    /// removal left behind, clamped to the new array bounds.
     func removeLayer(at index: Int) {
         guard layers.count > 1, layers.indices.contains(index) else { return }
+        let previouslyActive = layers[activeLayerIndex]
         layers.remove(at: index)
-        activeLayerIndex = min(activeLayerIndex, layers.count - 1)
+        if let newIndex = layers.firstIndex(where: { $0 === previouslyActive }) {
+            activeLayerIndex = newIndex
+        } else {
+            activeLayerIndex = min(index, layers.count - 1)
+        }
     }
 
     /// Duplicates the layer at `index`, inserting the copy directly above
