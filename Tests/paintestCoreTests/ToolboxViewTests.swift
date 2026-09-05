@@ -55,11 +55,26 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pressed.first?.toolTip, "鉛筆")
     }
 
-    func testAllButtons_haveNoTargetOrAction() {
+    // Only pencil and eraser are wired to real behavior (issue #5); every
+    // other button stays a purely visual placeholder with no target/action,
+    // same as before.
+    func testOnlyPencilAndEraser_haveTargetAndAction() {
         let view = makeView()
-        for button in allButtons(in: view) {
-            XCTAssertNil(button.target, "tool buttons are visual placeholders; wiring is out of scope")
-            XCTAssertNil(button.action, "tool buttons are visual placeholders; wiring is out of scope")
+        let wired = allButtons(in: view).filter { $0.toolTip == "鉛筆" || $0.toolTip == "消しゴム" }
+        XCTAssertEqual(wired.count, 2)
+        for button in wired {
+            XCTAssertNotNil(button.target, "pencil/eraser must be wired to onToolSelected")
+            XCTAssertNotNil(button.action, "pencil/eraser must be wired to onToolSelected")
+        }
+    }
+
+    func testOtherButtons_haveNoTargetOrAction() {
+        let view = makeView()
+        let placeholders = allButtons(in: view).filter { $0.toolTip != "鉛筆" && $0.toolTip != "消しゴム" }
+        XCTAssertEqual(placeholders.count, 14)
+        for button in placeholders {
+            XCTAssertNil(button.target, "non-pencil/eraser tool buttons are visual placeholders; wiring is out of scope")
+            XCTAssertNil(button.action, "non-pencil/eraser tool buttons are visual placeholders; wiring is out of scope")
         }
     }
 

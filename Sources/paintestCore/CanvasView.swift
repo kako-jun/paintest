@@ -12,7 +12,13 @@ final class CanvasView: NSView {
         didSet { onZoomChanged?(zoomScale) }
     }
 
-    var penColor: NSColor = .black
+    /// Foreground (primary) and background (secondary) colors, plus the
+    /// active tool — shared, app-wide state that `AppDelegate` owns and
+    /// keeps in sync here, not per-document state (issue #5). Replaces the
+    /// old single `penColor`.
+    var foregroundColor: NSColor = .black
+    var backgroundColor: NSColor = .white
+    var activeTool: Tool = .pencil
     var onZoomChanged: ((Int) -> Void)?
     /// Fired after a pixel-editing gesture (`mouseDown`/`mouseDragged`)
     /// writes to the active layer's canvas, so `AppDelegate` can refresh
@@ -119,9 +125,19 @@ final class CanvasView: NSView {
         return CanvasView.pixelCoordinate(forPoint: point, zoomScale: zoomScale)
     }
 
+    /// The color a stroke paints with, derived from the active tool rather
+    /// than stored on its own (issue #5): the eraser is not a special
+    /// "make transparent" tool, it's simply "the pencil, but with the
+    /// background color" — painting with `backgroundColor` instead of
+    /// `foregroundColor`. True erasing (alpha 0) is a matter of what color
+    /// the user picked, not a separate code path.
+    private var paintColor: NSColor {
+        activeTool == .pencil ? foregroundColor : backgroundColor
+    }
+
     override func mouseDown(with event: NSEvent) {
         let pixel = pixelCoordinate(for: event)
-        layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: penColor)
+        layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor)
         lastPixel = pixel
         needsDisplay = true
         onLayerContentChanged?()
@@ -130,9 +146,9 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         let pixel = pixelCoordinate(for: event)
         if let last = lastPixel {
-            layerStack.activeLayer.canvas.drawLine(from: last, to: pixel, color: penColor)
+            layerStack.activeLayer.canvas.drawLine(from: last, to: pixel, color: paintColor)
         } else {
-            layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: penColor)
+            layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor)
         }
         lastPixel = pixel
         needsDisplay = true

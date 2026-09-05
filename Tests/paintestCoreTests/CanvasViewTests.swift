@@ -292,7 +292,7 @@ final class CanvasViewTests: XCTestCase {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.layerStack.addLayer() // index 1, becomes active; bottom layer (index 0) is white
-        view.penColor = .black
+        view.foregroundColor = .black
 
         let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
         view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
@@ -309,7 +309,7 @@ final class CanvasViewTests: XCTestCase {
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.layerStack.addLayer() // index 1, becomes active
         view.layerStack.setVisibility(false, at: view.layerStack.activeLayerIndex)
-        view.penColor = .black
+        view.foregroundColor = .black
 
         let targetPoint = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
         view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
@@ -336,7 +336,7 @@ final class CanvasViewTests: XCTestCase {
     func testMouseDown_notifiesOnLayerContentChanged() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
-        view.penColor = .black
+        view.foregroundColor = .black
         var notifiedCount = 0
         view.onLayerContentChanged = { notifiedCount += 1 }
 
@@ -349,7 +349,7 @@ final class CanvasViewTests: XCTestCase {
     func testMouseDragged_notifiesOnLayerContentChanged() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
-        view.penColor = .black
+        view.foregroundColor = .black
         let startPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
         view.mouseDown(with: mouseDownEvent(at: startPoint, in: view.window!))
         var notifiedCount = 0
