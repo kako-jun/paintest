@@ -71,6 +71,16 @@ enum PaintestDocument {
             return nil
         }
 
+        // A manifest that explicitly declares zero layers is just as
+        // invalid as a missing manifest or an undecodable layer PNG — there
+        // is no legitimate document with no layers at all, so refuse it
+        // rather than fabricating a blank placeholder layer (see issue #8
+        // review S1: this used to silently synthesize a single white layer
+        // here, inconsistent with every other malformed-input case above).
+        guard !manifest.layers.isEmpty else {
+            return nil
+        }
+
         let sortedEntries = manifest.layers.sorted { $0.order < $1.order }
         var layers: [Layer] = []
         for entry in sortedEntries {

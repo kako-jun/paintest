@@ -156,28 +156,14 @@ final class PaintestDocumentTests: XCTestCase {
     }
 
     // MARK: - Empty layers array (test list 32, decision table 2-2 row 5)
-    // Explicitly out of scope for the 3-bug-fix pass this test suite is
-    // pinned to (see task instructions) — this locks in the CURRENT,
-    // unmodified behavior as a regression test. It does not assert that
-    // this is the *right* behavior.
+    // Fixed behavior (was the bug this test locks in, issue #8 review S1):
+    // a manifest with `layers == []` used to fabricate a single blank
+    // "レイヤー1" layer instead of being rejected, unlike every other
+    // malformed-input case in this file (missing manifest, corrupted
+    // manifest, missing/corrupted layer PNG, dimension mismatch). Now it is
+    // treated the same way: `read(from:)` returns `nil`.
 
-    /// Observed current behavior (verified experimentally before writing
-    /// this test): `manifest.layers == []` does NOT make `read(from:)`
-    /// return `nil`. The `for entry in sortedEntries` loop simply never
-    /// runs, so `layers` stays `[]`, and that empty array is handed to
-    /// `LayerStack.init(width:height:layers:activeLayerIndex:)` — which
-    /// silently falls back to a single blank white "レイヤー1" layer sized
-    /// to the manifest's width/height, and clamps `activeLayerIndex` to 0
-    /// (ignoring whatever value the manifest actually had).
-    ///
-    /// NOTE (test author's observation, not a code change): this seems like
-    /// a questionable design — a document manifest that explicitly says
-    /// "zero layers" reads back as a *fabricated* single-layer document
-    /// instead of being treated as invalid input, and the manifest's own
-    /// `activeLayerIndex` is silently discarded rather than validated. This
-    /// is flagged here only as a comment, per this test's instructions: it
-    /// is out of scope for this round of fixes and the code is not changed.
-    func testRead_emptyLayersArrayInManifest_fabricatesASingleBlankLayer_currentBehaviorLocked() {
+    func testRead_emptyLayersArrayInManifest_returnsNil() {
         let url = makeTempDocumentURL()
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         let manifestJSON = """
@@ -185,16 +171,7 @@ final class PaintestDocumentTests: XCTestCase {
         """
         try? Data(manifestJSON.utf8).write(to: url.appendingPathComponent("manifest.json"))
 
-        guard let loaded = PaintestDocument.read(from: url) else {
-            XCTFail("current behavior is to return a fabricated LayerStack, not nil — if this now fails, the empty-layers behavior changed and this test (and its comment) need revisiting")
-            return
-        }
-
-        XCTAssertEqual(loaded.width, 5)
-        XCTAssertEqual(loaded.height, 6)
-        XCTAssertEqual(loaded.layers.count, 1)
-        XCTAssertEqual(loaded.layers[0].name, "レイヤー1")
-        XCTAssertEqual(loaded.activeLayerIndex, 0, "manifest's activeLayerIndex (3) is out of range for a 1-layer fallback and is silently clamped, not validated")
+        XCTAssertNil(PaintestDocument.read(from: url))
     }
 
     // MARK: - order stable-sort with gaps/duplicates (test list 33)
