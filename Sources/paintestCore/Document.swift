@@ -13,6 +13,11 @@ final class Document {
     /// document's zoom onto every other tab (issue #15 follow-up).
     var zoomScale: Int
 
+    // `zoomScale`'s default reaches into `CanvasView` (a view-layer type) for
+    // its initial value, so this model type isn't fully independent of the
+    // view layer (review N2 on #18). Left as-is rather than reworked here:
+    // it keeps "what zoom does a brand-new document start at" defined in
+    // exactly one place instead of duplicating the constant.
     init(layerStack: LayerStack, displayName: String = "untitled", fileURL: URL? = nil, zoomScale: Int = CanvasView.defaultZoomScale) {
         self.layerStack = layerStack
         self.displayName = displayName
