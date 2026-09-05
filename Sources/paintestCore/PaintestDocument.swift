@@ -16,6 +16,7 @@ struct DocumentManifest: Codable {
     var width: Int
     var height: Int
     var layers: [LayerManifestEntry]
+    var activeLayerIndex: Int
 }
 
 /// Reads and writes `.paintestdoc` packages: a plain directory containing
@@ -46,7 +47,12 @@ enum PaintestDocument {
             ))
         }
 
-        let manifest = DocumentManifest(width: layerStack.width, height: layerStack.height, layers: entries)
+        let manifest = DocumentManifest(
+            width: layerStack.width,
+            height: layerStack.height,
+            layers: entries,
+            activeLayerIndex: layerStack.activeLayerIndex
+        )
         let manifestData = try JSONEncoder().encode(manifest)
         try manifestData.write(to: url.appendingPathComponent(manifestFileName))
     }
@@ -69,7 +75,12 @@ enum PaintestDocument {
             layers.append(Layer(canvas: canvas, name: entry.name, isVisible: entry.isVisible, opacity: entry.opacity))
         }
 
-        return LayerStack(width: manifest.width, height: manifest.height, layers: layers)
+        return LayerStack(
+            width: manifest.width,
+            height: manifest.height,
+            layers: layers,
+            activeLayerIndex: manifest.activeLayerIndex
+        )
     }
 }
 
