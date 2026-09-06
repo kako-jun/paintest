@@ -546,19 +546,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         documentTabBarView.reload()
         updateWindowTitle(for: document)
 
-        // Keeps the magnifier's options-bar dropdown showing the
-        // newly-displayed document's own zoom rather than the previous
-        // tab's (issue #13) — zoom is per-`Document` state (issue #15
-        // follow-up). `setZoomScale(_:)` above already routes through
-        // `onZoomChanged`'s own dropdown-refresh, but that closure reads
-        // `canvasView.activeTool` at the time zoom changes, which is
-        // whatever tool is active regardless of which document is
-        // displayed — this explicit call is what's actually keyed to "a
-        // document switch just happened", making the intent obvious here
-        // rather than relying on that side effect.
-        if canvasView.activeTool == .magnifier {
-            updateOptionBar(for: .magnifier)
-        }
+        // No separate options-bar refresh needed here: `setZoomScale(_:)`
+        // above synchronously fires `onZoomChanged`, which already calls
+        // `updateOptionBar(for: .magnifier)` when the magnifier is active
+        // (issue #13) — same thread, same call stack, so `activeTool`
+        // can't change in between.
 
         displayedDocument = document
     }

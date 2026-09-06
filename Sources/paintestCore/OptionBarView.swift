@@ -53,6 +53,7 @@ final class OptionBarView: NSView {
 
         for level in levels {
             popUp.addItem(withTitle: "\(level * 100)%")
+            popUp.lastItem?.tag = level
         }
         if let matchIndex = levels.firstIndex(of: currentZoomScale) {
             popUp.selectItem(at: matchIndex)
@@ -75,14 +76,16 @@ final class OptionBarView: NSView {
     }
 
     @objc private func zoomPresetChanged(_ sender: NSPopUpButton) {
-        // Bug fix (found while writing tests for issue #13): the item's
-        // title is "\(level * 100)%" (e.g. "3200%" for level 32), so
-        // `dropLast()` alone only strips the "%" and leaves the *percentage*
-        // (3200), not the level (32). Passing that straight to `onSelect`
-        // meant every dropdown selection silently did nothing in
-        // production, since `CanvasView.setZoomScale(_:)` rejects any value
-        // not in `zoomLevels` ([1, 2, 4, 8, 16, 32]) — 3200 never matches.
-        guard let title = sender.titleOfSelectedItem, let percent = Int(title.dropLast()) else { return }
-        onZoomPresetSelected?(percent / 100)
+        // Each item's `tag` carries the raw zoom level (issue #13
+        // self-review should-1) rather than deriving it from the displayed
+        // title (e.g. "3200%"). Parsing the display string back into a
+        // level was fragile — a future label format or localization change
+        // would silently break `onSelect` the way an earlier version of
+        // this method did (it parsed the *percentage* instead of the
+        // level, so every selection was a no-op since
+        // `CanvasView.setZoomScale(_:)` rejects values outside
+        // `zoomLevels`).
+        guard let level = sender.selectedItem?.tag else { return }
+        onZoomPresetSelected?(level)
     }
 }

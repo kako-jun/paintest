@@ -127,7 +127,10 @@ final class CanvasView: NSView {
     ///
     /// Falls back to `levels.first` (the smallest zoom) when even that
     /// doesn't fit — the best effort available when the dragged rectangle is
-    /// larger than the viewport can show at any supported zoom.
+    /// larger than the viewport can show at any supported zoom. This
+    /// fallback assumes `levels` is sorted ascending: `fitting.max()` above
+    /// doesn't care about order, but `levels.first` as "the smallest zoom"
+    /// only holds if it is.
     static func bestFitZoomLevel(forPixelSize size: (width: Int, height: Int), viewportSize: NSSize, levels: [Int]) -> Int {
         let fitting = levels.filter { level in
             CGFloat(size.width * level) <= viewportSize.width && CGFloat(size.height * level) <= viewportSize.height
@@ -159,17 +162,23 @@ final class CanvasView: NSView {
         // doesn't go through the dot-perfect/no-antialiasing path above —
         // see the doc comment on `magnifierDragStart`.
         if activeTool == .magnifier, let start = magnifierDragStart, let current = magnifierDragCurrent {
-            context.setShouldAntialias(true)
             let rect = NSRect(
                 x: min(start.x, current.x),
                 y: min(start.y, current.y),
                 width: abs(current.x - start.x),
                 height: abs(current.y - start.y)
             )
-            context.setStrokeColor(NSColor.selectedControlColor.cgColor)
-            context.setLineWidth(1)
-            context.setLineDash(phase: 0, lengths: [4, 3])
-            context.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
+            // Guards against the zero-size rect right after `mouseDown`,
+            // before `mouseDragged` has fired even once: `start == current`
+            // there, and insetting a zero-size rect by (0.5, 0.5) would
+            // make its width/height negative.
+            if rect.width > 0 && rect.height > 0 {
+                context.setShouldAntialias(true)
+                context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+                context.setLineWidth(1)
+                context.setLineDash(phase: 0, lengths: [4, 3])
+                context.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
+            }
         }
     }
 
