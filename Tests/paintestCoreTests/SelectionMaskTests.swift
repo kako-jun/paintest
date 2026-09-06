@@ -124,6 +124,39 @@ final class SelectionMaskTests: XCTestCase {
         XCTAssertTrue(mask.boundaryEdges().isEmpty)
     }
 
+    // MARK: - polygon (round 2 minimal sanity coverage; full observation-point
+    // coverage — concave/self-intersecting shapes, exact edge-pixel
+    // boundaries, etc. — is a follow-up test-writing pass's job, same as the
+    // rest of this file's round-1 disclaimer above.)
+
+    func testPolygon_fewerThanThreeVertices_isEmpty_notACrash() {
+        XCTAssertTrue(SelectionMask.polygon(vertices: [], width: 4, height: 4).isEmpty)
+        XCTAssertTrue(SelectionMask.polygon(vertices: [(x: 0, y: 0)], width: 4, height: 4).isEmpty)
+        XCTAssertTrue(SelectionMask.polygon(vertices: [(x: 0, y: 0), (x: 1, y: 1)], width: 4, height: 4).isEmpty)
+    }
+
+    func testPolygon_square_selectsInteriorNotOutside() {
+        // A closed square from (1,1) to (3,3) via its four corners.
+        let mask = SelectionMask.polygon(
+            vertices: [(x: 1, y: 1), (x: 3, y: 1), (x: 3, y: 3), (x: 1, y: 3)],
+            width: 6, height: 6
+        )
+        XCTAssertTrue(mask.contains(x: 2, y: 2), "the square's center pixel must be selected")
+        XCTAssertFalse(mask.contains(x: 0, y: 0), "well outside the square must not be selected")
+        XCTAssertFalse(mask.contains(x: 5, y: 5), "well outside the square must not be selected")
+    }
+
+    func testPolygon_implicitlyClosesPath() {
+        // Only 3 vertices given, none repeated — the polygon must still
+        // close the last edge back to the first vertex on its own.
+        let mask = SelectionMask.polygon(
+            vertices: [(x: 0, y: 0), (x: 4, y: 0), (x: 0, y: 4)],
+            width: 5, height: 5
+        )
+        XCTAssertTrue(mask.contains(x: 1, y: 1), "inside the implied triangle must be selected")
+        XCTAssertFalse(mask.contains(x: 4, y: 4), "outside the implied triangle must not be selected")
+    }
+
     func testBoundaryEdges_adjacentSelectedPixelsShareNoInternalEdge() {
         // Two side-by-side selected pixels: the shared internal edge between
         // them must not be emitted, only the 6 outer sides of the 2x1 block.

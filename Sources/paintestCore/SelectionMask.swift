@@ -6,14 +6,15 @@ import AppKit
 /// `PixelCanvas`'s "dot-exact, no blur" philosophy: a pixel is either inside
 /// the selection or it isn't, with no soft edges.
 ///
-/// This round (round 1 of 3) only needs to build masks from rectangle and
-/// ellipse marquees (`rectangle(...)`/`ellipse(...)`), combine them
-/// (`unioned`/`subtracting`/`intersected`), and trace their outline
-/// (`boundaryEdges()`). Lasso/polygon/magic-wand selections (rounds 2-3) are
-/// expected to build a `SelectionMask` some other way (e.g. scan-converting
-/// a free-form path, or flood-filling) but then reuse every method here
-/// unchanged — `boundaryEdges()` in particular is deliberately shape-agnostic
-/// (see its own doc comment) so it doesn't need revisiting once those land.
+/// Round 1 of 3 built masks from rectangle and ellipse marquees
+/// (`rectangle(...)`/`ellipse(...)`); round 2 adds the lasso/polygon tools'
+/// free-form path via `polygon(...)`. All three shape constructors combine
+/// through the same `unioned`/`subtracting`/`intersected` methods and trace
+/// through the same `boundaryEdges()` — deliberately shape-agnostic (see its
+/// own doc comment) so it needed no changes for `polygon(...)` to reuse it.
+/// Magic-wand selection (round 3) is expected to build a `SelectionMask`
+/// some other way (e.g. flood-filling) but reuse everything else here
+/// unchanged too.
 final class SelectionMask {
     let width: Int
     let height: Int
@@ -95,6 +96,60 @@ final class SelectionMask {
                 let dx = (Double(x) + 0.5) - centerX
                 let normalized = (dx / radiusX) * (dx / radiusX) + (dy / radiusY) * (dy / radiusY)
                 if normalized <= 1 {
+                    mask.setSelected(true, x: x, y: y)
+                }
+            }
+        }
+        return mask
+    }
+
+    /// A filled polygon selection, scan-converted from a free-form vertex
+    /// path (issue #11, round 2: backs both the lasso's dragged path and the
+    /// polygon tool's clicked-vertex path). The path is treated as
+    /// implicitly closed — the last vertex is joined back to the first even
+    /// if the caller never repeated it — matching how both tools describe
+    /// "close the shape" (lasso: mouse-up; polygon: click near the first
+    /// vertex or press Return).
+    ///
+    /// Each pixel's *center* — `(x + 0.5, y + 0.5)`, same convention as
+    /// `ellipse(...)` — is tested against the polygon with the standard
+    /// even-odd (crossing-number) rule: cast a ray from the pixel center
+    /// toward `+x` and count how many polygon edges it crosses; odd means
+    /// inside. This naturally handles self-intersecting/concave paths the
+    /// same way Photoshop's lasso does, with no special-casing.
+    ///
+    /// Fewer than 3 vertices can't enclose any area, so that case is guarded
+    /// and simply produces an empty mask (mirroring `ellipse(...)`'s
+    /// non-positive-radius guard) rather than the degenerate 0- or 1-edge
+    /// polygon that dropping straight into the ray-casting loop would trace.
+    static func polygon(vertices: [(x: Int, y: Int)], width: Int, height: Int) -> SelectionMask {
+        let mask = SelectionMask(width: width, height: height)
+        guard vertices.count >= 3 else { return mask }
+
+        for y in 0..<height {
+            let py = Double(y) + 0.5
+            for x in 0..<width {
+                let px = Double(x) + 0.5
+                var inside = false
+                var j = vertices.count - 1
+                for i in 0..<vertices.count {
+                    let xi = Double(vertices[i].x) + 0.5
+                    let yi = Double(vertices[i].y) + 0.5
+                    let xj = Double(vertices[j].x) + 0.5
+                    let yj = Double(vertices[j].y) + 0.5
+                    // Standard even-odd crossing test: does edge (i, j)
+                    // straddle the horizontal line at `py`, and if so, does
+                    // it cross to the right of `px`?
+                    let straddles = (yi > py) != (yj > py)
+                    if straddles {
+                        let crossingX = xi + (py - yi) / (yj - yi) * (xj - xi)
+                        if px < crossingX {
+                            inside.toggle()
+                        }
+                    }
+                    j = i
+                }
+                if inside {
                     mask.setSelected(true, x: x, y: y)
                 }
             }
