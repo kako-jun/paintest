@@ -121,6 +121,21 @@ final class LayerStack {
         layers[index].opacity = opacity
     }
 
+    // MARK: - Duplication
+
+    /// Returns a fully independent deep copy of this `LayerStack` — every
+    /// layer's `canvas` is duplicated via `PixelCanvas.copy()`, not shared
+    /// with the original (issue #19: `HistoryManager` snapshots the whole
+    /// stack on every recorded edit, and must never let a later live edit
+    /// reach back into a stored snapshot, or vice versa — see issue #9's
+    /// "reused a reference" bug this app already hit once).
+    func copy() -> LayerStack {
+        let copiedLayers = layers.map { layer in
+            Layer(canvas: layer.canvas.copy(), name: layer.name, isVisible: layer.isVisible, opacity: layer.opacity)
+        }
+        return LayerStack(width: width, height: height, layers: copiedLayers, activeLayerIndex: activeLayerIndex)
+    }
+
     // MARK: - Compositing
 
     /// Flattens every visible layer, bottom-to-top, into a single image
