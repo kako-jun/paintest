@@ -125,6 +125,147 @@ final class PixelCanvas {
         }
     }
 
+    // MARK: - Antialiased drawing (pen tool, issue #10)
+    //
+    // Unlike `setPixel`/`drawLine` above (nearest-neighbor, dot-exact, no
+    // anti-aliasing — kept untouched for the pencil/eraser), these two
+    // methods go through a real `CGContext` fill/stroke path so the pen
+    // tool can produce smooth, anti-aliased strokes. This intentionally
+    // does NOT touch `setPixel`/`drawLine`: the pencil/eraser's byte-exact
+    // guarantee must not regress.
+    //
+    // `NSGraphicsContext(bitmapImageRep: bitmap)?.cgContext` — drawing
+    // straight onto `self.bitmap`'s own context — turned out NOT to work:
+    // it returns `nil` for `bitmap`, because `bitmap` is deliberately
+    // `.alphaNonpremultiplied` (see `makeBitmap`'s doc comment, needed for
+    // correct straight-alpha PNG round-tripping) and Core Graphics bitmap
+    // contexts only support premultiplied alpha for drawing. Confirmed by
+    // hand: `NSGraphicsContext(bitmapImageRep:)` returns a real context for
+    // an equivalent bitmap with the default (premultiplied) format, and
+    // `nil` once `.alphaNonpremultiplied` is set — so instead, the shape is
+    // drawn into a scratch premultiplied overlay bitmap of the same size,
+    // then manually alpha-composited ("over") onto `bitmap`'s own
+    // straight-alpha buffer.
+
+    /// Same pixel layout as `makeBitmap`, minus `.alphaNonpremultiplied`,
+    /// so `NSGraphicsContext(bitmapImageRep:)` can actually vend a
+    /// `CGContext` for it.
+    private func makePremultipliedOverlay() -> NSBitmapImageRep? {
+        NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+    }
+
+    /// Draws into a transparent, premultiplied scratch overlay the size of
+    /// this canvas via `draw`, then alpha-composites ("source over") the
+    /// result onto `bitmap`'s own straight-alpha buffer.
+    ///
+    /// The overlay's `CGContext` is oriented so CG's (0, 0) matches
+    /// `setPixel`'s top-left-origin pixel-space convention: Core Graphics'
+    /// native origin is bottom-left with y increasing upward, while
+    /// `setPixel`/`rawPixel` treat row 0 of the buffer as the top row.
+    /// Without the translate+flip below, a dot drawn "at (0, 0)" would land
+    /// in the bottom-left corner instead of the top-left — verified
+    /// empirically (not assumed) by
+    /// `PixelCanvasTests.testDrawAntialiasedDot_atOrigin_paintsTopLeftCorner_notBottomLeft`,
+    /// which fails without this flip and passes with it.
+    private func drawAntialiased(_ draw: (CGContext) -> Void) {
+        guard let overlay = makePremultipliedOverlay(),
+              let overlayData = overlay.bitmapData,
+              let context = NSGraphicsContext(bitmapImageRep: overlay)?.cgContext,
+              let destData = bitmap.bitmapData else { return }
+
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        context.setShouldAntialias(true)
+        draw(context)
+
+        let overlayBytesPerRow = overlay.bytesPerRow
+        let overlayBpp = overlay.bitsPerPixel / 8
+        let destBytesPerRow = bitmap.bytesPerRow
+        let destBpp = bitmap.bitsPerPixel / 8
+
+        for y in 0..<height {
+            let overlayRowStart = y * overlayBytesPerRow
+            let destRowStart = y * destBytesPerRow
+            for x in 0..<width {
+                let srcOffset = overlayRowStart + x * overlayBpp
+                let srcAlphaByte = overlayData[srcOffset + 3]
+                guard srcAlphaByte > 0 else { continue }
+
+                let srcAlpha = Double(srcAlphaByte) / 255.0
+                // Un-premultiply: the overlay stores each channel as
+                // component * alpha, so dividing by alpha recovers the
+                // straight (0-255) component.
+                let srcR = Double(overlayData[srcOffset]) / srcAlpha
+                let srcG = Double(overlayData[srcOffset + 1]) / srcAlpha
+                let srcB = Double(overlayData[srcOffset + 2]) / srcAlpha
+
+                let destOffset = destRowStart + x * destBpp
+                let destAlpha = Double(destData[destOffset + 3]) / 255.0
+                let destR = Double(destData[destOffset])
+                let destG = Double(destData[destOffset + 1])
+                let destB = Double(destData[destOffset + 2])
+
+                // Standard "source over destination" compositing on
+                // straight-alpha buffers.
+                let outAlpha = srcAlpha + destAlpha * (1 - srcAlpha)
+                let blend: (Double, Double) -> Double = { src, dst in
+                    guard outAlpha > 0 else { return 0 }
+                    return (src * srcAlpha + dst * destAlpha * (1 - srcAlpha)) / outAlpha
+                }
+
+                destData[destOffset] = UInt8(max(0, min(255, blend(srcR, destR).rounded())))
+                destData[destOffset + 1] = UInt8(max(0, min(255, blend(srcG, destG).rounded())))
+                destData[destOffset + 2] = UInt8(max(0, min(255, blend(srcB, destB).rounded())))
+                destData[destOffset + 3] = UInt8(max(0, min(255, (outAlpha * 255).rounded())))
+            }
+        }
+    }
+
+    /// Paints a filled, anti-aliased circle centered on `point`, in
+    /// `setPixel`'s top-left-origin pixel-space coordinates. Used by the pen
+    /// tool for a single click (no drag).
+    func drawAntialiasedDot(at point: (x: Int, y: Int), color: NSColor, diameter: CGFloat) {
+        drawAntialiased { context in
+            context.setFillColor(color.cgColor)
+            let radius = diameter / 2
+            let rect = CGRect(
+                x: CGFloat(point.x) + 0.5 - radius,
+                y: CGFloat(point.y) + 0.5 - radius,
+                width: diameter,
+                height: diameter
+            )
+            context.fillEllipse(in: rect)
+        }
+    }
+
+    /// Strokes an anti-aliased, round-capped/joined line between two points,
+    /// in `setPixel`'s top-left-origin pixel-space coordinates. Used by the
+    /// pen tool while dragging.
+    func drawAntialiasedLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int), color: NSColor, lineWidth: CGFloat) {
+        drawAntialiased { context in
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            context.setLineWidth(lineWidth)
+            context.setStrokeColor(color.cgColor)
+            context.beginPath()
+            context.move(to: CGPoint(x: CGFloat(p0.x) + 0.5, y: CGFloat(p0.y) + 0.5))
+            context.addLine(to: CGPoint(x: CGFloat(p1.x) + 0.5, y: CGFloat(p1.y) + 0.5))
+            context.strokePath()
+        }
+    }
+
     // MARK: - Rendering
 
     var cgImage: CGImage? {

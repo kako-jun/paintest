@@ -87,6 +87,64 @@ final class PixelCanvasTests: XCTestCase {
         }
     }
 
+    // MARK: - drawAntialiasedDot / drawAntialiasedLine (pen tool, issue #10)
+    //
+    // `NSGraphicsContext(bitmapImageRep:).cgContext` is not flipped by
+    // default (CG's native origin is bottom-left, y up), while
+    // `setPixel`/`rawPixel` treat row 0 of the same buffer as the top row.
+    // This test is the empirical proof (not an assumption) that
+    // `PixelCanvas`'s antialiased-drawing context corrects for that: a dot
+    // requested "at (0, 0)" must land in the canvas's top-left corner, not
+    // its bottom-left. Before the translate+flip in
+    // `makeAntialiasedContext()`, this test failed (the dot appeared at the
+    // bottom-left instead).
+
+    func testDrawAntialiasedDot_atOrigin_paintsTopLeftCorner_notBottomLeft() {
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        canvas.drawAntialiasedDot(at: (x: 0, y: 0), color: .black, diameter: 3)
+
+        let topLeft = canvas.rawPixel(x: 0, y: 0)
+        XCTAssertNotNil(topLeft)
+        XCTAssertLessThan(topLeft?.r ?? 255, 255, "the dot drawn at (0,0) should darken the top-left corner")
+
+        let bottomLeft = canvas.rawPixel(x: 0, y: canvas.height - 1)
+        XCTAssertEqual(bottomLeft?.r, 255, "the bottom-left corner must stay untouched background color")
+        XCTAssertEqual(bottomLeft?.g, 255)
+        XCTAssertEqual(bottomLeft?.b, 255)
+    }
+
+    func testDrawAntialiasedDot_producesSoftEdge_unlikeSetPixel() {
+        // The defining difference from the pencil's `setPixel`: a wide
+        // antialiased dot leaves partially-covered (non-0/255) alpha or
+        // color values at its edge instead of a hard binary boundary.
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        canvas.drawAntialiasedDot(at: (x: 10, y: 10), color: .black, diameter: 8)
+
+        var foundPartialCoverage = false
+        for y in 6...14 {
+            for x in 6...14 {
+                guard let pixel = canvas.rawPixel(x: x, y: y) else { continue }
+                if pixel.r != 0, pixel.r != 255 {
+                    foundPartialCoverage = true
+                }
+            }
+        }
+        XCTAssertTrue(foundPartialCoverage, "an antialiased dot should have partially-covered edge pixels, unlike the pencil's hard edges")
+    }
+
+    func testDrawAntialiasedLine_paintsBetweenEndpoints() {
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        canvas.drawAntialiasedLine(from: (x: 2, y: 10), to: (x: 17, y: 10), color: .black, lineWidth: 3)
+
+        // Midpoint of the stroke should be solidly painted.
+        let midpoint = canvas.rawPixel(x: 10, y: 10)
+        XCTAssertEqual(midpoint?.r, 0)
+
+        // Far outside the stroke's line width should stay untouched.
+        let farAbove = canvas.rawPixel(x: 10, y: 2)
+        XCTAssertEqual(farAbove?.r, 255)
+    }
+
     // MARK: - drawLine
 
     func testDrawLine_horizontal_fillsExactRunAndNothingElse() {
