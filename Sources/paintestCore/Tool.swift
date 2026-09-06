@@ -23,4 +23,13 @@ enum Tool {
     /// `CanvasView`'s `mouseDown`/`mouseDragged`/`mouseUp` handling and
     /// `bestFitZoomLevel(forPixelSize:viewportSize:levels:)`.
     case magnifier
+    /// Drags out a rectangular selection instead of painting (issue #11,
+    /// round 1 of 3 — lasso/polygon/magic-wand selections are separate
+    /// rounds, not added here). See `CanvasView`'s
+    /// `mouseDown`/`mouseDragged`/`mouseUp` handling and `SelectionMask`.
+    case rectangleSelect
+    /// Drags out an elliptical selection instead of painting (issue #11,
+    /// round 1 of 3). Same handling as `rectangleSelect`, just backed by
+    /// `SelectionMask.ellipse(...)` instead of `SelectionMask.rectangle(...)`.
+    case ellipseSelect
 }

@@ -12,6 +12,15 @@ final class Document {
     /// each document's own zoom instead of leaking the last-viewed
     /// document's zoom onto every other tab (issue #15 follow-up).
     var zoomScale: Int
+    /// The active selection, if any — `nil` means "no restriction", i.e. the
+    /// whole canvas is editable (issue #11). Kept per-document, same as
+    /// `zoomScale` above, so switching tabs restores each document's own
+    /// selection instead of leaking it onto every other tab.
+    ///
+    /// Deliberately **not** persisted by `.paintestdoc` save/load: a
+    /// selection is transient UI state, not document content, so it doesn't
+    /// round-trip through save/open (out of scope for issue #11).
+    var selection: SelectionMask?
 
     // `zoomScale`'s default reaches into `CanvasView` (a view-layer type) for
     // its initial value, so this model type isn't fully independent of the
