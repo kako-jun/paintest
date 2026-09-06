@@ -2,11 +2,12 @@ import AppKit
 
 /// Photoshop's left-hand toolbox: a single vertical column of tool icons
 /// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, the
-/// eyedropper, the magnifier, and the rectangle/ellipse/lasso/polygon select
-/// tools are wired to real behavior (issues #5, #10, #14, #13, #11) —
-/// clicking any of them fires `onToolSelected` and exclusively toggles that
-/// button's pressed state against the others' — so every other button here
-/// stays a purely visual placeholder with no target/action, same as before.
+/// eyedropper, the magnifier, and the rectangle/ellipse/lasso/polygon/magic-
+/// wand select tools are wired to real behavior (issues #5, #10, #14, #13,
+/// #11) — clicking any of them fires `onToolSelected` and exclusively
+/// toggles that button's pressed state against the others' — so every other
+/// button here stays a purely visual placeholder with no target/action, same
+/// as before.
 /// The pencil cell renders pressed (`state == .on`) by default so the
 /// column still communicates "this is the active tool" the way the
 /// reference screenshots do.
@@ -21,9 +22,9 @@ final class ToolboxView: NSView {
         let label: String
         // Non-nil only for the buttons wired up so far — pencil/eraser
         // (issue #5), pen (issue #10), the eyedropper (issue #14), the
-        // magnifier (issue #13), and the rectangle/ellipse/lasso/polygon
-        // select tools (issue #11); every other descriptor stays `nil` and
-        // its button gets no target/action, matching the previous
+        // magnifier (issue #13), and the rectangle/ellipse/lasso/polygon/
+        // magic-wand select tools (issue #11); every other descriptor stays
+        // `nil` and its button gets no target/action, matching the previous
         // all-placeholder behavior.
         let tool: Tool?
     }
@@ -35,6 +36,7 @@ final class ToolboxView: NSView {
         ToolDescriptor(symbol: "hexagon.dashed", label: "多角形選択", tool: .polygonSelect),
         ToolDescriptor(symbol: "rectangle.dashed", label: "矩形選択", tool: .rectangleSelect),
         ToolDescriptor(symbol: "circle.dashed", label: "楕円選択", tool: .ellipseSelect),
+        ToolDescriptor(symbol: "wand.and.rays", label: "マジックワンド", tool: .magicWandSelect),
         ToolDescriptor(symbol: "eraser", label: "消しゴム", tool: .eraser),
         ToolDescriptor(symbol: "drop.fill", label: "塗りつぶし", tool: nil),
         ToolDescriptor(symbol: "eyedropper", label: "スポイト", tool: .eyedropper),

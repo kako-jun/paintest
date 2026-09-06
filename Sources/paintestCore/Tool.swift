@@ -44,4 +44,11 @@ enum Tool {
     /// first vertex or pressing Return, and cancelable with Escape. See
     /// `CanvasView`'s `mouseDown`/`keyDown` handling.
     case polygonSelect
+    /// Clicks a starting pixel and flood-fills outward by color similarity
+    /// instead of painting (issue #11, round 3 of 3 — the last of the five
+    /// selection tools). Unlike the other four selection tools, this one
+    /// needs no drag/multi-click gesture state of its own: a single click is
+    /// the whole gesture. See `CanvasView`'s `mouseDown` handling and
+    /// `SelectionMask.magicWand(...)`.
+    case magicWandSelect
 }
