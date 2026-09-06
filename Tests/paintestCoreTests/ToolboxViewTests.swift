@@ -38,9 +38,9 @@ final class ToolboxViewTests: XCTestCase {
         _ = makeView()
     }
 
-    func testButtonCount_equals17() {
+    func testButtonCount_equals18() {
         let view = makeView()
-        XCTAssertEqual(allButtons(in: view).count, 17)
+        XCTAssertEqual(allButtons(in: view).count, 18)
     }
 
     func testExactlyOneButton_isPressedByDefault() {
@@ -56,15 +56,15 @@ final class ToolboxViewTests: XCTestCase {
     }
 
     // Pencil, eraser, pen, the eyedropper, the magnifier, and the
-    // rectangle/ellipse select tools are wired to real behavior (issues #5,
-    // #10, #14, #13, #11); every other button stays a purely visual
-    // placeholder with no target/action, same as before.
-    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択"]
+    // rectangle/ellipse/lasso/polygon select tools are wired to real
+    // behavior (issues #5, #10, #14, #13, #11); every other button stays a
+    // purely visual placeholder with no target/action, same as before.
+    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択"]
 
     func testOnlyPencilEraserPenEyedropperMagnifierAndSelectTools_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 7)
+        XCTAssertEqual(wired.count, 9)
         for button in wired {
             XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier/select tools must be wired to onToolSelected")
             XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier/select tools must be wired to onToolSelected")
@@ -74,7 +74,7 @@ final class ToolboxViewTests: XCTestCase {
     func testOtherButtons_haveNoTargetOrAction() {
         let view = makeView()
         let placeholders = allButtons(in: view).filter { !Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(placeholders.count, 10)
+        XCTAssertEqual(placeholders.count, 9)
         for button in placeholders {
             XCTAssertNil(button.target, "non-wired tool buttons are visual placeholders; wiring is out of scope")
             XCTAssertNil(button.action, "non-wired tool buttons are visual placeholders; wiring is out of scope")

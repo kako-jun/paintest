@@ -2,11 +2,11 @@ import AppKit
 
 /// Photoshop's left-hand toolbox: a single vertical column of tool icons
 /// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, the
-/// eyedropper, the magnifier, and the rectangle/ellipse select tools are
-/// wired to real behavior (issues #5, #10, #14, #13, #11) — clicking any of
-/// them fires `onToolSelected` and exclusively toggles that button's pressed
-/// state against the others' — so every other button here stays a purely
-/// visual placeholder with no target/action, same as before.
+/// eyedropper, the magnifier, and the rectangle/ellipse/lasso/polygon select
+/// tools are wired to real behavior (issues #5, #10, #14, #13, #11) —
+/// clicking any of them fires `onToolSelected` and exclusively toggles that
+/// button's pressed state against the others' — so every other button here
+/// stays a purely visual placeholder with no target/action, same as before.
 /// The pencil cell renders pressed (`state == .on`) by default so the
 /// column still communicates "this is the active tool" the way the
 /// reference screenshots do.
@@ -21,17 +21,18 @@ final class ToolboxView: NSView {
         let label: String
         // Non-nil only for the buttons wired up so far — pencil/eraser
         // (issue #5), pen (issue #10), the eyedropper (issue #14), the
-        // magnifier (issue #13), and the rectangle/ellipse select tools
-        // (issue #11); every other descriptor stays `nil` and its button
-        // gets no target/action, matching the previous all-placeholder
-        // behavior.
+        // magnifier (issue #13), and the rectangle/ellipse/lasso/polygon
+        // select tools (issue #11); every other descriptor stays `nil` and
+        // its button gets no target/action, matching the previous
+        // all-placeholder behavior.
         let tool: Tool?
     }
 
     // Top to bottom, one per row, matching Photoshop's single-column
     // toolbar layout.
     private static let tools: [ToolDescriptor] = [
-        ToolDescriptor(symbol: "lasso", label: "自由選択", tool: nil),
+        ToolDescriptor(symbol: "lasso", label: "投げ縄選択", tool: .lassoSelect),
+        ToolDescriptor(symbol: "hexagon.dashed", label: "多角形選択", tool: .polygonSelect),
         ToolDescriptor(symbol: "rectangle.dashed", label: "矩形選択", tool: .rectangleSelect),
         ToolDescriptor(symbol: "circle.dashed", label: "楕円選択", tool: .ellipseSelect),
         ToolDescriptor(symbol: "eraser", label: "消しゴム", tool: .eraser),

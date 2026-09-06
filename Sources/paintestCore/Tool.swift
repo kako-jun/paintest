@@ -32,4 +32,16 @@ enum Tool {
     /// round 1 of 3). Same handling as `rectangleSelect`, just backed by
     /// `SelectionMask.ellipse(...)` instead of `SelectionMask.rectangle(...)`.
     case ellipseSelect
+    /// Drags out a free-form selection instead of painting (issue #11,
+    /// round 2 of 3): the mouse-down/dragged points accumulate into a path
+    /// that's closed automatically (start joined to end) and scan-converted
+    /// with `SelectionMask.polygon(...)` on mouse-up. See `CanvasView`'s
+    /// `mouseDown`/`mouseDragged`/`mouseUp` handling.
+    case lassoSelect
+    /// Places selection vertices one click at a time instead of painting
+    /// (issue #11, round 2 of 3) — a click-based state machine independent
+    /// of `lassoSelect`'s drag-based one, closed either by clicking near the
+    /// first vertex or pressing Return, and cancelable with Escape. See
+    /// `CanvasView`'s `mouseDown`/`keyDown` handling.
+    case polygonSelect
 }
