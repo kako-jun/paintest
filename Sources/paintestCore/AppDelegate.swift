@@ -229,6 +229,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// Confirms unsaved changes across every open tab before quitting
+    /// (issue #4) — this app is single-window, so "close the window" and
+    /// "quit the app" are the same event. Each dirty document's tab is
+    /// activated before its own confirmation dialog, so the user can see
+    /// which document is being asked about; the first "キャンセル" answer
+    /// aborts the whole quit and leaves the rest unasked.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for index in documentManager.documents.indices {
+            let document = documentManager.documents[index]
+            guard document.isDirty else { continue }
+
+            documentManager.selectDocument(at: index)
+            activateActiveDocument()
+
+            guard resolveUnsavedChanges(for: document) else {
+                return .terminateCancel
+            }
+        }
+        return .terminateNow
+    }
+
     // MARK: - Root layout (issue #2: classic Paint's toolbox + canvas +
     // color palette + status bar impression, replacing #1's NSToolbar).
 
