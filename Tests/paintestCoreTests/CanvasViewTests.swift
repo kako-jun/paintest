@@ -1670,4 +1670,110 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertNotNil(view.selection, "switching away from a selection tool must not clear an already-confirmed selection")
         XCTAssertTrue(view.selection!.contains(x: 2, y: 2))
     }
+
+    // MARK: - Layer transform (issue #9, round 1: move + scale only)
+    //
+    // Only the two numeric checks the round-1 implementation plan calls out
+    // as its core-correctness bar: an untouched (identity) confirm must
+    // round-trip the canvas byte-exactly, and a corner-drag scale must
+    // nearest-neighbor-stretch the source pixels exactly where the inverse
+    // mapping predicts. A fuller decision-table pass (all 8 handles, Shift
+    // aspect lock, Escape-cancel, Return/double-click confirm, hit-test
+    // boundaries, etc.) is deliberately left to the follow-up test-authoring
+    // pass — see this task's own final report.
+
+    /// A window point for a *continuous* canvas-pixel-space coordinate
+    /// (unlike `windowPoint(forPixelCol:row:...)`, which targets a specific
+    /// pixel cell's interior) — needed here because transform handles sit at
+    /// exact rectangle corners/edge-midpoints, not pixel centers.
+    private func transformWindowPoint(canvasX: Double, canvasY: Double, zoomScale: Int, viewHeight: CGFloat) -> NSPoint {
+        NSPoint(x: canvasX * Double(zoomScale), y: Double(viewHeight) - canvasY * Double(zoomScale))
+    }
+
+    func testLayerTransform_commitWithNoDrag_reproducesOriginalCanvasByteExact() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let canvas = view.layerStack.activeLayer.canvas
+        // Every pixel gets its own distinct color so a byte-exact comparison
+        // actually exercises every (x, y), not just a couple of samples.
+        for y in 0..<8 {
+            for x in 0..<8 {
+                canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.5, alpha: 1))
+            }
+        }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 {
+            before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! })
+        }
+
+        view.beginLayerTransform()
+        view.commitLayerTransform()
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let after = canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(after?.r, before[y][x].r, "x=\(x) y=\(y) red drifted on an identity transform")
+                XCTAssertEqual(after?.g, before[y][x].g, "x=\(x) y=\(y) green drifted on an identity transform")
+                XCTAssertEqual(after?.b, before[y][x].b, "x=\(x) y=\(y) blue drifted on an identity transform")
+                XCTAssertEqual(after?.a, before[y][x].a, "x=\(x) y=\(y) alpha drifted on an identity transform")
+            }
+        }
+    }
+
+    func testLayerTransform_dragBottomRightCornerToDoubleSize_commitsWithNearestNeighborStretch() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        // A distinct color per source pixel so the nearest-neighbor mapping
+        // below can be checked against a specific, known source pixel
+        // rather than just "some color changed".
+        for y in 0..<4 {
+            for x in 0..<4 {
+                canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) * 60 / 255, green: Double(y) * 60 / 255, blue: 200.0 / 255, alpha: 1))
+            }
+        }
+        let source00 = canvas.rawPixel(x: 0, y: 0)!
+        let source10 = canvas.rawPixel(x: 1, y: 0)!
+        let source01 = canvas.rawPixel(x: 0, y: 1)!
+        let source11 = canvas.rawPixel(x: 1, y: 1)!
+
+        view.beginLayerTransform()
+
+        // Identity starts as centerX=2, centerY=2, width=4, height=4 — i.e.
+        // corners at (0,0)/(4,0)/(4,4)/(0,4). Dragging the bottom-right
+        // corner from (4,4) out to (8,8), with the top-left corner (0,0) as
+        // the fixed anchor, doubles both axes: the resulting transform rect
+        // is centered at (4,4) with width=height=8, which (per
+        // `CanvasView.sourcePixel`'s inverse mapping) makes every source
+        // pixel cover a 2x2 block of the still-4x4 destination canvas.
+        let downPoint = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let dragPoint = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: downPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window))
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        // Destination columns/rows 0-1 map to source column/row 0, and
+        // destination columns/rows 2-3 map to source column/row 1 — the
+        // bottom-right 3/4 of the original 4x4 layer falls outside the
+        // (still 4x4) canvas once doubled from a top-left anchor, which is
+        // the expected, if cropped, result of this particular drag.
+        func assertPixel(_ x: Int, _ y: Int, equals expected: (r: UInt8, g: UInt8, b: UInt8, a: UInt8), line: UInt = #line) {
+            let actual = canvas.rawPixel(x: x, y: y)
+            XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red", line: line)
+            XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green", line: line)
+            XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue", line: line)
+            XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha", line: line)
+        }
+        assertPixel(0, 0, equals: source00)
+        assertPixel(1, 0, equals: source00)
+        assertPixel(2, 0, equals: source10)
+        assertPixel(3, 0, equals: source10)
+        assertPixel(0, 1, equals: source00)
+        assertPixel(0, 2, equals: source01)
+        assertPixel(0, 3, equals: source01)
+        assertPixel(3, 3, equals: source11)
+    }
 }
