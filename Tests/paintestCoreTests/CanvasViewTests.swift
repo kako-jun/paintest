@@ -227,6 +227,45 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(result.y, 3)
     }
 
+    // MARK: - bestFitZoomLevel(forPixelSize:viewportSize:levels:) — pure
+    // zoom-selection math for the magnifier's drag-to-zoom (issue #13).
+    // Minimal smoke coverage here; deeper test-case design is a follow-up
+    // for a dedicated test-authoring pass.
+
+    func testBestFitZoomLevel_picksLargestLevelThatFits() {
+        // A 10x10 pixel selection in a 100x100 viewport fits at 8x (80x80)
+        // but not at 16x (160x160).
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 10, height: 10),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, 8)
+    }
+
+    func testBestFitZoomLevel_fallsBackToSmallestLevel_whenNothingFits() {
+        // A selection larger than the viewport even at the smallest level
+        // (1x) still returns that smallest level as a best-effort fallback,
+        // rather than crashing or returning something outside `levels`.
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 500, height: 500),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, CanvasView.zoomLevels.first)
+    }
+
+    func testBestFitZoomLevel_exactFit_isIncluded() {
+        // Exactly filling the viewport at a given level should still count
+        // as "fits" (`<=`, not `<`).
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 25, height: 25),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, 4)
+    }
+
     // MARK: - mouseDown routes to the active layer only (test list 44-45)
     //
     // Driving `mouseDown(with:)` for real requires an actual `NSEvent` and
