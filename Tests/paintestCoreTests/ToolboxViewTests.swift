@@ -202,12 +202,13 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off, "selecting pen must turn the default-on pencil off")
     }
 
-    func testCyclingThroughAllThreeWiredTools_alwaysLeavesExactlyOneOfAll16ButtonsPressed() {
+    func testCyclingThroughAllFourWiredTools_alwaysLeavesExactlyOneOfAll16ButtonsPressed() {
         let view = makeView()
         guard let pencil = button(toolTip: "鉛筆", in: view),
               let eraser = button(toolTip: "消しゴム", in: view),
-              let pen = button(toolTip: "ペン", in: view) else {
-            XCTFail("could not find pencil/eraser/pen buttons")
+              let pen = button(toolTip: "ペン", in: view),
+              let eyedropper = button(toolTip: "スポイト", in: view) else {
+            XCTFail("could not find pencil/eraser/pen/eyedropper buttons")
             return
         }
 
@@ -227,11 +228,32 @@ final class ToolboxViewTests: XCTestCase {
         pen.performClick(nil)
         assertExactlyOnePressed("pen click")
 
+        eyedropper.performClick(nil)
+        assertExactlyOnePressed("eyedropper click")
+
         pencil.performClick(nil)
         assertExactlyOnePressed("pencil click again")
         XCTAssertEqual(pencil.state, .on)
         XCTAssertEqual(eraser.state, .off)
         XCTAssertEqual(pen.state, .off)
+        XCTAssertEqual(eyedropper.state, .off)
+    }
+
+    func testEyedropperClick_firesOnToolSelectedWithEyedropper_andTogglesPressedStates() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let eyedropper = button(toolTip: "スポイト", in: view) else {
+            XCTFail("could not find pencil/eyedropper buttons")
+            return
+        }
+        XCTAssertEqual(pencil.state, .on, "precondition: pencil starts pressed by default")
+        var selected: Tool?
+        view.onToolSelected = { selected = $0 }
+
+        eyedropper.performClick(nil)
+
+        XCTAssertEqual(selected, .eyedropper)
+        XCTAssertEqual(eyedropper.state, .on)
+        XCTAssertEqual(pencil.state, .off, "selecting the eyedropper must turn the default-on pencil off")
     }
 
     // Not independently unit-tested here: `Self.tools` is a private static
