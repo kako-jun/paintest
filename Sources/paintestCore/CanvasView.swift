@@ -47,6 +47,17 @@ final class CanvasView: NSView {
     /// the foreground color.
     var onColorPicked: ((NSColor, _ isSecondary: Bool) -> Void)?
 
+    /// Fired once a single editing gesture actually completes with the
+    /// content changed (issue #19): a pencil/eraser/pen stroke's `mouseUp`
+    /// (only if that stroke actually called `paint`/`paintLine` — see
+    /// `paintedDuringGesture`), a rectangle/ellipse/lasso/polygon selection's
+    /// confirm, a magic wand click, and a layer transform's
+    /// `commitLayerTransform()`. Never fired for in-progress drag states
+    /// (only once per gesture, at the end) or for a click that changed
+    /// nothing. `AppDelegate` forwards `label` straight into
+    /// `Document.history.record(_:label:)`.
+    var onEditCompleted: ((String) -> Void)?
+
     /// The active selection, if any — `nil` means "no restriction", i.e. the
     /// whole canvas is editable (issue #11). `AppDelegate` keeps this in
     /// sync with `Document.selection` the same way it does `zoomScale`.
@@ -61,6 +72,15 @@ final class CanvasView: NSView {
     /// with issue #20.
     private static let penLineWidth: CGFloat = 3
     private var lastPixel: (x: Int, y: Int)?
+    /// Whether `paint(at:)`/`paintLine(from:to:)` was actually invoked
+    /// during the current pencil/eraser/pen gesture (issue #19) — set in
+    /// `mouseDown`/`mouseDragged`'s pixel-painting fallback path (the only
+    /// place those two methods are called for a content-editing tool; see
+    /// `paint(at:)`'s own doc comment for why every other tool's branch
+    /// returns before reaching it) and consumed once in `mouseUp` to decide
+    /// whether to fire `onEditCompleted`. Reset at the start of every new
+    /// `mouseDown` gesture.
+    private var paintedDuringGesture = false
 
     /// A drag gesture below this distance (in view points) counts as a
     /// "click" for the magnifier tool rather than a rectangle drag (issue
@@ -397,6 +417,7 @@ final class CanvasView: NSView {
         activeTransform = nil
         transformOriginalCanvas = nil
         onLayerContentChanged?()
+        onEditCompleted?("変形")
         needsDisplay = true
     }
 
@@ -1089,6 +1110,20 @@ final class CanvasView: NSView {
         return CanvasView.pixelCoordinate(forPoint: point, zoomScale: zoomScale)
     }
 
+    /// `onEditCompleted`'s history label for a pixel-painting tool (issue
+    /// #19) — `nil` for every other tool, which fire `onEditCompleted` from
+    /// their own dedicated gesture-completion code instead (selection
+    /// confirm, transform commit).
+    private static func editCompletedLabel(for tool: Tool) -> String? {
+        switch tool {
+        case .pencil: return "鉛筆"
+        case .eraser: return "消しゴム"
+        case .pen: return "ペン"
+        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect:
+            return nil
+        }
+    }
+
     /// The color a stroke paints with, derived from the active tool rather
     /// than stored on its own (issue #5): the eraser is not a special
     /// "make transparent" tool, it's simply "the pencil, but with the
@@ -1235,6 +1270,7 @@ final class CanvasView: NSView {
         guard polygonVertices.count >= 3 else { return }
         let newMask = SelectionMask.polygon(vertices: polygonVertices, width: layerStack.width, height: layerStack.height)
         applyCombinedSelection(newMask, mode: polygonCombineMode)
+        onEditCompleted?("選択範囲")
     }
 
     override func keyDown(with event: NSEvent) {
@@ -1285,6 +1321,9 @@ final class CanvasView: NSView {
         // select tool's Escape/Return shortcuts in `keyDown(with:)` would
         // silently stop working after the first such detour.
         window?.makeFirstResponder(self)
+        // Reset at the start of every new gesture (issue #19) — see
+        // `paintedDuringGesture`'s own doc comment.
+        paintedDuringGesture = false
         // Layer transform mode (issue #9) preempts every `activeTool`
         // branch below — see `activeTransform`'s doc comment. A double-click
         // inside the rectangle's interior (not on a handle) confirms the
@@ -1403,9 +1442,15 @@ final class CanvasView: NSView {
             let mode = CanvasView.combineMode(for: event.modifierFlags)
             applyCombinedSelection(newMask, mode: mode)
             needsDisplay = true
+            // The magic wand's whole gesture is this one click (issue #19,
+            // matching #11's own "no drag/mouseUp handling" doc comment on
+            // `Tool.magicWandSelect`), so its `onEditCompleted` fires right
+            // here rather than in `mouseUp`.
+            onEditCompleted?("選択範囲")
             return
         }
         paint(at: pixel)
+        paintedDuringGesture = true
         lastPixel = pixel
         needsDisplay = true
         onLayerContentChanged?()
@@ -1542,6 +1587,7 @@ final class CanvasView: NSView {
         } else {
             paint(at: pixel)
         }
+        paintedDuringGesture = true
         lastPixel = pixel
         needsDisplay = true
         onLayerContentChanged?()
@@ -1609,6 +1655,7 @@ final class CanvasView: NSView {
             // all-`false` mask (issue #11, decision made ahead of
             // implementation) — see `applyCombinedSelection`'s doc comment.
             applyCombinedSelection(newMask, mode: selectionCombineMode)
+            onEditCompleted?("選択範囲")
             return
         }
         if activeTool == .lassoSelect {
@@ -1626,9 +1673,21 @@ final class CanvasView: NSView {
             guard lassoVertices.count >= 3 else { return }
             let newMask = SelectionMask.polygon(vertices: lassoVertices, width: layerStack.width, height: layerStack.height)
             applyCombinedSelection(newMask, mode: lassoCombineMode)
+            onEditCompleted?("選択範囲")
             return
         }
         guard activeTool == .magnifier else {
+            // Pencil/eraser/pen strokes fire `onEditCompleted` here, at the
+            // gesture's actual end, and only if something was actually
+            // painted during it (issue #19) — a click that landed on the
+            // eyedropper/polygon-select/magic-wand tools also reaches this
+            // fallback (they handle their own gesture end elsewhere or take
+            // no `mouseUp` action at all), but `editCompletedLabel` returns
+            // `nil` for those, so nothing fires.
+            if paintedDuringGesture, let label = CanvasView.editCompletedLabel(for: activeTool) {
+                onEditCompleted?(label)
+            }
+            paintedDuringGesture = false
             lastPixel = nil
             return
         }
