@@ -505,6 +505,116 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertNil(PixelCanvas.load(from: Data()))
     }
 
+    // MARK: - Selection-mask-restricted painting (issue #11 test-authoring pass)
+
+    private func leftHalfMask(width: Int, height: Int) -> SelectionMask {
+        SelectionMask.rectangle(x0: 0, y0: 0, x1: width / 2 - 1, y1: height - 1, width: width, height: height)
+    }
+
+    func testSetPixel_outsideMask_isIgnored_pixelStaysUnchanged() {
+        let canvas = PixelCanvas(width: 8, height: 8, background: .white)
+        let mask = SelectionMask.rectangle(x0: 0, y0: 0, x1: 0, y1: 0, width: 8, height: 8) // only (0,0) selected
+        canvas.setPixel(x: 3, y: 3, color: .black, mask: mask)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.r, 255, "a pixel outside the mask must be left untouched")
+    }
+
+    func testSetPixel_insideMask_isWrittenNormally() {
+        let canvas = PixelCanvas(width: 8, height: 8, background: .white)
+        let mask = SelectionMask.rectangle(x0: 3, y0: 3, x1: 3, y1: 3, width: 8, height: 8)
+        canvas.setPixel(x: 3, y: 3, color: .black, mask: mask)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.r, 0, "a pixel inside the mask must be written the same as with no mask at all")
+    }
+
+    func testSetPixel_maskNil_isUnrestricted_matchesPreExistingBehavior() {
+        // Regression guard for issue #11's `mask: SelectionMask? = nil`
+        // default: every pre-existing call site (and every pre-existing
+        // test) must keep working exactly as before with no mask supplied.
+        let canvas = PixelCanvas(width: 4, height: 4, background: .white)
+        canvas.setPixel(x: 1, y: 1, color: .black, mask: nil)
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.r, 0)
+    }
+
+    func testDrawLine_maskSplitsTheLine_onlyTheInsideHalfIsPainted() {
+        let canvas = PixelCanvas(width: 8, height: 8, background: .white)
+        let mask = leftHalfMask(width: 8, height: 8) // columns 0...3 selected
+        canvas.drawLine(from: (x: 0, y: 4), to: (x: 7, y: 4), color: .black, mask: mask)
+        for x in 0...3 {
+            XCTAssertEqual(canvas.rawPixel(x: x, y: 4)?.r, 0, "inside the mask, the line must paint normally")
+        }
+        for x in 4...7 {
+            XCTAssertEqual(canvas.rawPixel(x: x, y: 4)?.r, 255, "outside the mask, the line's pixels must be skipped")
+        }
+    }
+
+    func testDrawAntialiasedDot_entirelyOutsideMask_leavesCanvasUnchanged() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let mask = SelectionMask.rectangle(x0: 0, y0: 0, x1: 1, y1: 1, width: 12, height: 12) // far from the dot
+        canvas.drawAntialiasedDot(at: (x: 6, y: 6), color: .black, diameter: 8, mask: mask)
+        for y in 0..<12 {
+            for x in 0..<12 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) should be untouched: the whole dot falls outside the mask")
+            }
+        }
+    }
+
+    func testDrawAntialiasedDot_crossingMaskBoundary_onlyTheInsideHalfChanges() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let mask = leftHalfMask(width: 12, height: 12) // columns 0...5 selected
+        canvas.drawAntialiasedDot(at: (x: 6, y: 6), color: .black, diameter: 8, mask: mask)
+        XCTAssertLessThan(canvas.rawPixel(x: 4, y: 6)?.r ?? 255, 255, "inside the mask, under the dot, must be painted")
+        XCTAssertEqual(canvas.rawPixel(x: 9, y: 6)?.r, 255, "outside the mask, even though the unmasked dot would reach here, must stay untouched")
+    }
+
+    func testDrawAntialiasedLine_entirelyOutsideMask_leavesCanvasUnchanged() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let mask = SelectionMask.rectangle(x0: 0, y0: 0, x1: 1, y1: 1, width: 12, height: 12)
+        canvas.drawAntialiasedLine(from: (x: 6, y: 6), to: (x: 10, y: 6), color: .black, lineWidth: 3, mask: mask)
+        for y in 0..<12 {
+            for x in 0..<12 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) should be untouched: the whole stroke falls outside the mask")
+            }
+        }
+    }
+
+    func testDrawAntialiasedLine_crossingMaskBoundary_onlyTheInsideHalfChanges() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let mask = leftHalfMask(width: 12, height: 12) // columns 0...5 selected
+        canvas.drawAntialiasedLine(from: (x: 2, y: 6), to: (x: 10, y: 6), color: .black, lineWidth: 3, mask: mask)
+        XCTAssertLessThan(canvas.rawPixel(x: 3, y: 6)?.r ?? 255, 255, "inside the mask, along the stroke, must be painted")
+        XCTAssertEqual(canvas.rawPixel(x: 9, y: 6)?.r, 255, "outside the mask, even though the unmasked stroke would reach here, must stay untouched")
+    }
+
+    func testDrawAntialiasedDot_maskSkippedPixelDoesNotAffectNeighborsCompositedValue() {
+        // A pixel excluded by the mask must not alter the alpha-compositing
+        // math for its neighbors — each destination pixel's blend is
+        // computed independently from the same source overlay regardless of
+        // whether the pixel next to it got masked out. Confirmed by
+        // comparing a masked draw's covered, in-mask pixels byte-for-byte
+        // against an unmasked draw of the exact same shape on a fresh
+        // canvas.
+        let maskedCanvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let unmaskedCanvas = PixelCanvas(width: 12, height: 12, background: .white)
+        // Mask excludes a single pixel right in the middle of the dot's
+        // coverage, but includes everything else.
+        let mask = SelectionMask.rectangle(x0: 0, y0: 0, x1: 11, y1: 11, width: 12, height: 12).subtracting(
+            SelectionMask.rectangle(x0: 6, y0: 6, x1: 6, y1: 6, width: 12, height: 12)
+        )
+        let color = NSColor(deviceRed: 0, green: 0, blue: 0, alpha: 0.5)
+
+        maskedCanvas.drawAntialiasedDot(at: (x: 6, y: 6), color: color, diameter: 8, mask: mask)
+        unmaskedCanvas.drawAntialiasedDot(at: (x: 6, y: 6), color: color, diameter: 8, mask: nil)
+
+        XCTAssertEqual(maskedCanvas.rawPixel(x: 6, y: 6)?.r, 255, "the excluded pixel itself should stay untouched (white)")
+        for (x, y) in [(5, 6), (7, 6), (6, 5), (6, 7), (5, 5)] {
+            let masked = maskedCanvas.rawPixel(x: x, y: y)
+            let unmasked = unmaskedCanvas.rawPixel(x: x, y: y)
+            XCTAssertEqual(masked?.r, unmasked?.r, "(\(x),\(y)) red should be identical whether or not a neighboring pixel was masked out")
+            XCTAssertEqual(masked?.g, unmasked?.g, "(\(x),\(y)) green should be identical whether or not a neighboring pixel was masked out")
+            XCTAssertEqual(masked?.b, unmasked?.b, "(\(x),\(y)) blue should be identical whether or not a neighboring pixel was masked out")
+            XCTAssertEqual(masked?.a, unmasked?.a, "(\(x),\(y)) alpha should be identical whether or not a neighboring pixel was masked out")
+        }
+    }
+
     // MARK: - load(from:) grayscale PNG (regression: fast path must reject
     // non-RGB(A) sample layouts, not just non-8-bit/non-planar ones)
 
