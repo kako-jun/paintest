@@ -407,7 +407,7 @@ final class CanvasViewTests: XCTestCase {
         return NSPoint(x: x, y: y)
     }
 
-    private func mouseDownEvent(at windowPoint: NSPoint, in window: NSWindow, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
+    private func mouseDownEvent(at windowPoint: NSPoint, in window: NSWindow, modifierFlags: NSEvent.ModifierFlags = [], clickCount: Int = 1) -> NSEvent {
         NSEvent.mouseEvent(
             with: .leftMouseDown,
             location: windowPoint,
@@ -416,7 +416,7 @@ final class CanvasViewTests: XCTestCase {
             windowNumber: window.windowNumber,
             context: nil,
             eventNumber: 0,
-            clickCount: 1,
+            clickCount: clickCount,
             pressure: 1
         )!
     }
@@ -2256,5 +2256,960 @@ final class CanvasViewTests: XCTestCase {
 
         transform.distortBottomRight = CGVector(dx: 0, dy: -1)
         XCTAssertTrue(transform.hasDistortion)
+    }
+
+    // MARK: - Layer transform: mouse/key state machine hardening (issue #9
+    // test-authoring pass). `activeTransform`, `transformDragHandle`, etc.
+    // are all `private`, so every test below observes behavior indirectly —
+    // through committed pixel content (compared against a hand-derived
+    // expected `LayerTransform` via `CanvasView.sourcePixel`, the same
+    // technique the round 1-3 tests above already established), through
+    // `onLayerContentChanged` firing (or not), or through whether a
+    // subsequent plain click paints the real canvas (proof transform mode
+    // did or didn't release control of `mouseDown`).
+
+    /// Shift only locks aspect ratio on a *corner* drag (`resizeByCorner`'s
+    /// `keepAspect` parameter) — `resizeByEdge` (used for the 4 edge
+    /// midpoint handles) takes no such parameter and never reads
+    /// `event.modifierFlags` at all. Drives the exact same edge drag twice,
+    /// with and without Shift held, and requires byte-identical committed
+    /// results.
+    func testMouseDragged_edgeHandleWithShiftHeld_producesTheSameResultAsWithoutShift() {
+        let zoomScale = 4
+        func commitEdgeDrag(withShift: Bool) -> [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] {
+            let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+            let window = view.window!
+            let canvas = view.layerStack.activeLayer.canvas
+            for y in 0..<4 { for x in 0..<4 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 3, green: Double(y) / 3, blue: 0.5, alpha: 1)) } }
+            view.beginLayerTransform()
+            // Right edge midpoint of the 4x4 identity rectangle sits at
+            // canvas (4, 2); drag it out to (6, 2).
+            let down = transformWindowPoint(canvasX: 4, canvasY: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+            let drag = transformWindowPoint(canvasX: 6, canvasY: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: down, in: window))
+            view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window, modifierFlags: withShift ? [.shift] : []))
+            view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+            view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+            var result: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+            for y in 0..<4 { result.append((0..<4).map { canvas.rawPixel(x: $0, y: y)! }) }
+            return result
+        }
+
+        let withoutShift = commitEdgeDrag(withShift: false)
+        let withShift = commitEdgeDrag(withShift: true)
+        for y in 0..<4 {
+            for x in 0..<4 {
+                XCTAssertEqual(withShift[y][x].r, withoutShift[y][x].r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(withShift[y][x].g, withoutShift[y][x].g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(withShift[y][x].b, withoutShift[y][x].b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(withShift[y][x].a, withoutShift[y][x].a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    /// `mouseDragged`'s `.move` case reads only `dx`/`dy` (the raw drag
+    /// delta) — never `event.modifierFlags` — so Shift/Option held during a
+    /// move drag must have zero effect, unlike a corner drag (Shift) or a
+    /// corner drag with Option (distort).
+    func testMouseDragged_moveHandleWithShiftAndOptionHeld_stillJustTranslates() {
+        let zoomScale = 4
+        // 8x8 (not 4x4): the click point below has to be far enough from
+        // every corner to avoid the rotate ring (`transformRotateHandleOuterRadius`,
+        // 14 *view* points) as well as the plain hit radius — on a small
+        // canvas at ordinary zoom, the rectangle's own center can actually
+        // fall inside a corner's rotate ring, silently turning an intended
+        // "click the interior" test into a rotate-handle test instead.
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 { for x in 0..<8 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.5, alpha: 1)) } }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! }) }
+
+        view.beginLayerTransform()
+        // Canvas (4, 4) is the rectangle's own center — in view points
+        // (scale 4) that's 22.6 points from every corner, comfortably past
+        // even the 14-point rotate ring, so this is unambiguously a `.move`
+        // hit. Dragged by (+1, +1).
+        let down = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 5, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window, modifierFlags: [.shift, .option]))
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        // A pure (+1, +1) translation: destination (x, y) shows source
+        // (x - 1, y - 1), for the interior region only (the shifted-in edge
+        // is left transparent, same cropping convention as every other
+        // move/resize test above).
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if x >= 1, y >= 1 {
+                    let expected = before[y - 1][x - 1]
+                    XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent (shifted in from outside)")
+                }
+            }
+        }
+    }
+
+    /// The handle a drag grabs is decided once, at `mouseDown`, from
+    /// `event.modifierFlags` at that instant (`hitTestTransformHandle`'s
+    /// `.corner` result is only ever converted to `.distort` right there in
+    /// `mouseDown`) — `mouseDragged` never re-reads Option to re-decide the
+    /// handle type mid-drag, it just keeps using whatever `TransformHandle`
+    /// `mouseDown` already captured. Grabbing a corner *without* Option, then
+    /// pressing Option only once the drag is already under way, must
+    /// therefore still produce a plain resize — byte-identical to the same
+    /// drag with no Option involved at all (reusing
+    /// `testLayerTransform_dragBottomRightCornerToDoubleSize_...`'s own
+    /// scenario above as the known-correct plain-resize baseline).
+    func testMouseDragged_cornerGrabbedWithoutOption_thenOptionPressedMidDrag_staysAPlainResize() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 { for x in 0..<4 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) * 60 / 255, green: Double(y) * 60 / 255, blue: 200.0 / 255, alpha: 1)) } }
+        let source00 = canvas.rawPixel(x: 0, y: 0)!
+        let source10 = canvas.rawPixel(x: 1, y: 0)!
+        let source01 = canvas.rawPixel(x: 0, y: 1)!
+        let source11 = canvas.rawPixel(x: 1, y: 1)!
+
+        view.beginLayerTransform()
+        let downPoint = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let dragPoint = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: downPoint, in: window)) // no Option at mouseDown
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window, modifierFlags: [.option])) // Option pressed mid-drag
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        func assertPixel(_ x: Int, _ y: Int, equals expected: (r: UInt8, g: UInt8, b: UInt8, a: UInt8), line: UInt = #line) {
+            let actual = canvas.rawPixel(x: x, y: y)
+            XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red", line: line)
+            XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green", line: line)
+            XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue", line: line)
+            XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha", line: line)
+        }
+        assertPixel(0, 0, equals: source00)
+        assertPixel(1, 0, equals: source00)
+        assertPixel(2, 0, equals: source10)
+        assertPixel(3, 0, equals: source10)
+        assertPixel(0, 1, equals: source00)
+        assertPixel(0, 2, equals: source01)
+        assertPixel(0, 3, equals: source01)
+        assertPixel(3, 3, equals: source11)
+    }
+
+    /// `mouseDown`'s double-click shortcut only fires `commitLayerTransform()`
+    /// when the hit-tested handle is exactly `.move` (`if event.clickCount ==
+    /// 2, handle == .move`) — every other handle, including a plain corner
+    /// hit, falls straight through into the ordinary "record the drag start"
+    /// path regardless of click count. Double-clicking a corner handle must
+    /// not commit at all.
+    func testMouseDown_doubleClickOnCornerHandle_doesNotCommit_onlyMoveRespondsToDoubleClick() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        view.beginLayerTransform()
+        var contentChangedCount = 0
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+
+        // Top-left corner of the 4x4 identity transform sits at canvas (0, 0).
+        let point = transformWindowPoint(canvasX: 0, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window, clickCount: 2))
+
+        XCTAssertEqual(contentChangedCount, 0, "double-clicking a resize handle (not .move) must not commit the transform")
+    }
+
+    /// `resizedAxis`'s `sign`/`abs` math (the core of `resizeByCorner`/
+    /// `resizeByEdge`) is built to survive a drag that crosses all the way
+    /// past the anchor (the diagonally opposite, pinned corner) without ever
+    /// producing a negative or zero size — verified here via a real 2-step
+    /// gesture (both hand-derived independently and cross-checked by
+    /// directly re-running the same anchor-relative formula in Python):
+    /// first shrink a 16x16 identity's `bottomRight` corner from (16, 16) to
+    /// (8, 8) (pinning `topLeft` at canvas (0, 0), landing a `center=(4, 4),
+    /// width=height=8` rectangle spanning (0, 0)-(8, 8)); then drag that
+    /// rectangle's now-physically-relocated `topLeft` corner (at (0, 0)) all
+    /// the way past its own diagonally-opposite anchor (`bottomRight`, now
+    /// fixed at (8, 8)) out to (14, 14) — a genuine "drag through the pin"
+    /// flip, not just an ordinary shrink/grow. The result lands on
+    /// `center=(11, 11), width=height=6` (`>= transformMinimumSize`, and the
+    /// sign flip correctly relabels which physical corner is "topLeft" vs
+    /// "bottomRight" — see this test's own `corners` self-check below).
+    func testMouseDragged_cornerDraggedPastItsOwnOppositeAnchor_flipsCorrectly_withoutCollapsingOrGoingNegative() {
+        let zoomScale = 2
+        let view = makeViewInWindow(width: 16, height: 16, zoomScale: zoomScale)
+        view.setZoomScale(zoomScale)
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 16)
+
+        view.beginLayerTransform()
+
+        // Step 1: shrink bottomRight from (16, 16) to (8, 8), anchored on
+        // topLeft (0, 0).
+        let shrinkDown = transformWindowPoint(canvasX: 16, canvasY: 16, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let shrinkDrag = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: shrinkDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: shrinkDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: shrinkDrag, in: window))
+
+        // Step 2: drag topLeft (now physically at (0, 0)) past the fixed
+        // bottomRight anchor (now at (8, 8)) out to (14, 14).
+        let flipDown = transformWindowPoint(canvasX: 0, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let flipDrag = transformWindowPoint(canvasX: 14, canvasY: 14, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: flipDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: flipDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: flipDrag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        var expected = LayerTransform.identity(width: 16, height: 16)
+        expected.centerX = 11
+        expected.centerY = 11
+        expected.width = 6
+        expected.height = 6
+
+        // Self-check: the flip correctly relabels which physical corner is
+        // which — the OLD anchor's physical position (8, 8) is now this
+        // rectangle's `topLeft`-labeled corner, and the mouse's actual drag
+        // target (14, 14) is now `bottomRight`.
+        XCTAssertEqual(expected.corners.topLeft.x, 8, accuracy: 1e-9)
+        XCTAssertEqual(expected.corners.topLeft.y, 8, accuracy: 1e-9)
+        XCTAssertEqual(expected.corners.bottomRight.x, 14, accuracy: 1e-9)
+        XCTAssertEqual(expected.corners.bottomRight.y, 14, accuracy: 1e-9)
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<16 {
+            for x in 0..<16 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 16, sourceHeight: 16) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual?.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent")
+                }
+            }
+        }
+    }
+
+    /// `resizedAxis`'s `max(transformMinimumSize, abs(raw - anchor))` floor
+    /// means any drag that WOULD produce a size below the minimum (4) all
+    /// clamp to exactly the same minimum-size rectangle — not merely "some
+    /// small size", but the identical one regardless of how much further
+    /// past the floor the drag goes. Drags `bottomRight` from (8, 8) to two
+    /// different targets close to the (0, 0) anchor — (2, 2) and (0, 0) —
+    /// both landing at local size `2` and `0` respectively (both `< 4`), and
+    /// requires byte-identical committed results.
+    func testMouseDragged_cornerDraggedBelowMinimumSize_alwaysClampsToTheSameFloor() {
+        let zoomScale = 4
+        func commitCornerDrag(dragToCanvas target: Double) -> [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] {
+            let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+            let window = view.window!
+            let canvas = view.layerStack.activeLayer.canvas
+            for y in 0..<8 { for x in 0..<8 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.5, alpha: 1)) } }
+            view.beginLayerTransform()
+            let down = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+            let drag = transformWindowPoint(canvasX: target, canvasY: target, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: down, in: window))
+            view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+            view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+            view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+            var result: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+            for y in 0..<8 { result.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! }) }
+            return result
+        }
+
+        let draggedTo2 = commitCornerDrag(dragToCanvas: 2) // raw local size 2, < 4
+        let draggedTo0 = commitCornerDrag(dragToCanvas: 0) // raw local size 0, < 4
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(draggedTo2[y][x].r, draggedTo0[y][x].r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(draggedTo2[y][x].g, draggedTo0[y][x].g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(draggedTo2[y][x].b, draggedTo0[y][x].b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(draggedTo2[y][x].a, draggedTo0[y][x].a, "x=\(x) y=\(y) alpha")
+            }
+        }
+
+        // And it's genuinely the *minimum* size that was applied, not
+        // something bigger: the committed rectangle (center local (-2, -2)
+        // relative to the original center (4, 4), i.e. canvas (2, 2), size
+        // 4x4) only covers destination pixels (0, 0)-(3, 3); canvas (7, 7)
+        // must be outside it and therefore transparent.
+        XCTAssertEqual(draggedTo2[7][7].a, 0, "the clamped rectangle must not have grown past the minimum size")
+    }
+
+    // MARK: - Handle hit-test radius boundaries (issue #9 test-authoring
+    // pass). `hitTestTransformHandle` checks corner hits within
+    // `transformHandleHitRadius` (6 view points) first, then the rotate ring
+    // out to `transformRotateHandleOuterRadius` (14), then falls through to
+    // the interior/`.move`/`nil` check. These constants are `private`, so
+    // the boundary values (6, 14) are hardcoded here directly — same
+    // approach the existing `magnifierClickThreshold` tests above already
+    // take for that constant.
+    //
+    // Both tests click along a pure horizontal ray from the identity
+    // rectangle's top-left corner (0, 0), with `zoomScale` set to 1 so
+    // view-space distance equals canvas-space distance exactly
+    // (`hypot(-R, 0) == R`, no floating-point surprises). At that geometry
+    // there are only ever 2 possible outcomes to distinguish between (the
+    // clicked point is always outside the rectangle itself, so `.move` is
+    // never a candidate), so proving the actual result matches ONE
+    // hand-derived prediction is sufficient to also rule out the other.
+
+    private func commitCornerRayDrag(atRadius radius: Double, dragDelta: Double, zoomScale: Int) -> (before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]], after: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]]) {
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.setZoomScale(zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 { for x in 0..<8 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.5, alpha: 1)) } }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! }) }
+
+        view.beginLayerTransform()
+        let down = transformWindowPoint(canvasX: -radius, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: -radius + dragDelta, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        var after: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { after.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! }) }
+        return (before, after)
+    }
+
+    /// At exactly `transformHandleHitRadius` (6) from the corner: a corner
+    /// hit. Hand-derived expected result, same anchor-relative reasoning as
+    /// `testLayerTransform_dragBottomRightCornerToDoubleSize_...` above: the
+    /// `bottomRight` anchor (8, 8) stays fixed while dragging `topLeft`
+    /// rightward by 4 shrinks `width` from 8 to 4 (new center local x = 2,
+    /// canvas x = 6); a horizontal-only drag leaves `height`/`centerY`
+    /// untouched at 8/4.
+    func testHitTestTransformHandle_atExactlyHandleHitRadius_isACornerResize() {
+        let zoomScale = 1
+        let (before, after) = commitCornerRayDrag(atRadius: 6, dragDelta: 4, zoomScale: zoomScale)
+
+        var expected = LayerTransform.identity(width: 8, height: 8)
+        expected.centerX = 6
+        expected.centerY = 4
+        expected.width = 4
+        expected.height = 8
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = after[y][x]
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 8, sourceHeight: 8) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual.a, 0, "x=\(x) y=\(y) should be left transparent")
+                }
+            }
+        }
+    }
+
+    /// Just past `transformHandleHitRadius` (radius 7, not a round-number
+    /// boundary but comfortably outside 6 and inside the 14 rotate ring): a
+    /// rotate, not a corner resize. Rather than hand-deriving the exact
+    /// (non-round) rotation angle, this distinguishes the two remaining
+    /// candidates (corner-resize vs. rotate — `.move` can't apply, the click
+    /// point is outside the rectangle) via a marker pixel whose fate
+    /// differs between them: canvas (1, 4) sits at local offset (-3, 0) from
+    /// the identity rectangle's center. A corner-resize (as in the radius-6
+    /// test above) shrinks `width` to 4 centered at canvas x=6, which pushes
+    /// (1, 4) (local x -5 relative to the new center) outside the resized
+    /// rectangle — transparent. A small rotation (this drag's angle is
+    /// ~9.8°, confirmed by an independent calculation) leaves (1, 4) well
+    /// inside the still-full-size, merely-tilted rectangle — opaque.
+    func testHitTestTransformHandle_justPastHandleHitRadius_isARotate_notACornerResize() {
+        let zoomScale = 1
+        let (_, after) = commitCornerRayDrag(atRadius: 7, dragDelta: 4, zoomScale: zoomScale)
+
+        XCTAssertNotEqual(after[4][1].a, 0, "canvas (1,4) must stay opaque: a rotate keeps the full rectangle, unlike the radius-6 corner-resize case which crops this pixel away")
+    }
+
+    /// At exactly `transformRotateHandleOuterRadius` (14): still a rotate
+    /// (the ring is inclusive on both ends, `> hitRadius && <= outerRadius`).
+    /// The only 2 candidates at this distance are "rotate" and "nothing at
+    /// all" (`.move` still can't apply — this radius is even farther outside
+    /// the rectangle than the radius-7 case above), so proving *some* change
+    /// occurred (the committed canvas isn't a byte-exact reproduction of the
+    /// original) is enough to rule out "nothing happened".
+    func testHitTestTransformHandle_atExactlyRotateHandleOuterRadius_isStillARotate() {
+        let zoomScale = 1
+        let (before, after) = commitCornerRayDrag(atRadius: 14, dragDelta: 4, zoomScale: zoomScale)
+
+        var changedSomePixel = false
+        for y in 0..<8 {
+            for x in 0..<8 where after[y][x] != before[y][x] {
+                changedSomePixel = true
+            }
+        }
+        XCTAssertTrue(changedSomePixel, "radius 14 is still within the inclusive rotate ring, so the identity transform must not be reproduced unchanged")
+    }
+
+    /// Just past `transformRotateHandleOuterRadius` (radius 15): no handle
+    /// at all. The click point is far enough from every corner/edge that
+    /// none of the corner/edge/rotate checks match, and it's also outside
+    /// the rectangle's own interior, so `hitTestTransformHandle` returns
+    /// `nil` — the drag is entirely inert, and committing reproduces the
+    /// untouched identity canvas byte-exactly (same guarantee
+    /// `testLayerTransform_commitWithNoDrag_reproducesOriginalCanvasByteExact`
+    /// makes for "no drag at all"; here the drag exists but never grabs a
+    /// handle).
+    func testHitTestTransformHandle_justPastRotateHandleOuterRadius_isNil_dragIsInert() {
+        let zoomScale = 1
+        let (before, after) = commitCornerRayDrag(atRadius: 15, dragDelta: 4, zoomScale: zoomScale)
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(after[y][x].r, before[y][x].r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(after[y][x].g, before[y][x].g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(after[y][x].b, before[y][x].b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(after[y][x].a, before[y][x].a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    /// A `mouseDown` that lands completely outside the transform rectangle
+    /// (and outside every handle's hitbox) records `transformDragHandle =
+    /// nil` (see `hitTestTransformHandle`'s own doc comment: "a point outside
+    /// the rectangle entirely is `nil`"); the following `mouseDragged` then
+    /// takes the "drag started outside the rectangle entirely... deliberately
+    /// inert" early-return branch. A subsequent commit must reproduce the
+    /// untouched canvas byte-exactly.
+    func testMouseDown_completelyOutsideTheRectangle_makesTheFollowingMouseDraggedANoOp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 { for x in 0..<8 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.5, alpha: 1)) } }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! }) }
+
+        view.beginLayerTransform()
+        // Canvas (20, 20) is far outside the 8x8 rectangle and far from
+        // every corner/edge handle (nearest corner, bottomRight (8, 8), is
+        // ~17 view points away — past even the rotate ring).
+        let down = transformWindowPoint(canvasX: 20, canvasY: 20, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 2, canvasY: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, before[y][x].r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(actual?.g, before[y][x].g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, before[y][x].b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, before[y][x].a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    // MARK: - Distortion interacting with hit-testing / resizing (issue #9
+    // test-authoring pass) — CHARACTERIZATION TESTS. Neither test below
+    // asserts what the "right" behavior should be, only what the actual
+    // implementation currently does, discovered and hand-verified
+    // independently (see each test's own comment) while writing this suite —
+    // flagged as a design question in this task's own final report, not
+    // fixed here.
+
+    /// `hitTestTransformHandle`'s final fallback (the interior/`.move` test)
+    /// reads only `transform.width`/`height`/`rotation`/`centerX`/`centerY`
+    /// — never any `distort*` field — so it always tests against the plain,
+    /// UNDISTORTED rectangle, even though the corner/edge/rotate checks just
+    /// above it (via `transformHandlePoints`/`transform.corners`) DO account
+    /// for distortion. This test distorts `topLeft` far outward on a large
+    /// (30x30) canvas, then clicks a point independently verified (by
+    /// point-in-polygon and per-handle distance checks) to sit inside the
+    /// visually-drawn distorted quadrilateral, outside the plain base
+    /// rectangle, and beyond every corner/edge hitbox and rotate ring —
+    /// landing squarely in the interior fallback, which then rejects it
+    /// (`nil`) because it's outside the *undistorted* rectangle. The
+    /// recorded result: the click is a total miss, and the pending
+    /// distortion is left completely undisturbed by the failed "click".
+    func testDistortedTransform_clickInsideVisualQuadButOutsideBaseRectangle_missesEveryHandle_characterization() {
+        let zoomScale = 1
+        let view = makeViewInWindow(width: 30, height: 30, zoomScale: zoomScale)
+        view.setZoomScale(zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<30 { for x in 0..<30 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 29, green: Double(y) / 29, blue: 0.5, alpha: 1)) } }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<30 { before.append((0..<30).map { canvas.rawPixel(x: $0, y: y)! }) }
+
+        view.beginLayerTransform()
+        // Distort topLeft (Option+corner drag) from (0, 0) out to (-15, 0).
+        let distortDown = transformWindowPoint(canvasX: 0, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let distortDrag = transformWindowPoint(canvasX: -15, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: distortDown, in: window, modifierFlags: [.option]))
+        view.mouseDragged(with: mouseDraggedEvent(at: distortDrag, in: window, modifierFlags: [.option]))
+        view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window))
+
+        // (-1, 5): verified independently (point-in-polygon against corners
+        // (-15,0)/(30,0)/(30,30)/(0,30), plus distance checks against every
+        // corner/edge handle position) to be inside the drawn quad, outside
+        // the base [0,30]x[0,30] rectangle, and >14 view points from every
+        // corner/edge — a clean miss on every check before the interior
+        // fallback.
+        let missPoint = transformWindowPoint(canvasX: -1, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let missDrag = transformWindowPoint(canvasX: 3, canvasY: 9, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: missPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: missDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: missDrag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        var expected = LayerTransform.identity(width: 30, height: 30)
+        expected.distortTopLeft = CGVector(dx: -15, dy: 0)
+        for y in 0..<30 {
+            for x in 0..<30 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 30, sourceHeight: 30) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual?.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent")
+                }
+            }
+        }
+    }
+
+    /// `resizeByCorner`'s anchor is always computed from the plain
+    /// UNDISTORTED rectangle's own local-frame corner position (`(±halfWidth,
+    /// ±halfHeight)`) — it never reads the anchor corner's own `distort*`
+    /// offset — and the result (`var result = start; result.width = ...`)
+    /// carries every `distort*` field forward completely untouched. This
+    /// test distorts `bottomLeft`, then resizes via the diagonally opposite
+    /// `topRight` corner (whose anchor IS `bottomLeft`). Recorded result: the
+    /// anchor math pins the plain undistorted `bottomLeft` base corner
+    /// (canvas (0, 8)) exactly as if no distortion existed, and — because the
+    /// unchanged distort *vector* is then re-applied to that same pinned base
+    /// corner — `bottomLeft`'s overall *visual* position (base + vector) also
+    /// ends up unchanged by this particular resize, independently
+    /// hand-verified below via `LayerTransform.corners`.
+    func testDistortedTransform_resizeViaTheOppositeCorner_anchorsOnTheUndistortedBaseCorner_characterization() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 { for x in 0..<8 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.5, alpha: 1)) } }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! }) }
+
+        view.beginLayerTransform()
+        // Distort bottomLeft (Option+corner) from (0, 8) out to (-4, 12).
+        let distortDown = transformWindowPoint(canvasX: 0, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let distortDrag = transformWindowPoint(canvasX: -4, canvasY: 12, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: distortDown, in: window, modifierFlags: [.option]))
+        view.mouseDragged(with: mouseDraggedEvent(at: distortDrag, in: window, modifierFlags: [.option]))
+        view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window))
+
+        // Resize via topRight (currently at (8, 0)), dragging it out to
+        // (12, -4) — no Shift/Option.
+        let resizeDown = transformWindowPoint(canvasX: 8, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let resizeDrag = transformWindowPoint(canvasX: 12, canvasY: -4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: resizeDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: resizeDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: resizeDrag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        // Hand-derived final transform (anchor-relative math, same as
+        // `testLayerTransform_dragBottomRightCornerToDoubleSize_...` above):
+        // bottomLeft anchor pinned at local (-4, 4) relative to the OLD
+        // center (4, 4) — canvas (0, 8) — while topRight is dragged from
+        // local (4, -4) by (+4, -4), landing `width = height = 12`,
+        // `centerX = 6`, `centerY = 2`. `distortBottomLeft` carries forward
+        // unchanged.
+        var expected = LayerTransform.identity(width: 8, height: 8)
+        expected.centerX = 6
+        expected.centerY = 2
+        expected.width = 12
+        expected.height = 12
+        expected.distortBottomLeft = CGVector(dx: -4, dy: 4)
+
+        // Self-consistency check of the "visual position preserved" claim
+        // in this test's own doc comment, independent of the pixel-mapping
+        // assertion below.
+        XCTAssertEqual(expected.corners.bottomLeft.x, -4, accuracy: 1e-9)
+        XCTAssertEqual(expected.corners.bottomLeft.y, 12, accuracy: 1e-9)
+        XCTAssertEqual(expected.corners.topRight.x, 12, accuracy: 1e-9, "topRight must land exactly where the mouse was dragged to")
+        XCTAssertEqual(expected.corners.topRight.y, -4, accuracy: 1e-9)
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 8, sourceHeight: 8) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual?.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent")
+                }
+            }
+        }
+    }
+
+    /// `keyDown`'s transform-mode branch only recognizes Return/keypad Enter
+    /// (36/76, commit) and Escape (53, cancel) — every other key falls to
+    /// `default: super.keyDown(with: event)`, leaving `activeTransform`
+    /// completely untouched. Verified indirectly: if a stray key had
+    /// exited transform mode (committed or cancelled), the very next plain
+    /// click would fall through to the default `.pencil` tool and paint the
+    /// real canvas immediately (no separate commit step needed for an
+    /// ordinary paint stroke) — since transform mode instead intercepts
+    /// every mouse event unconditionally, the real canvas must stay
+    /// untouched, and a real Return afterward must still be able to commit.
+    func testKeyDown_nonReturnEscapeKey_leavesTransformModeActive_subsequentClickStillDoesNotPaint() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        view.foregroundColor = .black
+        let canvas = view.layerStack.activeLayer.canvas
+        let before = canvas.rawPixel(x: 2, y: 2)!
+
+        view.beginLayerTransform()
+        view.keyDown(with: keyDownEvent(keyCode: 0, in: window)) // 'a' — neither Return (36/76) nor Escape (53)
+
+        let clickPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: clickPoint, in: window))
+        view.mouseUp(with: mouseUpEvent(at: clickPoint, in: window))
+
+        let afterStrayKeyAndClick = canvas.rawPixel(x: 2, y: 2)
+        XCTAssertEqual(afterStrayKeyAndClick?.r, before.r, "a non-Return/Escape key must not exit transform mode")
+        XCTAssertEqual(afterStrayKeyAndClick?.g, before.g)
+        XCTAssertEqual(afterStrayKeyAndClick?.b, before.b)
+        XCTAssertEqual(afterStrayKeyAndClick?.a, before.a)
+
+        var contentChangedCount = 0
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+        XCTAssertEqual(contentChangedCount, 1, "the transform must still be alive and committable after the stray key")
+    }
+
+    // MARK: - Layer transform: integration-level real gesture tests (issue
+    // #9 test-authoring pass). Every test in this section drives the actual
+    // `mouseDown`/`mouseDragged`/`mouseUp`/`keyDown` pipeline end to end —
+    // no reaching into `private` state — the same way the round 1-3 tests
+    // earlier in this file already do.
+
+    /// THE core safety guarantee of a cancellable transform tool: whichever
+    /// kind of drag is in progress (resize, rotate, or distort) when Escape
+    /// is pressed, the real layer canvas must come back byte-for-byte
+    /// identical to what it was before `beginLayerTransform()` — not merely
+    /// "visually close" or "transparent where it should be opaque".
+    /// `cancelLayerTransform()`'s own doc comment already states this is
+    /// true by construction (the real canvas was never written to during the
+    /// drag, only `activeTransform`/the live-preview draw were), but this is
+    /// the guarantee actually being sold to the user, so it gets its own
+    /// direct, per-gesture-kind verification rather than resting solely on
+    /// that doc comment.
+
+    private func makeDistinctlyColoredCanvas(view: CanvasView, size: Int) -> [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] {
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<size {
+            for x in 0..<size {
+                canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / Double(size - 1), green: Double(y) / Double(size - 1), blue: 0.5, alpha: 1))
+            }
+        }
+        var snapshot: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<size { snapshot.append((0..<size).map { canvas.rawPixel(x: $0, y: y)! }) }
+        return snapshot
+    }
+
+    private func assertCanvas(_ view: CanvasView, size: Int, matches expected: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]], line: UInt = #line) {
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<size {
+            for x in 0..<size {
+                let actual = canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, expected[y][x].r, "x=\(x) y=\(y) red", line: line)
+                XCTAssertEqual(actual?.g, expected[y][x].g, "x=\(x) y=\(y) green", line: line)
+                XCTAssertEqual(actual?.b, expected[y][x].b, "x=\(x) y=\(y) blue", line: line)
+                XCTAssertEqual(actual?.a, expected[y][x].a, "x=\(x) y=\(y) alpha", line: line)
+            }
+        }
+    }
+
+    func testEscape_duringAResizeDrag_cancelsAndReproducesTheOriginalCanvasByteExact() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        view.beginLayerTransform()
+        let down = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 16, canvasY: 16, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape: cancel mid-drag
+
+        assertCanvas(view, size: 8, matches: before)
+    }
+
+    func testEscape_duringARotateDrag_cancelsAndReproducesTheOriginalCanvasByteExact() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 4)
+
+        view.beginLayerTransform()
+        let down = transformWindowPoint(canvasX: -1, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 3, canvasY: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window, modifierFlags: [.shift]))
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape: cancel mid-drag
+
+        assertCanvas(view, size: 4, matches: before)
+    }
+
+    func testEscape_duringADistortDrag_cancelsAndReproducesTheOriginalCanvasByteExact() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        view.beginLayerTransform()
+        let down = transformWindowPoint(canvasX: 0, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: -3, canvasY: -2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window, modifierFlags: [.option]))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window, modifierFlags: [.option]))
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape: cancel mid-drag
+
+        assertCanvas(view, size: 8, matches: before)
+    }
+
+    /// After a cancel, `beginLayerTransform()`'s only guard is
+    /// `activeTransform == nil` — `cancelLayerTransform()` sets exactly that
+    /// back to `nil` — so a fresh transform must start (and complete)
+    /// normally afterward, with no leftover state from the cancelled attempt.
+    func testBeginLayerTransform_afterACancel_startsACleanNewTransformThatCommitsNormally() {
+        let zoomScale = 4
+        // 8x8: see the comment on `testMouseDragged_moveHandleWithShiftAndOptionHeld_...`
+        // above for why the plain move drag below needs a canvas this size
+        // to land unambiguously on `.move` rather than a corner's rotate ring.
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        view.beginLayerTransform()
+        let firstDown = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let firstDrag = transformWindowPoint(canvasX: 16, canvasY: 16, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: firstDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: firstDrag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape: cancel
+
+        // A fresh transform: a plain (+1, +1) move (from the rectangle's own
+        // center, safely away from every corner's rotate ring), committed
+        // normally.
+        view.beginLayerTransform()
+        let moveDown = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let moveDrag = transformWindowPoint(canvasX: 5, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: moveDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: moveDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: moveDrag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if x >= 1, y >= 1 {
+                    let expected = before[y - 1][x - 1]
+                    XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent (shifted in from outside), proving the second transform ran cleanly")
+                }
+            }
+        }
+    }
+
+    /// Regression test for the `.distort` case's own "no rotation
+    /// correction" design decision (see its doc comment in
+    /// `mouseDragged(with:)`): rotates the identity rectangle 90° first
+    /// (clean, hand-verifiable geometry — no `cos`/`sin` rounding), then
+    /// grabs the now-physically-relocated `topLeft` corner with Option and
+    /// drags it by a plain screen-axis `(2, 3)` delta. If distort *had*
+    /// (incorrectly) applied the same local-frame rotation correction
+    /// `resizeByCorner`/`resizeByEdge` use, the stored offset would come out
+    /// rotated (something like `(-3, 2)` or `(3, -2)`, not `(2, 3)`); this
+    /// commits and checks the actual result against the transform predicted
+    /// by the *documented* (absolute, uncorrected) behavior.
+    func testRotateThenDistort_distortOffsetIsAbsoluteScreenSpace_notRotationCorrected() {
+        let zoomScale = 8
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.setZoomScale(zoomScale)
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        view.beginLayerTransform()
+
+        // Step 1: rotate the identity rectangle exactly 90° (same
+        // hand-verified rotate-ring gesture as
+        // `testLayerTransform_resizeCornerAfterRotation_...` above): after
+        // this, the `topLeft`-labeled corner physically sits at canvas
+        // (8, 0).
+        let rotateDown = transformWindowPoint(canvasX: -1, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let rotateDrag = transformWindowPoint(canvasX: 9, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: rotateDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: rotateDrag, in: window, modifierFlags: [.shift]))
+        view.mouseUp(with: mouseUpEvent(at: rotateDrag, in: window))
+
+        // Step 2: Option+drag that (now relocated) topLeft corner from
+        // (8, 0) by a plain screen delta of (+2, +3), to canvas (10, 3).
+        let distortDown = transformWindowPoint(canvasX: 8, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let distortDrag = transformWindowPoint(canvasX: 10, canvasY: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: distortDown, in: window, modifierFlags: [.option]))
+        view.mouseDragged(with: mouseDraggedEvent(at: distortDrag, in: window, modifierFlags: [.option]))
+        view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        var expected = LayerTransform.identity(width: 8, height: 8)
+        expected.rotation = .pi / 2
+        expected.distortTopLeft = CGVector(dx: 2, dy: 3)
+
+        // Self-consistency check of this test's own doc comment: the final
+        // topLeft corner lands at (10, 3) — the rotated base corner (8, 0)
+        // plus the raw, uncorrected (2, 3) drag delta, not some rotated
+        // variant of it.
+        XCTAssertEqual(expected.corners.topLeft.x, 10, accuracy: 1e-9)
+        XCTAssertEqual(expected.corners.topLeft.y, 3, accuracy: 1e-9)
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 8, sourceHeight: 8) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual?.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent")
+                }
+            }
+        }
+    }
+
+    func testCommitLayerTransform_firesOnLayerContentChanged() {
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: 4)
+        var contentChangedCount = 0
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+
+        view.beginLayerTransform()
+        view.commitLayerTransform()
+
+        XCTAssertEqual(contentChangedCount, 1)
+    }
+
+    /// `activeTool`'s `didSet` only resets selection/lasso/polygon gesture
+    /// state (issue #11's own hardening) — it never touches
+    /// `activeTransform`, and every one of `mouseDown`/`mouseDragged`/
+    /// `mouseUp` checks `activeTransform` before ever looking at
+    /// `activeTool`. Switching tools mid-transform must therefore leave the
+    /// pending transform completely intact, draggable exactly as before.
+    func testActiveTool_switchedMidTransform_activeTransformSurvives_draggingStillWorks() {
+        let zoomScale = 4
+        // 8x8: see the comment on `testMouseDragged_moveHandleWithShiftAndOptionHeld_...`
+        // above for why the plain move drag below needs a canvas this size
+        // to land unambiguously on `.move` rather than a corner's rotate ring.
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        view.beginLayerTransform()
+        view.activeTool = .rectangleSelect // switch tools mid-transform
+
+        // A plain (+1, +1) move (from the rectangle's own center), driven
+        // exactly as `testMouseDragged_moveHandleWithShiftAndOptionHeld_...`
+        // above.
+        let down = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 5, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if x >= 1, y >= 1 {
+                    let expected = before[y - 1][x - 1]
+                    XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent (shifted in from outside)")
+                }
+            }
+        }
+        // Also proves the switch away from `.rectangleSelect` never left a
+        // stray selection behind: a rectangle-select drag never actually
+        // happened (transform mode intercepted every mouse event), so there
+        // must be no selection.
+        XCTAssertNil(view.selection)
+    }
+
+    /// Complements `testKeyDown_nonReturnEscapeKey_leavesTransformModeActive_...`
+    /// above (which checks a single click) with a full paint *stroke*
+    /// (mouseDown + mouseDragged + mouseUp, the pencil's line-drawing path)
+    /// attempted at two different spots while in transform mode: one inside
+    /// the transform rectangle's interior (would hit `.move` if transform
+    /// mode is intercepting, as it must) and one entirely outside it (would
+    /// hit `nil`). Neither may reach the pencil's `paint`/`paintLine` calls.
+    func testMouseGestures_duringTransformMode_neverReachThePencilTool_regardlessOfWhereTheyLand() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        view.activeTool = .pencil
+        view.foregroundColor = .black
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        view.beginLayerTransform()
+
+        // Interior stroke (hits `.move`).
+        let interiorStart = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let interiorEnd = windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: interiorStart, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: interiorEnd, in: window))
+        view.mouseUp(with: mouseUpEvent(at: interiorEnd, in: window))
+
+        // Exterior stroke (hits `nil` — completely outside the rectangle
+        // and every handle, same distances as
+        // `testMouseDown_completelyOutsideTheRectangle_...` above).
+        let exteriorStart = transformWindowPoint(canvasX: 20, canvasY: 20, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let exteriorEnd = transformWindowPoint(canvasX: 22, canvasY: 22, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: exteriorStart, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: exteriorEnd, in: window))
+        view.mouseUp(with: mouseUpEvent(at: exteriorEnd, in: window))
+
+        // The real layer canvas — not the live preview — must still be
+        // completely untouched: transform mode never committed, and neither
+        // stroke should have painted anything.
+        assertCanvas(view, size: 8, matches: before)
     }
 }
