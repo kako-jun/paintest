@@ -458,9 +458,19 @@ final class CanvasView: NSView {
         // short), which would make `commitLayerTransform()` with no actual
         // transform applied silently corrupt a sprinkling of pixels instead
         // of reproducing the canvas byte-exactly.
+        //
+        // The same nudge can overshoot the other way for a `u`/`v` close
+        // enough to (but still under) `1` — see
+        // `testSourcePixel_uJustBelowOneByLessThanEpsilon_clampsToLastValidSourceColumn`
+        // (issue #9 review should-4) — pushing `sourceX`/`sourceY` to
+        // exactly `sourceWidth`/`sourceHeight`, one past the last valid
+        // index. Clamping to `sourceWidth - 1`/`sourceHeight - 1` keeps that
+        // case sampling the intended edge pixel instead of the
+        // `source.rawPixel` bounds guard silently dropping it (leaving the
+        // destination pixel transparent).
         let epsilon = 1e-9
-        let sourceX = Int(u * Double(sourceWidth) + epsilon)
-        let sourceY = Int(v * Double(sourceHeight) + epsilon)
+        let sourceX = min(sourceWidth - 1, Int(u * Double(sourceWidth) + epsilon))
+        let sourceY = min(sourceHeight - 1, Int(v * Double(sourceHeight) + epsilon))
         return (sourceX, sourceY)
     }
 
@@ -491,9 +501,11 @@ final class CanvasView: NSView {
         )
         guard let (u, v) = projective.inverse(x: Double(pixel.x), y: Double(pixel.y)) else { return nil }
         guard u >= 0, u < 1, v >= 0, v < 1 else { return nil }
+        // Same epsilon-overshoot clamp as the plain-rectangle path above
+        // (issue #9 review should-4) — see its comment for why.
         let epsilon = 1e-9
-        let sourceX = Int(u * Double(sourceWidth) + epsilon)
-        let sourceY = Int(v * Double(sourceHeight) + epsilon)
+        let sourceX = min(sourceWidth - 1, Int(u * Double(sourceWidth) + epsilon))
+        let sourceY = min(sourceHeight - 1, Int(v * Double(sourceHeight) + epsilon))
         return (sourceX, sourceY)
     }
 

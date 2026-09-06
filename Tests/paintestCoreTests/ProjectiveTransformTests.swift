@@ -197,21 +197,22 @@ final class ProjectiveTransformTests: XCTestCase {
     /// + halfWidth - u * width`. With `pixel.x = 5`, `width = 10` (so
     /// `halfWidth = 5`), that's `centerX = 5e-10`.
     ///
-    /// CHARACTERIZATION TEST, not a correctness assertion — this pins down
-    /// an *actual bug* found while writing this test, rather than the
-    /// intended "must not overflow" behavior: with this adversarial
-    /// `centerX`, `sourcePixel` currently returns `sourceX == 10`, one past
-    /// the last valid index (`0..<10`) of a width-10 source canvas. It does
-    /// NOT crash — `rasterizeTransform`'s `source.rawPixel(x: 10, ...)` call
-    /// safely returns `nil` and that destination pixel is just left
-    /// transparent (see `PixelCanvas.rawPixel`'s bounds guard) — but the
-    /// correct source pixel (index 9) never gets sampled. The trigger window
-    /// is astronomically narrow (`centerX` has to land within `5e-10` of a
-    /// specific value), so this is not expected to occur from any real mouse
-    /// drag; flagged here as a design note for a future fix (e.g. clamping
-    /// `sourceX`/`sourceY` to `sourceWidth - 1`/`sourceHeight - 1`) rather
-    /// than fixed as part of this test-authoring pass.
-    func testSourcePixel_uJustBelowOneByLessThanEpsilon_currentlyOverflowsToSourceWidth_knownEdgeCaseBug() {
+    /// Correctness test (issue #9 review should-4 — this used to be a
+    /// CHARACTERIZATION test pinning down an actual bug: with this
+    /// adversarial `centerX`, `sourcePixel` used to return `sourceX == 10`,
+    /// one past the last valid index (`0..<10`) of a width-10 source
+    /// canvas. That never crashed — `rasterizeTransform`'s
+    /// `source.rawPixel(x: 10, ...)` call safely returns `nil` and that
+    /// destination pixel was just left transparent (see
+    /// `PixelCanvas.rawPixel`'s bounds guard) — but the correct source pixel
+    /// (index 9) never got sampled. `sourcePixel` now clamps `sourceX`/
+    /// `sourceY` to `sourceWidth - 1`/`sourceHeight - 1`, so this adversarial
+    /// `centerX` correctly samples the last column instead of overflowing
+    /// past it. The trigger window is astronomically narrow (`centerX` has
+    /// to land within `5e-10` of a specific value), so this was never
+    /// expected to occur from any real mouse drag — but the clamp is cheap
+    /// and makes the guarantee unconditional rather than probabilistic.
+    func testSourcePixel_uJustBelowOneByLessThanEpsilon_clampsToLastValidSourceColumn() {
         var transform = LayerTransform.identity(width: 10, height: 10)
         transform.centerX = 5e-10
         transform.centerY = 5 // keeps v comfortably inside 0..<1, only u is under test
@@ -219,6 +220,6 @@ final class ProjectiveTransformTests: XCTestCase {
         let sample = CanvasView.sourcePixel(forDestination: (5, 5), transform: transform, sourceWidth: 10, sourceHeight: 10)
 
         XCTAssertNotNil(sample, "must not crash / return nil outright — u is still < 1, so the range guard lets it through")
-        XCTAssertEqual(sample?.x, 10, "documents the current (buggy) overflow: this SHOULD be 9, the last valid column, not sourceWidth itself")
+        XCTAssertEqual(sample?.x, 9, "clamped to the last valid column, not sourceWidth itself")
     }
 }
