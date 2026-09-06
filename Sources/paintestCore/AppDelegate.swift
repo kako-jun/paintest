@@ -388,9 +388,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layerPanelView = LayerPanelView(layerStack: canvasView.layerStack)
         layerPanelView.onChange = { [weak self] in
             self?.canvasView.needsDisplay = true
-            // Layer add/remove/duplicate/reorder/opacity changes are
-            // content edits too, same as a pencil stroke (issue #4).
+            // Layer add/remove/duplicate/reorder/opacity/visibility changes
+            // are content edits too, same as a pencil stroke (issue #4).
             self?.documentManager.activeDocument.isDirty = true
+        }
+        // Selecting a different layer row is not a content edit (issue #4
+        // self-review must): redraw so the canvas reflects the new active
+        // layer, but do NOT touch `isDirty`, or opening a saved document
+        // and merely clicking another row would spuriously ask to save on
+        // close/quit/open. (No AppDelegate-level wiring test exists for
+        // this panel per this repo's convention; verified by running the
+        // app: open a saved file, click another layer row, confirm no
+        // save-changes prompt on quit.)
+        layerPanelView.onSelectionChanged = { [weak self] in
+            self?.canvasView.needsDisplay = true
         }
         layerPanelView.translatesAutoresizingMaskIntoConstraints = false
         layerPanelView.wantsLayer = true

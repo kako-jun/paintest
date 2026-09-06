@@ -29,12 +29,26 @@ private final class FlippedStackView: NSStackView {
 /// `NSTableView` data source" style. `LayerStack` is the single source of
 /// truth: every button here just calls one of its mutating methods, then
 /// this view rebuilds its own rows from scratch (`reload()`) and calls
-/// `onChange` so the host (`AppDelegate`) can mark the canvas for redraw.
-/// No finer-grained notification machinery than that is needed for a panel
-/// this size.
+/// `onChange` so the host (`AppDelegate`) can redraw the canvas and mark
+/// the document dirty. Selecting a different row (`selectLayer(at:)`) is
+/// the one exception: it doesn't touch layer content, so it calls
+/// `onSelectionChanged` instead, which the host wires to a redraw only
+/// (issue #4 self-review must). No finer-grained notification machinery
+/// than that split is needed for a panel this size.
 final class LayerPanelView: NSView {
     private(set) var layerStack: LayerStack
+    /// Fired when a layer's actual content, structure, or persisted
+    /// attributes change (add/remove/duplicate/reorder/opacity/visibility).
+    /// These are the operations that should mark the document dirty.
     var onChange: (() -> Void)?
+    /// Fired when only the *active layer selection* changes (clicking a
+    /// different row). This never alters anything that gets written to the
+    /// `.paintestdoc` file, so it must NOT be treated as a content edit —
+    /// the host should redraw the canvas (the active-layer highlight/target
+    /// changed) but must not mark the document dirty (issue #4 self-review
+    /// must: selecting a different layer in a saved document was wrongly
+    /// popping the unsaved-changes dialog).
+    var onSelectionChanged: (() -> Void)?
 
     private let rowsStack = FlippedStackView()
     private let opacitySlider = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
@@ -259,7 +273,10 @@ final class LayerPanelView: NSView {
         guard layerStack.layers.indices.contains(index) else { return }
         layerStack.activeLayerIndex = index
         reload()
-        onChange?()
+        // Selection only, not a content change (issue #4 self-review must):
+        // must not fire `onChange`, or the host will mark the document
+        // dirty just because a different row was clicked.
+        onSelectionChanged?()
     }
 
     // MARK: - Actions
