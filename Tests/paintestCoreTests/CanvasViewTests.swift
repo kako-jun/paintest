@@ -138,8 +138,12 @@ final class CanvasViewTests: XCTestCase {
 
     private func activate(_ incoming: Document, previouslyDisplayed: Document?, on view: CanvasView) {
         previouslyDisplayed?.zoomScale = view.zoomScale
+        // Selection write-back/restore, same pattern as zoom above and in
+        // the real `AppDelegate.activateActiveDocument()` (issue #11).
+        previouslyDisplayed?.selection = view.selection
         view.replaceLayerStack(incoming.layerStack)
         view.setZoomScale(incoming.zoomScale)
+        view.selection = incoming.selection
     }
 
     func testZoom_perDocument_staysIndependentAcrossTabSwitches() {
@@ -154,6 +158,38 @@ final class CanvasViewTests: XCTestCase {
 
         activate(docA, previouslyDisplayed: docB, on: view) // switch back to "a"
         XCTAssertEqual(view.zoomScale, 8, "\"a\"'s 200% zoom must be restored, not reset to the default")
+    }
+
+    // MARK: - Per-document selection independence across tab switches (issue #11)
+    //
+    // Mirrors `testZoom_perDocument_staysIndependentAcrossTabSwitches` above:
+    // `CanvasView` itself only ever holds one `selection` at a time — the
+    // per-document memory lives on `Document.selection`, and it's
+    // `AppDelegate.activateActiveDocument()` that writes the outgoing
+    // document's selection back before applying the incoming one's, exactly
+    // like it does for `zoomScale`. `activateActiveDocument()` is private on
+    // `AppDelegate` (not practical to unit test directly), so this reuses
+    // the same `activate(_:previouslyDisplayed:on:)` helper, which now
+    // reproduces the selection half of that protocol too.
+
+    func testSelection_perDocument_staysIndependentAcrossTabSwitches() {
+        let docA = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "b")
+        let view = CanvasView(layerStack: docA.layerStack)
+        let selectionA = SelectionMask.rectangle(x0: 0, y0: 0, x1: 3, y1: 3, width: 8, height: 8)
+
+        view.selection = selectionA // "a" has a selection while it's the displayed document
+
+        activate(docB, previouslyDisplayed: docA, on: view) // switch to "b"
+        XCTAssertNil(view.selection, "\"b\" has never had a selection and must show none, not \"a\"'s rectangle")
+
+        activate(docA, previouslyDisplayed: docB, on: view) // switch back to "a"
+        // `SelectionMask` is a class with no `Equatable` conformance (see
+        // `SelectionMaskTests.assertMasks(_:equalTo:...)`, which compares
+        // cell-by-cell instead), so identity comparison is what "restored,
+        // not reset" actually means here: the exact same mask object should
+        // come back, not an equivalent-but-different one.
+        XCTAssertTrue(view.selection === selectionA, "\"a\"'s selection must be restored, not reset to none")
     }
 
     // MARK: - onZoomChanged callback
