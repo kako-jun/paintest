@@ -1047,4 +1047,591 @@ final class CanvasViewTests: XCTestCase {
 
         XCTAssertEqual(view.zoomScale, 32, "the second mouseDown must have reset the drag state to its own point: a zero-distance click must zoomIn() one step from 16, not re-run the stale first drag's best-fit result")
     }
+
+    // MARK: - Selection tools: basic gesture -> selection (issue #11 test-authoring pass)
+    //
+    // All five selection tools driven through the same real mouseDown/
+    // mouseDragged/mouseUp entry points as the pencil/eraser/pen/eyedropper/
+    // magnifier tests above, using the same off-screen-window helpers.
+
+    private func keyDownEvent(keyCode: UInt16, in window: NSWindow) -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        )!
+    }
+
+    func testMouseDown_rectangleSelect_dragThenUp_confirmsRectangleSelection() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+
+        XCTAssertNotNil(view.selection)
+        XCTAssertTrue(view.selection!.contains(x: 2, y: 2))
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 5))
+        XCTAssertFalse(view.selection!.contains(x: 0, y: 0))
+    }
+
+    func testMouseDown_ellipseSelect_dragThenUp_confirmsEllipseSelection() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .ellipseSelect
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+
+        XCTAssertNotNil(view.selection)
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 4), "the bounding box's center, well inside the ellipse, must be selected")
+        XCTAssertFalse(view.selection!.contains(x: 0, y: 0), "far outside the ellipse's bounding box must not be selected")
+    }
+
+    func testMouseDown_lassoSelect_dragThroughMultiplePoints_confirmsFreeformSelection() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertNotNil(view.selection)
+        XCTAssertTrue(view.selection!.contains(x: 3, y: 3), "the interior of the dragged square path must be selected")
+        XCTAssertFalse(view.selection!.contains(x: 0, y: 0), "outside the dragged path must not be selected")
+    }
+
+    func testMouseUp_lassoSelect_fewerThanThreePoints_leavesSelectionUnchanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window)) // 1 vertex
+        view.mouseUp(with: mouseUpEvent(at: point, in: window)) // no drag at all -> still just 1 vertex
+
+        XCTAssertNil(view.selection, "fewer than 3 points can't enclose an area; the selection must stay untouched")
+    }
+
+    // MARK: - Selection tools: polygon click-based gesture (issue #11 test-authoring pass)
+
+    func testPolygonSelect_threeClicksThenClickNearFirstVertex_closesTheSelection() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        XCTAssertNil(view.selection, "precondition: the shape isn't closed yet after only 3 clicks")
+
+        // Click back at (approximately) the first vertex to close the shape.
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+
+        XCTAssertNotNil(view.selection, "clicking near the first vertex with >=3 vertices placed must close and commit the selection")
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 2), "a point inside the closed triangle must be selected")
+        XCTAssertFalse(view.selection!.contains(x: 0, y: 0), "well outside the triangle must not be selected")
+    }
+
+    func testPolygonSelect_closeClickExactlyAtCloseDistance_closesTheShape() {
+        let view = makeViewInWindow(width: 20, height: 20, zoomScale: 1)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let first = NSPoint(x: 10, y: 16)
+
+        view.mouseDown(with: mouseDownEvent(at: first, in: window))
+        view.mouseUp(with: mouseUpEvent(at: first, in: window))
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 15, y: 5), in: window))
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 15, y: 5), in: window))
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 15, y: 18), in: window))
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 15, y: 18), in: window))
+
+        // Exactly 6 view-points from the first click (polygonCloseDistance),
+        // in an isometric (flip-preserves-distance) view/window coordinate
+        // system: `<=` must close it, not leave it open for a 4th vertex.
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: first.x + 6, y: first.y), in: window))
+
+        XCTAssertNotNil(view.selection, "a close-click exactly at polygonCloseDistance (6pt) must close the shape (the comparison is <=, not <)")
+    }
+
+    func testPolygonSelect_closeClickJustPastCloseDistance_doesNotClose_addsAFourthVertexInstead() {
+        let view = makeViewInWindow(width: 20, height: 20, zoomScale: 1)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let first = NSPoint(x: 10, y: 16)
+
+        view.mouseDown(with: mouseDownEvent(at: first, in: window))
+        view.mouseUp(with: mouseUpEvent(at: first, in: window))
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 15, y: 5), in: window))
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 15, y: 5), in: window))
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 15, y: 18), in: window))
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 15, y: 18), in: window))
+
+        // 7 view-points away — just past `polygonCloseDistance` (6) — must
+        // be treated as placing a 4th vertex, not closing the shape.
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: first.x + 7, y: first.y), in: window))
+
+        XCTAssertNil(view.selection, "a click just past polygonCloseDistance must not close the shape")
+    }
+
+    // MARK: - Selection tools: magic wand (issue #11 test-authoring pass)
+
+    func testMouseDown_magicWandSelect_singleClick_confirmsSelectionImmediately_noDragNeeded() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        XCTAssertNotNil(view.selection, "a single mouseDown, with no mouseDragged/mouseUp at all, must be the whole magic wand gesture")
+        XCTAssertTrue(view.selection!.contains(x: 0, y: 0), "the whole solid-white canvas must be selected at tolerance 0")
+    }
+
+    func testMouseDown_magicWandSelect_samplesTheActiveLayersOwnCanvas_notTheComposite() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        // Bottom layer: opaque red everywhere.
+        view.layerStack.layers[0].canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        view.layerStack.addLayer() // index 1, becomes active; starts fully transparent
+        let activeCanvas = view.layerStack.activeLayer.canvas
+        // (2,2): semi-transparent blue on the active layer -> composited
+        // with the red beneath it, its visible color is a red/blue blend,
+        // NOT plain blue.
+        activeCanvas.setPixel(x: 2, y: 2, color: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 0.5))
+        // (3,2): fully opaque blue on the active layer, adjacent to (2,2) —
+        // same raw RGB as (2,2) (alpha is excluded from color distance), but
+        // its *composited* appearance (plain opaque blue) differs sharply
+        // from (2,2)'s blended composite.
+        activeCanvas.setPixel(x: 3, y: 2, color: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertTrue(view.selection?.contains(x: 3, y: 2) ?? false, "(3,2) shares (2,2)'s raw active-layer RGB and must be selected — if the wand instead sampled the composite, the two pixels' very different blended appearances would exclude it")
+    }
+
+    // MARK: - Selection combine modes: decision table (issue #11 test-authoring pass)
+    //
+    // Exercised through the rectangle-select tool's drag gesture (mouseDown
+    // -> mouseDragged -> mouseUp) as the representative case; the "combine
+    // modes across tools" section further down spot-checks the same
+    // decision table through the lasso and magic wand tools too, briefly, to
+    // catch a per-tool branch that might diverge from this shared logic.
+
+    private func dragRectangleSelect(on view: CanvasView, fromCol: Int, fromRow: Int, toCol: Int, toRow: Int, zoomScale: Int, modifierFlags: NSEvent.ModifierFlags = []) {
+        let window = view.window!
+        let start = windowPoint(forPixelCol: fromCol, row: fromRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: toCol, row: toRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: start, in: window, modifierFlags: modifierFlags))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+    }
+
+    func testRectangleSelect_noModifier_replace_discardsExistingSelectionEntirely() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 1, y1: 1, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 4, fromRow: 4, toCol: 5, toRow: 5, zoomScale: zoomScale)
+
+        XCTAssertFalse(view.selection!.contains(x: 0, y: 0), "the old selection must be completely discarded by a plain (no-modifier) drag")
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 4))
+    }
+
+    func testRectangleSelect_shiftAdd_withNoExistingSelection_behavesLikeAPlainReplace() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        XCTAssertNil(view.selection, "precondition: nothing selected yet")
+
+        dragRectangleSelect(on: view, fromCol: 2, fromRow: 2, toCol: 3, toRow: 3, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 2, y: 2))
+        XCTAssertTrue(view.selection!.contains(x: 3, y: 3))
+        XCTAssertFalse(view.selection!.contains(x: 0, y: 0))
+    }
+
+    func testRectangleSelect_optionSubtract_withNoExistingSelection_staysNil() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+
+        dragRectangleSelect(on: view, fromCol: 2, fromRow: 2, toCol: 3, toRow: 3, zoomScale: zoomScale, modifierFlags: [.option])
+
+        XCTAssertNil(view.selection, "subtracting from nothing has nothing to subtract from — must stay nil, not become an inverted/negative selection")
+    }
+
+    func testRectangleSelect_shiftOptionIntersect_withNoExistingSelection_staysNil() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+
+        dragRectangleSelect(on: view, fromCol: 2, fromRow: 2, toCol: 3, toRow: 3, zoomScale: zoomScale, modifierFlags: [.shift, .option])
+
+        XCTAssertNil(view.selection, "intersecting with nothing has nothing to intersect with — must stay nil")
+    }
+
+    func testRectangleSelect_replace_withExistingSelection_discardsItCompletely() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 6, y1: 6, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 7, fromRow: 7, toCol: 7, toRow: 7, zoomScale: zoomScale)
+
+        XCTAssertFalse(view.selection!.contains(x: 0, y: 0), "none of the old, much larger selection should survive a replace")
+        XCTAssertTrue(view.selection!.contains(x: 7, y: 7))
+    }
+
+    func testRectangleSelect_replace_dragResolvesToAnEmptyMask_clearsExistingSelectionToNil() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 3, y1: 3, width: 8, height: 8)
+
+        // Both drag endpoints resolve to pixel coordinates entirely outside
+        // the 8x8 canvas, so the resulting rectangle mask clips to empty.
+        dragRectangleSelect(on: view, fromCol: -10, fromRow: -10, toCol: -5, toRow: -5, zoomScale: zoomScale)
+
+        XCTAssertNil(view.selection, "a replace whose new mask is empty must clear the existing selection to nil, not leave it, and not leave an all-false mask standing")
+    }
+
+    func testRectangleSelect_shiftAdd_exactlyOverlappingRegion_leavesSelectionUnchanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 2, y0: 2, x1: 4, y1: 4, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 2, fromRow: 2, toCol: 4, toRow: 4, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        let expected = SelectionMask.rectangle(x0: 2, y0: 2, x1: 4, y1: 4, width: 8, height: 8)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.selection!.contains(x: x, y: y), expected.contains(x: x, y: y), "(\(x),\(y)) union of an identical region with itself must be unchanged")
+            }
+        }
+    }
+
+    func testRectangleSelect_shiftAdd_partiallyOverlappingRegion_expandsToTheUnion() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 2, y1: 2, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 0, y: 0), "the old selection's exclusive area must survive the union")
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 5), "the new drag's exclusive area must be added by the union")
+    }
+
+    func testRectangleSelect_optionSubtract_exactlyOverlappingRegion_clearsSelectionToNil() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 2, y0: 2, x1: 4, y1: 4, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 2, fromRow: 2, toCol: 4, toRow: 4, zoomScale: zoomScale, modifierFlags: [.option])
+
+        XCTAssertNil(view.selection, "subtracting exactly the whole existing selection must leave nothing, collapsing to nil")
+    }
+
+    func testRectangleSelect_optionSubtract_disjointRegion_leavesSelectionUnchanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 1, y1: 1, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 5, fromRow: 5, toCol: 6, toRow: 6, zoomScale: zoomScale, modifierFlags: [.option])
+
+        XCTAssertTrue(view.selection!.contains(x: 0, y: 0), "subtracting a disjoint region must leave the existing selection untouched")
+        XCTAssertTrue(view.selection!.contains(x: 1, y: 1))
+    }
+
+    func testRectangleSelect_shiftOptionIntersect_exactlyOverlappingRegion_leavesSelectionUnchanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 2, y0: 2, x1: 4, y1: 4, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 2, fromRow: 2, toCol: 4, toRow: 4, zoomScale: zoomScale, modifierFlags: [.shift, .option])
+
+        let expected = SelectionMask.rectangle(x0: 2, y0: 2, x1: 4, y1: 4, width: 8, height: 8)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.selection!.contains(x: x, y: y), expected.contains(x: x, y: y))
+            }
+        }
+    }
+
+    func testRectangleSelect_shiftOptionIntersect_disjointRegion_clearsSelectionToNil() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 1, y1: 1, width: 8, height: 8)
+
+        dragRectangleSelect(on: view, fromCol: 5, fromRow: 5, toCol: 6, toRow: 6, zoomScale: zoomScale, modifierFlags: [.shift, .option])
+
+        XCTAssertNil(view.selection, "intersecting with a disjoint region has no overlap, so the result must collapse to nil")
+    }
+
+    // MARK: - Combine modes across tools (issue #11 test-authoring pass):
+    // brief cross-check that lasso and magic wand share the same combine
+    // logic as rectangle-select above, rather than each having its own
+    // (possibly diverging) copy.
+
+    func testLassoSelect_shiftAdd_partiallyOverlappingRegion_expandsToTheUnion() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 2, y1: 2, width: 8, height: 8)
+        let window = view.window!
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height), in: window, modifierFlags: [.shift]))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 7, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 7, row: 7, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 7, row: 7, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertTrue(view.selection!.contains(x: 0, y: 0), "the old selection must survive a Shift (add) lasso, same as rectangle-select")
+        XCTAssertTrue(view.selection!.contains(x: 6, y: 6), "the new lasso region must be added")
+    }
+
+    func testMagicWandSelect_optionSubtract_exactlyOverlappingRegion_clearsSelectionToNil() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        // The whole (solid white) canvas is one magic-wand region.
+        let fullCanvas = SelectionMask.rectangle(x0: 0, y0: 0, x1: 7, y1: 7, width: 8, height: 8)
+        view.selection = fullCanvas
+        let window = view.window!
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height), in: window, modifierFlags: [.option]))
+
+        XCTAssertNil(view.selection, "subtracting the magic wand's full-canvas region from an identical existing selection must clear it to nil, same combine rule as rectangle-select")
+    }
+
+    // MARK: - Selection tool state machines: Escape/Return/tool-switch cleanup (issue #11 test-authoring pass)
+
+    func testPolygonSelect_escapeMidGesture_leavesSelectionUnchanged_andClearsTheVertexList() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape
+
+        XCTAssertNil(view.selection, "Escape must cancel the in-progress polygon without touching the selection")
+
+        // Prove the vertex list was actually emptied (not just left alone
+        // because 2 vertices can't close anyway): a fresh 3-click polygon
+        // afterward must produce exactly the plain 3-vertex triangle, not a
+        // 5-vertex shape tainted by the 2 vertices placed before Escape.
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window)) // close
+
+        let expected = SelectionMask.polygon(vertices: [(1, 1), (6, 1), (6, 6)], width: 8, height: 8)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.selection!.contains(x: x, y: y), expected.contains(x: x, y: y), "(\(x),\(y)) the post-Escape polygon must match a plain fresh 3-vertex triangle exactly")
+            }
+        }
+    }
+
+    func testPolygonSelect_threeClicksThenReturn_closesWithThoseThreeVertices() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let vertices: [(x: Int, y: Int)] = [(1, 1), (6, 1), (6, 6)]
+
+        for vertex in vertices {
+            let point = windowPoint(forPixelCol: vertex.x, row: vertex.y, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: point, in: window))
+            view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        }
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return
+
+        let expected = SelectionMask.polygon(vertices: vertices, width: 8, height: 8)
+        XCTAssertNotNil(view.selection)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.selection!.contains(x: x, y: y), expected.contains(x: x, y: y))
+            }
+        }
+    }
+
+    func testPolygonSelect_onlyTwoVerticesThenReturn_doesNothing() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return
+
+        XCTAssertNil(view.selection, "fewer than 3 vertices can't enclose an area; Return must be a no-op on the selection")
+    }
+
+    func testLassoSelect_repeatedMouseDraggedAtTheSamePixel_doesNotDistortTheFinalShape() {
+        // `lassoVertices` is private, so this can't inspect the accumulated
+        // point count directly; instead it checks the one thing that would
+        // actually be observably wrong if de-duplication were removed in a
+        // way that corrupts (not just fails to shrink) the path: feeding
+        // many repeated points at the same pixel, interspersed with the real
+        // path, must produce the exact same mask as a plain drag through
+        // just the distinct points.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+        let p1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let p2 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let p3 = windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: p1, in: window))
+        for _ in 0..<5 {
+            view.mouseDragged(with: mouseDraggedEvent(at: p1, in: window)) // repeated, no movement
+        }
+        view.mouseDragged(with: mouseDraggedEvent(at: p2, in: window))
+        for _ in 0..<5 {
+            view.mouseDragged(with: mouseDraggedEvent(at: p2, in: window)) // repeated again
+        }
+        view.mouseDragged(with: mouseDraggedEvent(at: p3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: p3, in: window))
+
+        let expected = SelectionMask.polygon(vertices: [(1, 1), (6, 6), (1, 6)], width: 8, height: 8)
+        XCTAssertNotNil(view.selection)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.selection!.contains(x: x, y: y), expected.contains(x: x, y: y), "(\(x),\(y)) repeated same-pixel drag events must not distort the path from the plain 3-point equivalent")
+            }
+        }
+    }
+
+    func testActiveTool_switchedAwayMidPolygonGesture_clearsVertexState() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        view.activeTool = .pencil
+        view.activeTool = .polygonSelect
+
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window)) // close
+
+        let expected = SelectionMask.polygon(vertices: [(1, 1), (6, 1), (6, 6)], width: 8, height: 8)
+        XCTAssertNotNil(view.selection)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.selection!.contains(x: x, y: y), expected.contains(x: x, y: y), "switching tools mid-gesture and back must have cleared the stale 2-vertex list, not tainted the next polygon with it")
+            }
+        }
+    }
+
+    func testActiveTool_switchedAwayMidLassoGesture_clearsPathState() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+
+        // Mid-drag: mouseDown + mouseDragged, but the gesture is never
+        // finished with mouseUp — interrupted by a tool switch instead.
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 0, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 7, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        view.activeTool = .pencil
+        view.activeTool = .lassoSelect
+
+        let p1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let p2 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let p3 = windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: p1, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: p2, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: p3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: p3, in: window))
+
+        let expected = SelectionMask.polygon(vertices: [(1, 1), (6, 6), (1, 6)], width: 8, height: 8)
+        XCTAssertNotNil(view.selection)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.selection!.contains(x: x, y: y), expected.contains(x: x, y: y), "switching tools mid-lasso-drag and back must have cleared the stale interrupted path")
+            }
+        }
+    }
+
+    func testActiveTool_switchingToPencilFromASelectionTool_preservesTheConfirmedSelection() {
+        let view = makeView()
+        view.activeTool = .rectangleSelect
+        view.selection = SelectionMask.rectangle(x0: 1, y0: 1, x1: 3, y1: 3, width: 8, height: 8)
+
+        view.activeTool = .pencil
+
+        XCTAssertNotNil(view.selection, "switching away from a selection tool must not clear an already-confirmed selection")
+        XCTAssertTrue(view.selection!.contains(x: 2, y: 2))
+    }
 }
