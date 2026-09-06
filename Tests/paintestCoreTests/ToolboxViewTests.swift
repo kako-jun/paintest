@@ -55,28 +55,28 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pressed.first?.toolTip, "鉛筆")
     }
 
-    // Pencil, eraser, pen, and the eyedropper are wired to real behavior
-    // (issues #5, #10, #14); every other button stays a purely visual
-    // placeholder with no target/action, same as before.
-    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト"]
+    // Pencil, eraser, pen, the eyedropper, and the magnifier are wired to
+    // real behavior (issues #5, #10, #14, #13); every other button stays a
+    // purely visual placeholder with no target/action, same as before.
+    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡"]
 
-    func testOnlyPencilEraserPenAndEyedropper_haveTargetAndAction() {
+    func testOnlyPencilEraserPenEyedropperAndMagnifier_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 4)
+        XCTAssertEqual(wired.count, 5)
         for button in wired {
-            XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper must be wired to onToolSelected")
-            XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper must be wired to onToolSelected")
+            XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier must be wired to onToolSelected")
+            XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier must be wired to onToolSelected")
         }
     }
 
     func testOtherButtons_haveNoTargetOrAction() {
         let view = makeView()
         let placeholders = allButtons(in: view).filter { !Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(placeholders.count, 12)
+        XCTAssertEqual(placeholders.count, 11)
         for button in placeholders {
-            XCTAssertNil(button.target, "non-pencil/eraser/pen/eyedropper tool buttons are visual placeholders; wiring is out of scope")
-            XCTAssertNil(button.action, "non-pencil/eraser/pen/eyedropper tool buttons are visual placeholders; wiring is out of scope")
+            XCTAssertNil(button.target, "non-pencil/eraser/pen/eyedropper/magnifier tool buttons are visual placeholders; wiring is out of scope")
+            XCTAssertNil(button.action, "non-pencil/eraser/pen/eyedropper/magnifier tool buttons are visual placeholders; wiring is out of scope")
         }
     }
 
