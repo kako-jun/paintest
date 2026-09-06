@@ -421,11 +421,11 @@ final class CanvasViewTests: XCTestCase {
         )!
     }
 
-    private func mouseDraggedEvent(at windowPoint: NSPoint, in window: NSWindow) -> NSEvent {
+    private func mouseDraggedEvent(at windowPoint: NSPoint, in window: NSWindow, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
         NSEvent.mouseEvent(
             with: .leftMouseDragged,
             location: windowPoint,
-            modifierFlags: [],
+            modifierFlags: modifierFlags,
             timestamp: 0,
             windowNumber: window.windowNumber,
             context: nil,
@@ -1775,5 +1775,157 @@ final class CanvasViewTests: XCTestCase {
         assertPixel(0, 2, equals: source01)
         assertPixel(0, 3, equals: source01)
         assertPixel(3, 3, equals: source11)
+    }
+
+    // MARK: - Layer transform: rotation (issue #9, round 2)
+
+    /// `sourcePixel`'s rotation-aware inverse mapping at exactly 90°, hand
+    /// -derived independently of the implementation (not just re-running its
+    /// own formula): with a 4x4 identity transform (`centerX == centerY ==
+    /// 2`), rotating the *displayed* image 90° means destination pixel
+    /// `(x, y)` should show whatever source pixel a 90°-clockwise rotation
+    /// would carry to that spot — which, worked out by hand, is source
+    /// `(y, 4 - x)`.
+    ///
+    /// Column `x == 0` is a documented exception, not a bug: `sourcePixel`
+    /// treats a pixel's own integer coordinate as its top/left corner (see
+    /// the `epsilon` comment on `sourcePixel` itself), so an exact
+    /// multiple-of-90° rotation of an identity-size rectangle always pushes
+    /// that column's `v` to exactly `1.0` — right on the `v < 1` guard's
+    /// excluded boundary. This is the same kind of "one edge crops off"
+    /// artifact `testLayerTransform_dragBottomRightCornerToDoubleSize_...`
+    /// above already accepts for scaling from a corner anchor.
+    func testSourcePixel_90DegreeRotation_matchesHandDerivedClockwiseMapping() {
+        var transform = LayerTransform.identity(width: 4, height: 4)
+        transform.rotation = .pi / 2
+
+        func assertMaps(_ destination: (x: Int, y: Int), to expected: (x: Int, y: Int)?, line: UInt = #line) {
+            let actual = CanvasView.sourcePixel(forDestination: destination, transform: transform, sourceWidth: 4, sourceHeight: 4)
+            XCTAssertEqual(actual?.x, expected?.x, "destination \(destination) x", line: line)
+            XCTAssertEqual(actual?.y, expected?.y, "destination \(destination) y", line: line)
+        }
+
+        assertMaps((0, 0), to: nil)
+        assertMaps((0, 3), to: nil)
+        assertMaps((1, 0), to: (0, 3))
+        assertMaps((2, 0), to: (0, 2))
+        assertMaps((3, 0), to: (0, 1))
+        assertMaps((1, 1), to: (1, 3))
+        assertMaps((1, 2), to: (2, 3))
+        assertMaps((1, 3), to: (3, 3))
+    }
+
+    /// `sourcePixel`'s rotation-aware inverse mapping at exactly 180°, hand
+    /// -derived the same independent way as the 90° test above: rotating an
+    /// image 180° is a plain point reflection through its center, so
+    /// destination `(x, y)` (for `x > 0` and `y > 0` — see below) should show
+    /// source `(4 - x, 4 - y)`.
+    ///
+    /// `x == 0` or `y == 0` is the same documented boundary exception as the
+    /// 90° test above (both `u` and `v` individually hit exactly `1.0` for
+    /// those rows/columns at 180°, not just one axis as at 90°).
+    func testSourcePixel_180DegreeRotation_isPointReflectionThroughCenter() {
+        var transform = LayerTransform.identity(width: 4, height: 4)
+        transform.rotation = .pi
+
+        func assertMaps(_ destination: (x: Int, y: Int), to expected: (x: Int, y: Int)?, line: UInt = #line) {
+            let actual = CanvasView.sourcePixel(forDestination: destination, transform: transform, sourceWidth: 4, sourceHeight: 4)
+            XCTAssertEqual(actual?.x, expected?.x, "destination \(destination) x", line: line)
+            XCTAssertEqual(actual?.y, expected?.y, "destination \(destination) y", line: line)
+        }
+
+        assertMaps((0, 0), to: nil)
+        assertMaps((0, 2), to: nil)
+        assertMaps((2, 0), to: nil)
+        assertMaps((1, 1), to: (3, 3))
+        assertMaps((3, 3), to: (1, 1))
+        assertMaps((2, 2), to: (2, 2))
+        assertMaps((3, 1), to: (1, 3))
+        assertMaps((1, 3), to: (3, 1))
+    }
+
+    /// Guards against the round-2 rewrite of `sourcePixel` (general rotation
+    /// via inverse-rotate-then-round-1-math) accidentally changing behavior
+    /// when `rotation` is still `0` — same guarantee `testLayerTransform_
+    /// commitWithNoDrag_reproducesOriginalCanvasByteExact` above already
+    /// makes at the `CanvasView` gesture level, checked here directly at the
+    /// pure-function level across every pixel of a 4x4 canvas.
+    func testSourcePixel_zeroRotation_stillMapsEveryPixelToItself() {
+        let transform = LayerTransform.identity(width: 4, height: 4)
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let actual = CanvasView.sourcePixel(forDestination: (x, y), transform: transform, sourceWidth: 4, sourceHeight: 4)
+                XCTAssertEqual(actual?.x, x, "x=\(x) y=\(y)")
+                XCTAssertEqual(actual?.y, y, "x=\(x) y=\(y)")
+            }
+        }
+    }
+
+    /// End-to-end: grabs the rotate ring just outside the top-left corner
+    /// (`hitTestTransformHandle`'s new `.rotate` case), drags with Shift
+    /// held to a point exactly 180° around the rectangle's center (snapping
+    /// confirms the drag lands on a clean angle rather than whatever noise
+    /// `atan2` happens to produce), and commits — verifying the *actual
+    /// gesture pipeline* (hit-test → drag → rasterize), not just the pure
+    /// `sourcePixel` math the tests above already cover in isolation.
+    ///
+    /// Only checks the interior 3x3 block (`x`/`y` both in `1...3`): the
+    /// edge row/column that crops off at exactly 180° (see
+    /// `testSourcePixel_180DegreeRotation_isPointReflectionThroughCenter`'s
+    /// doc comment) sits exactly on a `u`/`v == 1.0` boundary, which the
+    /// degrees-and-back Shift-snap roundtrip could nudge a few ULPs either
+    /// side of — asserting the interior avoids that source of flakiness
+    /// while still exercising the same rotation end to end.
+    func testLayerTransform_rotateHandleDraggedHalfCircleWithShiftSnap_commits180DegreeRotation() {
+        let zoomScale = 8
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 3, green: Double(y) / 3, blue: 0.4, alpha: 1))
+            }
+        }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<4 {
+            before.append((0..<4).map { canvas.rawPixel(x: $0, y: y)! })
+        }
+
+        view.beginLayerTransform()
+
+        // Identity starts as centerX=2, centerY=2 (canvas space) — view
+        // (16, 16) at this zoom. A click at canvas (-1, -1) — view (-8, -8)
+        // — sits ~11.3 view points from the top-left corner (0, 0): outside
+        // `transformHandleHitRadius` (6, the scale handle's own hitbox) but
+        // inside `transformRotateHandleOuterRadius` (14), so it hits the
+        // rotate ring rather than the corner scale handle.
+        let downPoint = transformWindowPoint(canvasX: -1, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        // Canvas (3, 3) sits exactly 180° around the center from (-1, -1):
+        // both are a diagonal offset of equal magnitude from (2, 2), on
+        // opposite sides, so the two points' angles around the center are
+        // exactly `π` apart.
+        let dragPoint = transformWindowPoint(canvasX: 3, canvasY: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: downPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window, modifierFlags: [.shift]))
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        func assertPixel(_ x: Int, _ y: Int, equalsBefore beforeX: Int, _ beforeY: Int, line: UInt = #line) {
+            let actual = canvas.rawPixel(x: x, y: y)
+            let expected = before[beforeY][beforeX]
+            XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red", line: line)
+            XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green", line: line)
+            XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue", line: line)
+            XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha", line: line)
+        }
+        // A 180° rotation is a point reflection through the center: the
+        // interior 3x3 block, post-commit, shows each source pixel's
+        // diagonal opposite.
+        assertPixel(1, 1, equalsBefore: 3, 3)
+        assertPixel(3, 3, equalsBefore: 1, 1)
+        assertPixel(2, 2, equalsBefore: 2, 2)
+        assertPixel(3, 1, equalsBefore: 1, 3)
+        assertPixel(1, 3, equalsBefore: 3, 1)
     }
 }
