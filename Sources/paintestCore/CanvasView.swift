@@ -30,6 +30,12 @@ final class CanvasView: NSView {
 
     static let zoomLevels = [1, 2, 4, 8, 16, 32]
     static let defaultZoomScale = 4
+    /// The pen's fixed stroke width — the pencil paints crisp 1px-at-a-time
+    /// strokes while the pen paints wider, anti-aliased ones, and this
+    /// constant is what makes that difference visible on screen. This is a
+    /// temporary fixed value (issue #10); a real brush-size control lands
+    /// with issue #20.
+    private static let penLineWidth: CGFloat = 3
     private var lastPixel: (x: Int, y: Int)?
 
     override var isFlipped: Bool { true }
@@ -130,14 +136,40 @@ final class CanvasView: NSView {
     /// "make transparent" tool, it's simply "the pencil, but with the
     /// background color" — painting with `backgroundColor` instead of
     /// `foregroundColor`. True erasing (alpha 0) is a matter of what color
-    /// the user picked, not a separate code path.
+    /// the user picked, not a separate code path. The pen also paints with
+    /// the foreground color, same as the pencil (issue #10) — only *how*
+    /// it paints (see `paint(at:)`/`paintLine(from:to:)`) differs.
     private var paintColor: NSColor {
-        activeTool == .pencil ? foregroundColor : backgroundColor
+        activeTool == .eraser ? backgroundColor : foregroundColor
+    }
+
+    /// Paints a single point with the active tool's own method: the pencil
+    /// and eraser stay on the dot-exact, no-anti-aliasing `setPixel` path
+    /// (unchanged by issue #10); the pen goes through the new anti-aliased
+    /// path instead.
+    private func paint(at pixel: (x: Int, y: Int)) {
+        switch activeTool {
+        case .pencil, .eraser:
+            layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor)
+        case .pen:
+            layerStack.activeLayer.canvas.drawAntialiasedDot(at: pixel, color: paintColor, diameter: Self.penLineWidth)
+        }
+    }
+
+    /// Paints a stroke between two points with the active tool's own
+    /// method, mirroring `paint(at:)`'s tool switch.
+    private func paintLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int)) {
+        switch activeTool {
+        case .pencil, .eraser:
+            layerStack.activeLayer.canvas.drawLine(from: p0, to: p1, color: paintColor)
+        case .pen:
+            layerStack.activeLayer.canvas.drawAntialiasedLine(from: p0, to: p1, color: paintColor, lineWidth: Self.penLineWidth)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
         let pixel = pixelCoordinate(for: event)
-        layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor)
+        paint(at: pixel)
         lastPixel = pixel
         needsDisplay = true
         onLayerContentChanged?()
@@ -146,9 +178,9 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         let pixel = pixelCoordinate(for: event)
         if let last = lastPixel {
-            layerStack.activeLayer.canvas.drawLine(from: last, to: pixel, color: paintColor)
+            paintLine(from: last, to: pixel)
         } else {
-            layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor)
+            paint(at: pixel)
         }
         lastPixel = pixel
         needsDisplay = true

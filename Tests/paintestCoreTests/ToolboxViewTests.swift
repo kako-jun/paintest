@@ -55,26 +55,28 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pressed.first?.toolTip, "鉛筆")
     }
 
-    // Only pencil and eraser are wired to real behavior (issue #5); every
-    // other button stays a purely visual placeholder with no target/action,
-    // same as before.
-    func testOnlyPencilAndEraser_haveTargetAndAction() {
+    // Pencil, eraser, and pen are wired to real behavior (issues #5, #10);
+    // every other button stays a purely visual placeholder with no
+    // target/action, same as before.
+    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン"]
+
+    func testOnlyPencilEraserAndPen_haveTargetAndAction() {
         let view = makeView()
-        let wired = allButtons(in: view).filter { $0.toolTip == "鉛筆" || $0.toolTip == "消しゴム" }
-        XCTAssertEqual(wired.count, 2)
+        let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
+        XCTAssertEqual(wired.count, 3)
         for button in wired {
-            XCTAssertNotNil(button.target, "pencil/eraser must be wired to onToolSelected")
-            XCTAssertNotNil(button.action, "pencil/eraser must be wired to onToolSelected")
+            XCTAssertNotNil(button.target, "pencil/eraser/pen must be wired to onToolSelected")
+            XCTAssertNotNil(button.action, "pencil/eraser/pen must be wired to onToolSelected")
         }
     }
 
     func testOtherButtons_haveNoTargetOrAction() {
         let view = makeView()
-        let placeholders = allButtons(in: view).filter { $0.toolTip != "鉛筆" && $0.toolTip != "消しゴム" }
-        XCTAssertEqual(placeholders.count, 14)
+        let placeholders = allButtons(in: view).filter { !Self.wiredToolTips.contains($0.toolTip ?? "") }
+        XCTAssertEqual(placeholders.count, 13)
         for button in placeholders {
-            XCTAssertNil(button.target, "non-pencil/eraser tool buttons are visual placeholders; wiring is out of scope")
-            XCTAssertNil(button.action, "non-pencil/eraser tool buttons are visual placeholders; wiring is out of scope")
+            XCTAssertNil(button.target, "non-pencil/eraser/pen tool buttons are visual placeholders; wiring is out of scope")
+            XCTAssertNil(button.action, "non-pencil/eraser/pen tool buttons are visual placeholders; wiring is out of scope")
         }
     }
 
@@ -173,6 +175,63 @@ final class ToolboxViewTests: XCTestCase {
 
         XCTAssertEqual(eraser.state, .on)
         XCTAssertEqual(pencil.state, .off)
+    }
+
+    // MARK: - Pen tool exclusive selection (issue #10)
+    //
+    // `ToolboxView` generalized its exclusive-selection bookkeeping from a
+    // hardcoded pencil/eraser pair to a `[Tool: NSButton]` dictionary keyed
+    // by every wired tool (issue #10), but nothing exercised the pen
+    // button itself, nor a full pencil -> eraser -> pen -> pencil cycle
+    // across all three wired buttons at once.
+
+    func testPenClick_firesOnToolSelectedWithPen_andTogglesPressedStates() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let pen = button(toolTip: "ペン", in: view) else {
+            XCTFail("could not find pencil/pen buttons")
+            return
+        }
+        XCTAssertEqual(pencil.state, .on, "precondition: pencil starts pressed by default")
+        var selected: Tool?
+        view.onToolSelected = { selected = $0 }
+
+        pen.performClick(nil)
+
+        XCTAssertEqual(selected, .pen)
+        XCTAssertEqual(pen.state, .on)
+        XCTAssertEqual(pencil.state, .off, "selecting pen must turn the default-on pencil off")
+    }
+
+    func testCyclingThroughAllThreeWiredTools_alwaysLeavesExactlyOneOfAll16ButtonsPressed() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view),
+              let eraser = button(toolTip: "消しゴム", in: view),
+              let pen = button(toolTip: "ペン", in: view) else {
+            XCTFail("could not find pencil/eraser/pen buttons")
+            return
+        }
+
+        func assertExactlyOnePressed(_ label: String) {
+            let pressed = allButtons(in: view).filter { $0.state == .on }
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 16 buttons pressed after \(label)")
+        }
+
+        assertExactlyOnePressed("initial state")
+
+        pencil.performClick(nil)
+        assertExactlyOnePressed("pencil click")
+
+        eraser.performClick(nil)
+        assertExactlyOnePressed("eraser click")
+
+        pen.performClick(nil)
+        assertExactlyOnePressed("pen click")
+
+        pencil.performClick(nil)
+        assertExactlyOnePressed("pencil click again")
+        XCTAssertEqual(pencil.state, .on)
+        XCTAssertEqual(eraser.state, .off)
+        XCTAssertEqual(pen.state, .off)
     }
 
     // Not independently unit-tested here: `Self.tools` is a private static
