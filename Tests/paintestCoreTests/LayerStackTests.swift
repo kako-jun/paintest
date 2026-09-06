@@ -425,4 +425,43 @@ final class LayerStackTests: XCTestCase {
         XCTAssertEqual(afterPixel.r, 255, "red is on top after moveLayer reversed the order")
         XCTAssertEqual(afterPixel.g, 0)
     }
+
+    // MARK: - copy() (issue #19: HistoryManager's copy-in/copy-out contract
+    // depends entirely on this being a true deep copy)
+
+    func testCopy_editingTheCopyDoesNotAffectTheOriginal() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let duplicate = stack.copy()
+
+        duplicate.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+
+        XCTAssertEqual(duplicate.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 0)
+        XCTAssertEqual(stack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 255, "editing the copy's canvas must not mutate the original's canvas")
+    }
+
+    func testCopy_editingTheOriginalAfterCopyingDoesNotAffectTheCopy() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let duplicate = stack.copy()
+
+        stack.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+
+        XCTAssertEqual(stack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 0)
+        XCTAssertEqual(duplicate.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 255, "editing the original's canvas after copying must not reach back into the copy")
+    }
+
+    func testCopy_preservesLayerCountNamesAndActiveLayerIndex() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer(name: "B")
+        stack.addLayer(name: "C")
+        stack.activeLayerIndex = 1
+        stack.setOpacity(0.5, at: 1)
+        stack.setVisibility(false, at: 2)
+
+        let duplicate = stack.copy()
+
+        XCTAssertEqual(duplicate.layers.map { $0.name }, ["レイヤー1", "B", "C"])
+        XCTAssertEqual(duplicate.activeLayerIndex, 1)
+        XCTAssertEqual(duplicate.layers[1].opacity, 0.5)
+        XCTAssertEqual(duplicate.layers[2].isVisible, false)
+    }
 }
