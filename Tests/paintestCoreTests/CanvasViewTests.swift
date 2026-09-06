@@ -3495,4 +3495,215 @@ final class CanvasViewTests: XCTestCase {
         view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window, modifierFlags: [.option]))
         view.cancelLayerTransform()
     }
+
+    // MARK: - onEditCompleted (issue #19): fires exactly once per completed edit gesture
+
+    // MARK: 1 gesture -> 1 fire (test list 31-35)
+
+    func testOnEditCompleted_pencilStroke_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pencil
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 2, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertEqual(labels, ["鉛筆"])
+    }
+
+    func testOnEditCompleted_rectangleSelect_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    func testOnEditCompleted_lassoSelect_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    func testOnEditCompleted_polygonSelect_multipleClicksThenReturn_firesExactlyOnceAtClose_notOnInterimClicks() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        XCTAssertTrue(labels.isEmpty, "the 3 vertex-placing clicks must not fire onEditCompleted on their own")
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: close
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    func testOnEditCompleted_layerTransform_beginMultipleDragsThenCommit_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.beginLayerTransform()
+        let downPoint = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let midPoint = transformWindowPoint(canvasX: 6, canvasY: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let dragPoint = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: downPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: midPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window))
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+        view.commitLayerTransform()
+
+        XCTAssertEqual(labels, ["変形"])
+    }
+
+    // MARK: Doesn't fire when nothing changed / for non-editing tools (test list 36-38, 40, 42)
+
+    func testOnEditCompleted_pencil_mouseUpWithNothingPaintedDuringTheGesture_doesNotFire() {
+        // No preceding mouseDown/mouseDragged at all — `paintedDuringGesture`
+        // stays at its default `false`, the same "nothing was actually
+        // painted" state a mouseDown that never reached the paint fallback
+        // would leave behind. Mirrors this file's existing
+        // `testMouseUp_magnifierWithoutAPriorMouseDown_...` precedent for
+        // exercising a bare `mouseUp` call.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pencil
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(labels.isEmpty, "mouseUp with nothing painted during the gesture must not fire onEditCompleted")
+    }
+
+    func testOnEditCompleted_eyedropperMouseDown_doesNotFire() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .eyedropper
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(labels.isEmpty)
+    }
+
+    func testOnEditCompleted_magnifierClickAndDrag_neverFires() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        // A plain click.
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 13, y: 16), in: window)) // distance == 3, still a click
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 13, y: 16), in: window))
+        // A drag.
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 2, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 11, y: 16), in: window)) // distance == 9, a drag
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 11, y: 16), in: window))
+
+        XCTAssertTrue(labels.isEmpty, "the magnifier tool never edits content, so it must never fire onEditCompleted")
+    }
+
+    func testOnEditCompleted_lassoSelect_fewerThanThreeVertices_doesNotFire() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window)) // 1 vertex only
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+
+        XCTAssertTrue(labels.isEmpty, "fewer than 3 vertices can't enclose an area and must not fire onEditCompleted")
+    }
+
+    func testOnEditCompleted_commitLayerTransformWithoutBeginningOne_doesNotFire() {
+        let view = makeView()
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.commitLayerTransform() // activeTransform is nil: guarded no-op
+
+        XCTAssertTrue(labels.isEmpty)
+    }
+
+    // MARK: Fires when expected (test list 41), and a documented current-behavior lock-in (test list 39)
+
+    func testOnEditCompleted_magicWandSelect_singleClick_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    /// Locks in the CURRENT implementation as a deliberate spec, not an
+    /// oversight: `mouseUp`'s rectangle/ellipse-select branch calls
+    /// `onEditCompleted?("選択範囲")` unconditionally after
+    /// `applyCombinedSelection`, with no guard on the dragged rectangle's
+    /// size — even a zero-size drag (mouseDown/mouseUp at the exact same
+    /// point, which resolves to an empty mask that collapses `selection`
+    /// back to `nil`) still fires it. If a future change makes this guard
+    /// against no-op drags, this test will catch that change so it's made
+    /// on purpose rather than as a silent side effect.
+    func testOnEditCompleted_rectangleSelect_zeroSizeDrag_stillFires_currentBehaviorLockedIn() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window)) // no mouseDragged at all: zero-size drag
+
+        XCTAssertEqual(labels, ["選択範囲"], "current implementation fires onEditCompleted even for a zero-size drag — see this test's doc comment")
+    }
 }
