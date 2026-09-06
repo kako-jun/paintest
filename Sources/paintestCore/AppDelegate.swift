@@ -132,6 +132,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         canvasView = CanvasView(layerStack: documentManager.activeDocument.layerStack)
         canvasView.onZoomChanged = { [weak self] scale in
             self?.zoomLabelField?.stringValue = "\(scale)x"
+            // Keeps the magnifier's options-bar dropdown in sync with
+            // click/drag zoom, the View menu's zoom-in/out, and the
+            // dropdown's own selection — not just changes made through the
+            // dropdown itself (issue #13). Low-frequency operation, so
+            // rebuilding the whole dropdown here is fine.
+            if self?.canvasView.activeTool == .magnifier {
+                self?.updateOptionBar(for: .magnifier)
+            }
         }
         canvasView.onLayerContentChanged = { [weak self] in
             self?.layerPanelView.reload()
@@ -538,6 +546,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         documentTabBarView.reload()
         updateWindowTitle(for: document)
 
+        // Keeps the magnifier's options-bar dropdown showing the
+        // newly-displayed document's own zoom rather than the previous
+        // tab's (issue #13) — zoom is per-`Document` state (issue #15
+        // follow-up). `setZoomScale(_:)` above already routes through
+        // `onZoomChanged`'s own dropdown-refresh, but that closure reads
+        // `canvasView.activeTool` at the time zoom changes, which is
+        // whatever tool is active regardless of which document is
+        // displayed — this explicit call is what's actually keyed to "a
+        // document switch just happened", making the intent obvious here
+        // rather than relying on that side effect.
+        if canvasView.activeTool == .magnifier {
+            updateOptionBar(for: .magnifier)
+        }
+
         displayedDocument = document
     }
 
@@ -689,6 +711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         toolboxView.onToolSelected = { [weak self] tool in
             self?.canvasView.activeTool = tool
+            self?.updateOptionBar(for: tool)
         }
 
         // Eyedropper tool (issue #14): reuses the same `setColor` entry
@@ -740,6 +763,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             capacity: ColorPaletteView.recentColorsCapacity
         )
         colorPaletteView.updateRecentColors(recentColors)
+    }
+
+    /// Populates (or clears) the options bar to match the newly selected
+    /// tool (issue #13). Only the magnifier has options of its own so far —
+    /// its zoom-level dropdown — so every other tool just clears the bar
+    /// back to its empty frame.
+    private func updateOptionBar(for tool: Tool) {
+        switch tool {
+        case .magnifier:
+            optionBarView.showZoomPresets(currentZoomScale: canvasView.zoomScale, levels: CanvasView.zoomLevels) { [weak self] scale in
+                self?.canvasView.setZoomScale(scale)
+            }
+        default:
+            optionBarView.clear()
+        }
     }
 
     /// Restores foreground/background to classic Paint's black/white
