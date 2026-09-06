@@ -126,6 +126,16 @@ final class CanvasView: NSView {
     /// shape instead of placing a new vertex on top of it.
     private static let polygonCloseDistance: CGFloat = 6
 
+    /// The magic wand's color-similarity cutoff (issue #11, round 3), passed
+    /// straight through to `SelectionMask.magicWand(...)`'s `tolerance`
+    /// parameter — see that method's doc comment for what the number means
+    /// (a sum-of-absolute-differences across R/G/B, so its useful range is
+    /// roughly `0...765`). `AppDelegate` keeps `OptionBarView`'s slider in
+    /// sync with this property the same way it does `zoomScale` for the
+    /// magnifier. `32` is an arbitrary starting default, not a value with any
+    /// particular significance.
+    var magicWandTolerance: Int = 32
+
     override var isFlipped: Bool { true }
 
     override var acceptsFirstResponder: Bool { true }
@@ -424,7 +434,7 @@ final class CanvasView: NSView {
             // before calling `paint(at:)` (issue #13). Kept only to satisfy
             // this switch's exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect:
             // Same as the magnifier above: these branch to their own
             // drag/combine handling in `mouseDown`/`mouseDragged`/`mouseUp`
             // before calling `paint(at:)` (issue #11). Kept only to satisfy
@@ -449,7 +459,7 @@ final class CanvasView: NSView {
             // Same as `paint(at:)` above: the magnifier never drags into a
             // stroke (issue #13), this exists only for exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect:
             // Same as `paint(at:)` above: these never drag into a stroke
             // (issue #11), this exists only for exhaustiveness.
             return
@@ -635,6 +645,32 @@ final class CanvasView: NSView {
                 polygonCombineMode = CanvasView.combineMode(for: event.modifierFlags)
             }
             polygonVertices.append(pixel)
+            needsDisplay = true
+            return
+        }
+        if activeTool == .magicWandSelect {
+            // A single click is the whole gesture (issue #11 round 3 — see
+            // `Tool.magicWandSelect`'s doc comment), so unlike the other four
+            // selection tools this needs no `mouseDragged`/`mouseUp`
+            // handling of its own: the mask is built and applied right here.
+            //
+            // Sampled from `layerStack.activeLayer.canvas` (the active
+            // layer's own pixels), not `sampleColor(at:)`'s composited
+            // result the eyedropper (issue #14) reads from: the eyedropper
+            // is about picking up whatever color the user visually sees, but
+            // the magic wand is an edit-target-specific operation — "select
+            // this region of *this layer*" — so it has to look at the same
+            // pixels `paint(at:)` would actually modify, not a flattened
+            // view that could span other layers stacked above/below.
+            let canvas = layerStack.activeLayer.canvas
+            let newMask = SelectionMask.magicWand(
+                startX: pixel.x, startY: pixel.y,
+                colorAt: { x, y in canvas.rawPixel(x: x, y: y) },
+                tolerance: magicWandTolerance,
+                width: layerStack.width, height: layerStack.height
+            )
+            let mode = CanvasView.combineMode(for: event.modifierFlags)
+            applyCombinedSelection(newMask, mode: mode)
             needsDisplay = true
             return
         }
