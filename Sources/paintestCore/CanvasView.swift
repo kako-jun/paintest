@@ -149,6 +149,9 @@ final class CanvasView: NSView {
             // separate mouseDown/mouseUp cycles until the shape is closed or
             // cancelled (issue #11 round 2 hardening, mirroring the existing
             // `magnifierDragStart` reset at the top of `mouseDown`).
+            selectionDragStart = nil
+            selectionDragCurrent = nil
+            selectionCombineMode = nil
             lassoVertices = []
             lassoCombineMode = nil
             polygonVertices = []
