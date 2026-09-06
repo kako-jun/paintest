@@ -485,7 +485,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (issue #7). None of these are wired to real behavior — that's
         // each feature's own issue — except View's zoom items, which carry
         // over from #2.
-        mainMenu.addItem(makeMenuItem(title: "編集", placeholders: ["元に戻す", "切り取り", "コピー", "貼り付け", "選択の解除"]))
+        // "選択の解除" used to be a decorative placeholder here (issue #2),
+        // duplicating the real, wired "選択を解除" item in "選択範囲" below
+        // (issue #11) — two same-labeled-in-spirit items on two different
+        // menus looked like a bug, so the dead placeholder is dropped and
+        // 選択範囲's own item is the single real entry point.
+        mainMenu.addItem(makeMenuItem(title: "編集", placeholders: ["元に戻す", "切り取り", "コピー", "貼り付け"]))
 
         mainMenu.addItem(makeMenuItem(title: "表示", items: [
             ("拡大", #selector(zoomIn), "+"),
@@ -498,7 +503,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // staying a separate top-level menu.
         mainMenu.addItem(makeMenuItem(title: "イメージ", placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…", "色の編集…"]))
         mainMenu.addItem(makeMenuItem(title: "レイヤー", placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
-        mainMenu.addItem(makeMenuItem(title: "選択範囲", placeholders: ["すべてを選択", "選択を解除", "選択範囲を反転"]))
+        mainMenu.addItem(makeMenuItem(title: "選択範囲", items: [
+            ("すべてを選択", #selector(selectAll), "a"),
+            ("選択を解除", #selector(deselectAll), "d"),
+            ("選択範囲を反転", #selector(invertSelection), "i")
+        ]))
         mainMenu.addItem(makeMenuItem(title: "ウインドウ", placeholders: ["レイヤー", "プロパティ", "ヒストリー"]))
         mainMenu.addItem(makeMenuItem(title: "ヘルプ", placeholders: ["ヘルプ トピック", "paintestのバージョン情報"]))
 
@@ -538,10 +547,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// document independently.
     private func activateActiveDocument() {
         displayedDocument?.zoomScale = canvasView.zoomScale
+        // Selection is per-document state too, same pattern as zoom above
+        // (issue #11): write the outgoing document's selection back from
+        // `canvasView` before swapping, then apply the newly active
+        // document's own remembered selection. Without this, a selection
+        // would leak across tabs as shared state on the single `CanvasView`
+        // instance instead of following each document independently.
+        displayedDocument?.selection = canvasView.selection
 
         let document = documentManager.activeDocument
         canvasView.replaceLayerStack(document.layerStack)
         canvasView.setZoomScale(document.zoomScale)
+        canvasView.selection = document.selection
         layerPanelView.replaceLayerStack(document.layerStack)
         documentTabBarView.reload()
         updateWindowTitle(for: document)
@@ -553,6 +570,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can't change in between.
 
         displayedDocument = document
+    }
+
+    // MARK: - Selection menu (issue #11)
+
+    /// Applies a new selection to both `canvasView` (what's actually drawn/
+    /// enforced right now) and `documentManager.activeDocument` (what
+    /// persists across a tab switch, mirrored by `activateActiveDocument()`
+    /// above) in one place, so the three selection menu commands below can't
+    /// accidentally update one and forget the other.
+    ///
+    /// `mask` is normalized the same way `CanvasView.mouseUp(with:)` does
+    /// for a dragged selection (issue #11, same decision): an empty mask
+    /// collapses to `nil` rather than being kept as a real, all-`false`
+    /// `SelectionMask`, since an empty selection would otherwise block all
+    /// editing everywhere.
+    private func applySelection(_ mask: SelectionMask?) {
+        let normalized = (mask?.isEmpty ?? false) ? nil : mask
+        canvasView.selection = normalized
+        // `displayedDocument` (not `documentManager.activeDocument`) is the
+        // document `canvasView` is actually showing right now — see
+        // `displayedDocument`'s own doc comment — so writing there keeps
+        // this in lock-step with whichever document these menu commands
+        // are actually acting on.
+        displayedDocument?.selection = normalized
+    }
+
+    /// "すべてを選択": selects every pixel of the active document's canvas.
+    @objc private func selectAll() {
+        let mask = SelectionMask.rectangle(
+            x0: 0, y0: 0,
+            x1: canvasView.layerStack.width - 1, y1: canvasView.layerStack.height - 1,
+            width: canvasView.layerStack.width, height: canvasView.layerStack.height
+        )
+        applySelection(mask)
+    }
+
+    /// "選択を解除": clears the selection back to "no restriction".
+    @objc private func deselectAll() {
+        applySelection(nil)
+    }
+
+    /// "選択範囲を反転". When there's no active selection, `nil` is treated
+    /// as "everything is (implicitly) selected" purely for this command's
+    /// own reasoning: inverting "everything" would produce an empty
+    /// selection, which `applySelection`'s own normalization would collapse
+    /// straight back to `nil` anyway — so the actual computation is skipped
+    /// and `nil` is passed straight through as a no-op. This is a
+    /// *different* rule from `CanvasView.mouseUp(with:)`'s drag-combine
+    /// math, which instead treats `nil` as "empty" (see that method's own
+    /// doc comment) — the two operations don't share one universal "what
+    /// does nil mean" convention, each is reasoned about independently for
+    /// its own command's semantics.
+    @objc private func invertSelection() {
+        guard let selection = canvasView.selection else {
+            applySelection(nil)
+            return
+        }
+        applySelection(selection.inverted())
     }
 
     /// Takes the `Document` to title for explicitly, rather than re-reading
