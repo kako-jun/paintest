@@ -691,6 +691,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.canvasView.activeTool = tool
         }
 
+        // Eyedropper tool (issue #14): reuses the same `setColor` entry
+        // point as the color palette/picker, so foreground/background, the
+        // current-color indicator, and recent colors all update together.
+        canvasView.onColorPicked = { [weak self] color, isSecondary in
+            self?.setColor(color, secondary: isSecondary)
+        }
+
         colorPaletteView.onSwatchSelected = { [weak self] color, isSecondary in
             self?.setColor(color, secondary: isSecondary)
         }
