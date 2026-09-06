@@ -735,36 +735,64 @@ final class CanvasView: NSView {
         // `activeTransform`'s current rectangle — together with the base
         // composite's exclusion above, this reads as "the layer, moved" (or
         // rotated) rather than "the layer, plus a ghost copy of it".
-        if let activeTransform, let originalCanvas = transformOriginalCanvas, let previewImage = originalCanvas.cgImage {
+        if let activeTransform, let originalCanvas = transformOriginalCanvas {
             let scale = CGFloat(zoomScale)
 
-            // Draws the (unrotated) preview image into a rect centered on
-            // the origin, inside a context translated to the rectangle's
-            // view-space center and rotated by `activeTransform.rotation` —
-            // rather than computing the rotated destination rect by hand.
-            // `CanvasView` is already flipped (y grows downward, same as
-            // `LayerTransform.corners`' own convention), so `rotate(by:)`
-            // here turns the image the same direction `corners` turns the
-            // rectangle. Scoped with save/restore so this transform doesn't
-            // leak into the bounding-box/handle drawing right after, which
-            // works in plain view-space coordinates instead.
-            context.saveGState()
-            context.translateBy(x: activeTransform.centerX * Double(scale), y: activeTransform.centerY * Double(scale))
-            context.rotate(by: activeTransform.rotation)
-            let localRect = CGRect(
-                x: -activeTransform.width / 2 * Double(scale),
-                y: -activeTransform.height / 2 * Double(scale),
-                width: activeTransform.width * Double(scale),
-                height: activeTransform.height * Double(scale)
-            )
-            // Nearest-neighbor for the live preview too, not just the final
-            // composite above — issue #9 calls this out explicitly so an
-            // in-progress transform never looks blurrier than the dot-exact
-            // result `commitLayerTransform()` will actually produce.
-            context.interpolationQuality = .none
-            context.setShouldAntialias(false)
-            context.draw(previewImage, in: localRect)
-            context.restoreGState()
+            if activeTransform.hasDistortion {
+                // Round 3 (distort): the rectangle is now an arbitrary
+                // quadrilateral, which a plain CGContext translate/rotate/
+                // scale (round 1/2's approach, below) can't represent — that
+                // only ever produces a parallelogram, never a true
+                // perspective warp. Rather than reach for Core Image or a
+                // second, lighter-weight warp implementation, this reuses
+                // `rasterizeTransform` itself (option (a) from the issue
+                // plan): re-rasterizes `originalCanvas` through
+                // `activeTransform` into a scratch full-canvas-size
+                // `PixelCanvas` on every redraw and draws *that* at the
+                // canvas's own `destRect` — i.e. the exact pixels
+                // `commitLayerTransform()` would produce if the drag ended
+                // right now, not an approximation of them. `PixelCanvas` is
+                // a pixel-art-sized buffer (never larger than the document
+                // itself), so redoing this per-frame while dragging is cheap
+                // enough not to need caching.
+                let previewCanvas = PixelCanvas(width: layerStack.width, height: layerStack.height, background: .clear)
+                rasterizeTransform(activeTransform, from: originalCanvas, into: previewCanvas)
+                if let warpedImage = previewCanvas.cgImage {
+                    context.interpolationQuality = .none
+                    context.setShouldAntialias(false)
+                    context.draw(warpedImage, in: destRect)
+                }
+            } else if let previewImage = originalCanvas.cgImage {
+                // Draws the (unrotated) preview image into a rect centered on
+                // the origin, inside a context translated to the rectangle's
+                // view-space center and rotated by `activeTransform.rotation`
+                // — rather than computing the rotated destination rect by
+                // hand. `CanvasView` is already flipped (y grows downward,
+                // same as `LayerTransform.corners`' own convention), so
+                // `rotate(by:)` here turns the image the same direction
+                // `corners` turns the rectangle. Scoped with save/restore so
+                // this transform doesn't leak into the bounding-box/handle
+                // drawing right after, which works in plain view-space
+                // coordinates instead.
+                context.saveGState()
+                context.translateBy(x: activeTransform.centerX * Double(scale), y: activeTransform.centerY * Double(scale))
+                context.rotate(by: activeTransform.rotation)
+                let localRect = CGRect(
+                    x: -activeTransform.width / 2 * Double(scale),
+                    y: -activeTransform.height / 2 * Double(scale),
+                    width: activeTransform.width * Double(scale),
+                    height: activeTransform.height * Double(scale)
+                )
+                // Nearest-neighbor for the live preview too, not just the
+                // final composite above — issue #9 calls this out explicitly
+                // so an in-progress transform never looks blurrier than the
+                // dot-exact result `commitLayerTransform()` will actually
+                // produce.
+                context.interpolationQuality = .none
+                context.setShouldAntialias(false)
+                context.draw(previewImage, in: localRect)
+                context.restoreGState()
+            }
 
             // Bounding box: a *solid* stroke through the (possibly rotated)
             // 4 corners directly — `activeTransform.corners` already
