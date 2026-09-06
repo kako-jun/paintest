@@ -840,7 +840,19 @@ final class CanvasView: NSView {
                 if let warpedImage = previewCanvas.cgImage {
                     context.interpolationQuality = .none
                     context.setShouldAntialias(false)
+                    // Matches `LayerStack.compositeImage()`'s own
+                    // `context.setAlpha(layer.opacity)` (issue #9 review
+                    // should-5): without this, a layer under 100% opacity
+                    // would render fully opaque for the duration of the
+                    // transform drag and only "become" translucent again the
+                    // instant it's confirmed — a visible jump at commit
+                    // time. Scoped with save/restore so the reduced alpha
+                    // doesn't leak into the bounding-box/handle drawing
+                    // right after.
+                    context.saveGState()
+                    context.setAlpha(CGFloat(layerStack.activeLayer.opacity))
                     context.draw(warpedImage, in: destRect)
+                    context.restoreGState()
                 }
             } else if let previewImage = originalCanvas.cgImage {
                 // Draws the (unrotated) preview image into a rect centered on
@@ -870,6 +882,12 @@ final class CanvasView: NSView {
                 // produce.
                 context.interpolationQuality = .none
                 context.setShouldAntialias(false)
+                // Matches `LayerStack.compositeImage()`'s own
+                // `context.setAlpha(layer.opacity)` (issue #9 review
+                // should-5) — see the `hasDistortion` branch above for why.
+                // Already inside this `saveGState()`/`restoreGState()` pair,
+                // so no extra scoping needed here.
+                context.setAlpha(CGFloat(layerStack.activeLayer.opacity))
                 context.draw(previewImage, in: localRect)
                 context.restoreGState()
             }

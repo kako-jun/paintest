@@ -3362,4 +3362,137 @@ final class CanvasViewTests: XCTestCase {
         // stroke should have painted anything.
         assertCanvas(view, size: 8, matches: before)
     }
+
+    // MARK: - Live transform preview respects layer opacity (issue #9 review
+    // should-5)
+    //
+    // `draw(_:)`'s live-preview block used to draw the moving/rotated/
+    // distorted layer at full opacity regardless of the active layer's own
+    // `opacity`, unlike `LayerStack.compositeImage()` (which every OTHER
+    // pixel on screen goes through, and which the transform preview itself
+    // reverts to the instant the transform is confirmed) — a layer under
+    // 100% would visibly "pop" opaque for the whole duration of a drag and
+    // only regain its transparency at commit time. Rendered here into an
+    // off-screen `CGContext` (mirroring `LayerStackTests`'
+    // `testCompositeImage_bothVisible_halfOpacity_blendsIntoAMiddleColor`'s
+    // own "not exactly 0.5, just neither pure color" approach — sRGB
+    // compositing doesn't land on the naive linear midpoint) since
+    // `draw(_:)` has no return value or other observable side effect to
+    // assert on directly.
+
+    /// Renders `view`'s current `draw(_:)` output into an off-screen
+    /// same-size bitmap and returns it, so a test can sample specific
+    /// pixels — `draw(_:)` itself only ever writes to
+    /// `NSGraphicsContext.current`, so this pushes a throwaway one backed by
+    /// a real `CGContext` rather than the window's own (which isn't
+    /// guaranteed to be current, or even backed by readable pixels, in a
+    /// headless test run).
+    private func renderOffscreen(_ view: CanvasView) -> NSBitmapImageRep? {
+        let width = Int(view.bounds.width)
+        let height = Int(view.bounds.height)
+        guard width > 0, height > 0, let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        // `draw(_:)` assumes `NSGraphicsContext.current`'s flippedness
+        // matches `CanvasView.isFlipped` (`true`) — see its own top-of-file
+        // doc comment — so this pushed context has to declare the same, or
+        // every y-coordinate it draws would land upside down relative to
+        // what `rawPixel`/`colorAt` below read back.
+        let nsContext = NSGraphicsContext(cgContext: context, flipped: true)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = nsContext
+        view.draw(view.bounds)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let cgImage = context.makeImage() else { return nil }
+        return NSBitmapImageRep(cgImage: cgImage)
+    }
+
+    /// Two layers — bottom white, top black at 50% opacity — with the top
+    /// (active) layer mid-transform (round 1, plain move — no rotation or
+    /// distortion, so this exercises should-5's non-distorted preview
+    /// branch). A point inside both the moved rectangle and the canvas must
+    /// read back as neither pure black nor pure white: proof the preview
+    /// applied the layer's opacity instead of drawing it fully opaque.
+    func testDraw_liveMovePreview_appliesActiveLayerOpacity_blendsWithLayerBelow() {
+        let zoomScale = 4
+        let stack = LayerStack(width: 8, height: 8, background: .white) // L1: bottom, white
+        stack.addLayer() // L2: top, active
+        stack.activeLayer.canvas.fill(with: .black)
+        stack.setOpacity(0.5, at: 1)
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(stack)
+        let window = view.window!
+
+        view.beginLayerTransform()
+        // A small move, comfortably clear of every edge — every destination
+        // pixel sampled below (2,2)..(5,5) in canvas space stays covered by
+        // the moved top layer.
+        let down = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 5, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+
+        guard let rendered = renderOffscreen(view) else {
+            XCTFail("renderOffscreen failed")
+            return
+        }
+        // Canvas pixel (3, 3) at zoomScale 4 sits at view/bitmap pixel
+        // (14, 14) — comfortably inside both the moved top layer's
+        // rectangle and the bottom layer beneath it.
+        let sampleX = 3 * zoomScale + zoomScale / 2
+        let sampleY = 3 * zoomScale + zoomScale / 2
+        let red = rendered.colorAt(x: sampleX, y: sampleY)?.usingColorSpace(.deviceRGB)?.redComponent
+        XCTAssertNotNil(red)
+        XCTAssertGreaterThan(red ?? 1, 0.05, "should not be pure black — full opacity would show the top layer solid black here")
+        XCTAssertLessThan(red ?? 0, 0.95, "should not be pure white")
+
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        view.cancelLayerTransform()
+    }
+
+    /// Same as the test above, but for the `hasDistortion` preview branch
+    /// (`rasterizeTransform`'s scratch-canvas/`warpedImage` path) instead of
+    /// the plain rotate/scale one.
+    func testDraw_liveDistortPreview_appliesActiveLayerOpacity_blendsWithLayerBelow() {
+        let zoomScale = 4
+        let stack = LayerStack(width: 8, height: 8, background: .white) // L1: bottom, white
+        stack.addLayer() // L2: top, active
+        stack.activeLayer.canvas.fill(with: .black)
+        stack.setOpacity(0.5, at: 1)
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(stack)
+        let window = view.window!
+
+        view.beginLayerTransform()
+        // Distort topLeft (Option+corner) from (0, 0) out to (-1, -1) — a
+        // tiny nudge, just enough to make `hasDistortion` true without
+        // pulling the quad away from the (3, 3) sample point below.
+        let distortDown = transformWindowPoint(canvasX: 0, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let distortDrag = transformWindowPoint(canvasX: -1, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: distortDown, in: window, modifierFlags: [.option]))
+        view.mouseDragged(with: mouseDraggedEvent(at: distortDrag, in: window, modifierFlags: [.option]))
+
+        guard let rendered = renderOffscreen(view) else {
+            XCTFail("renderOffscreen failed")
+            return
+        }
+        let sampleX = 3 * zoomScale + zoomScale / 2
+        let sampleY = 3 * zoomScale + zoomScale / 2
+        let red = rendered.colorAt(x: sampleX, y: sampleY)?.usingColorSpace(.deviceRGB)?.redComponent
+        XCTAssertNotNil(red)
+        XCTAssertGreaterThan(red ?? 1, 0.05, "should not be pure black — full opacity would show the top layer solid black here")
+        XCTAssertLessThan(red ?? 0, 0.95, "should not be pure white")
+
+        view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window, modifierFlags: [.option]))
+        view.cancelLayerTransform()
+    }
 }
