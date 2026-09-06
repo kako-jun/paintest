@@ -2828,28 +2828,26 @@ final class CanvasViewTests: XCTestCase {
     }
 
     // MARK: - Distortion interacting with hit-testing / resizing (issue #9
-    // test-authoring pass) — CHARACTERIZATION TESTS. Neither test below
-    // asserts what the "right" behavior should be, only what the actual
-    // implementation currently does, discovered and hand-verified
-    // independently (see each test's own comment) while writing this suite —
-    // flagged as a design question in this task's own final report, not
-    // fixed here.
+    // review must-2/should-3). Both tests below used to be CHARACTERIZATION
+    // TESTS pinning down actual bugs (see git history for the original
+    // "misses every handle" / "anchors on the undistorted base corner"
+    // versions); both are now correctness assertions of the fixed behavior.
 
     /// `hitTestTransformHandle`'s final fallback (the interior/`.move` test)
-    /// reads only `transform.width`/`height`/`rotation`/`centerX`/`centerY`
-    /// — never any `distort*` field — so it always tests against the plain,
-    /// UNDISTORTED rectangle, even though the corner/edge/rotate checks just
-    /// above it (via `transformHandlePoints`/`transform.corners`) DO account
-    /// for distortion. This test distorts `topLeft` far outward on a large
-    /// (30x30) canvas, then clicks a point independently verified (by
+    /// now switches to a `ProjectiveTransform`-based point-in-quadrilateral
+    /// test whenever `transform.hasDistortion` is true, rather than always
+    /// testing against the plain, UNDISTORTED rectangle (issue #9 review
+    /// must-2). This test distorts `topLeft` far outward on a large (30x30)
+    /// canvas, then drags from a point independently verified (by
     /// point-in-polygon and per-handle distance checks) to sit inside the
     /// visually-drawn distorted quadrilateral, outside the plain base
-    /// rectangle, and beyond every corner/edge hitbox and rotate ring —
-    /// landing squarely in the interior fallback, which then rejects it
-    /// (`nil`) because it's outside the *undistorted* rectangle. The
-    /// recorded result: the click is a total miss, and the pending
-    /// distortion is left completely undisturbed by the failed "click".
-    func testDistortedTransform_clickInsideVisualQuadButOutsideBaseRectangle_missesEveryHandle_characterization() {
+    /// rectangle, and beyond every corner/edge hitbox and rotate ring — a
+    /// point that lands squarely in the interior fallback, on the *visual*
+    /// shape but not the *base* one. That fallback must now correctly treat
+    /// it as `.move`, so the drag actually shifts the whole transform (by
+    /// its own canvas-pixel delta) in addition to the standing
+    /// `distortTopLeft` offset from the first gesture.
+    func testDistortedTransform_clickInsideVisualQuadButOutsideBaseRectangle_hitsMoveHandle() {
         let zoomScale = 1
         let view = makeViewInWindow(width: 30, height: 30, zoomScale: zoomScale)
         view.setZoomScale(zoomScale)
@@ -2871,17 +2869,20 @@ final class CanvasViewTests: XCTestCase {
         // (-15,0)/(30,0)/(30,30)/(0,30), plus distance checks against every
         // corner/edge handle position) to be inside the drawn quad, outside
         // the base [0,30]x[0,30] rectangle, and >14 view points from every
-        // corner/edge — a clean miss on every check before the interior
-        // fallback.
-        let missPoint = transformWindowPoint(canvasX: -1, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
-        let missDrag = transformWindowPoint(canvasX: 3, canvasY: 9, zoomScale: zoomScale, viewHeight: view.frame.height)
-        view.mouseDown(with: mouseDownEvent(at: missPoint, in: window))
-        view.mouseDragged(with: mouseDraggedEvent(at: missDrag, in: window))
-        view.mouseUp(with: mouseUpEvent(at: missDrag, in: window))
+        // corner/edge — a clean miss on every handle check, landing in the
+        // interior fallback, which (post-fix) hits `.move`. Dragged to
+        // (3, 9): a (+4, +4) canvas-pixel move.
+        let movePoint = transformWindowPoint(canvasX: -1, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let moveDrag = transformWindowPoint(canvasX: 3, canvasY: 9, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: movePoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: moveDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: moveDrag, in: window))
         view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
 
         var expected = LayerTransform.identity(width: 30, height: 30)
         expected.distortTopLeft = CGVector(dx: -15, dy: 0)
+        expected.centerX += 4
+        expected.centerY += 4
         for y in 0..<30 {
             for x in 0..<30 {
                 let actual = canvas.rawPixel(x: x, y: y)
@@ -2903,15 +2904,19 @@ final class CanvasViewTests: XCTestCase {
     /// ±halfHeight)`) — it never reads the anchor corner's own `distort*`
     /// offset — and the result (`var result = start; result.width = ...`)
     /// carries every `distort*` field forward completely untouched. This
-    /// test distorts `bottomLeft`, then resizes via the diagonally opposite
-    /// `topRight` corner (whose anchor IS `bottomLeft`). Recorded result: the
-    /// anchor math pins the plain undistorted `bottomLeft` base corner
-    /// (canvas (0, 8)) exactly as if no distortion existed, and — because the
-    /// unchanged distort *vector* is then re-applied to that same pinned base
-    /// corner — `bottomLeft`'s overall *visual* position (base + vector) also
-    /// ends up unchanged by this particular resize, independently
-    /// hand-verified below via `LayerTransform.corners`.
-    func testDistortedTransform_resizeViaTheOppositeCorner_anchorsOnTheUndistortedBaseCorner_characterization() {
+    /// `resizeByCorner`'s anchor is always computed from the plain
+    /// UNDISTORTED rectangle's own local-frame corner position (`(±halfWidth,
+    /// ±halfHeight)`) — it never reads the anchor corner's own `distort*`
+    /// offset — so a plain (non-Option) corner/edge resize is not guaranteed
+    /// to preserve an existing distortion correctly in general (issue #9
+    /// review should-3). Rather than risk a silently-wrong shape, `mouseDragged`
+    /// now disables plain corner/edge resize entirely while
+    /// `activeTransform.hasDistortion` is true — it's a no-op, not a
+    /// (possibly incorrect) resize. This test distorts `bottomLeft`, then
+    /// drags the diagonally opposite `topRight` corner with no Shift/Option
+    /// held; the resize must have no effect at all, leaving `activeTransform`
+    /// exactly as the distort step left it.
+    func testDistortedTransform_resizeViaOppositeCorner_isANoOp_leavesDistortionAndSizeUnchanged() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         let window = view.window!
@@ -2928,8 +2933,9 @@ final class CanvasViewTests: XCTestCase {
         view.mouseDragged(with: mouseDraggedEvent(at: distortDrag, in: window, modifierFlags: [.option]))
         view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window))
 
-        // Resize via topRight (currently at (8, 0)), dragging it out to
-        // (12, -4) — no Shift/Option.
+        // Attempt to resize via topRight (currently at (8, 0)), dragging it
+        // out to (12, -4) — no Shift/Option. Must be a no-op now that
+        // `activeTransform.hasDistortion` is true.
         let resizeDown = transformWindowPoint(canvasX: 8, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
         let resizeDrag = transformWindowPoint(canvasX: 12, canvasY: -4, zoomScale: zoomScale, viewHeight: view.frame.height)
         view.mouseDown(with: mouseDownEvent(at: resizeDown, in: window))
@@ -2937,27 +2943,64 @@ final class CanvasViewTests: XCTestCase {
         view.mouseUp(with: mouseUpEvent(at: resizeDrag, in: window))
         view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
 
-        // Hand-derived final transform (anchor-relative math, same as
-        // `testLayerTransform_dragBottomRightCornerToDoubleSize_...` above):
-        // bottomLeft anchor pinned at local (-4, 4) relative to the OLD
-        // center (4, 4) — canvas (0, 8) — while topRight is dragged from
-        // local (4, -4) by (+4, -4), landing `width = height = 12`,
-        // `centerX = 6`, `centerY = 2`. `distortBottomLeft` carries forward
-        // unchanged.
+        // Expected: exactly the state left by the distort step alone — the
+        // "resize" attempt changed nothing.
         var expected = LayerTransform.identity(width: 8, height: 8)
-        expected.centerX = 6
-        expected.centerY = 2
-        expected.width = 12
-        expected.height = 12
         expected.distortBottomLeft = CGVector(dx: -4, dy: 4)
 
-        // Self-consistency check of the "visual position preserved" claim
-        // in this test's own doc comment, independent of the pixel-mapping
-        // assertion below.
-        XCTAssertEqual(expected.corners.bottomLeft.x, -4, accuracy: 1e-9)
-        XCTAssertEqual(expected.corners.bottomLeft.y, 12, accuracy: 1e-9)
-        XCTAssertEqual(expected.corners.topRight.x, 12, accuracy: 1e-9, "topRight must land exactly where the mouse was dragged to")
-        XCTAssertEqual(expected.corners.topRight.y, -4, accuracy: 1e-9)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 8, sourceHeight: 8) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual?.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent")
+                }
+            }
+        }
+    }
+
+    /// Same should-3 no-op guarantee as the test above, but for an EDGE
+    /// handle (not a corner) and a different distorted corner — since
+    /// `activeTransform`/`transformDragHandle` etc. are all `private` (see
+    /// this section's own header comment further up), this is verified the
+    /// same indirect way every other test in this section is: if the resize
+    /// drag had changed `activeTransform` at all, the committed pixels
+    /// would no longer match the plain post-distort transform below.
+    func testDistortedTransform_resizeViaEdgeHandle_isANoOp_leavesDistortionAndSizeUnchanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 { for x in 0..<8 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.5, alpha: 1)) } }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! }) }
+
+        view.beginLayerTransform()
+        // Distort topLeft (Option+corner) from (0, 0) out to (-2, -2).
+        let distortDown = transformWindowPoint(canvasX: 0, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let distortDrag = transformWindowPoint(canvasX: -2, canvasY: -2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: distortDown, in: window, modifierFlags: [.option]))
+        view.mouseDragged(with: mouseDraggedEvent(at: distortDrag, in: window, modifierFlags: [.option]))
+        view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window))
+
+        // Attempt to resize via the right edge midpoint (currently at
+        // (8, 4)), dragging it out to (12, 4) — no Shift/Option. Must be a
+        // no-op now that `activeTransform.hasDistortion` is true.
+        let resizeDown = transformWindowPoint(canvasX: 8, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let resizeDrag = transformWindowPoint(canvasX: 12, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: resizeDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: resizeDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: resizeDrag, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        // Expected: exactly the state left by the distort step alone.
+        var expected = LayerTransform.identity(width: 8, height: 8)
+        expected.distortTopLeft = CGVector(dx: -2, dy: -2)
 
         for y in 0..<8 {
             for x in 0..<8 {

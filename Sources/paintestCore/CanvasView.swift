@@ -582,6 +582,36 @@ final class CanvasView: NSView {
                 }
             }
         }
+        // Once any corner has been distorted (round 3), the visual shape is
+        // an arbitrary quadrilateral, not a rectangle — the plain
+        // rotated-rectangle test below (`transform.width`/`height`/rotation`
+        // only, no `distort*` offsets) would test against the wrong shape
+        // entirely, hitting/missing exactly the cases
+        // `testDistortedTransform_clickInsideVisualQuadButOutsideBaseRectangle_hitsMoveHandle`
+        // (issue #9 review must-2) pins down. `ProjectiveTransform` already
+        // models this quadrilateral exactly (`sourcePixelDistorted` above
+        // uses the same construction to sample it) — a point is inside iff
+        // its inverse-mapped `(u, v)` lands in `[0, 1)` on both axes, the
+        // same convention `sourcePixel`'s own range guard uses. `point` is
+        // in view space (scaled by `zoomScale`), but `transform.corners` —
+        // and so `ProjectiveTransform`'s coordinate system — is in canvas
+        // pixel space, so `point` is scaled back down before testing.
+        if transform.hasDistortion {
+            let corners = transform.corners
+            let projective = ProjectiveTransform(
+                topLeft: corners.topLeft,
+                topRight: corners.topRight,
+                bottomRight: corners.bottomRight,
+                bottomLeft: corners.bottomLeft
+            )
+            let canvasX = Double(point.x) / Double(scale)
+            let canvasY = Double(point.y) / Double(scale)
+            guard let (u, v) = projective.inverse(x: canvasX, y: canvasY), u >= 0, u < 1, v >= 0, v < 1 else {
+                return nil
+            }
+            return .move
+        }
+
         // A point-in-rotated-rectangle test: transforms `point` into the
         // rectangle's own (unrotated) local frame around its center — via
         // the same inverse-rotation math as `sourcePixel(forDestination:
@@ -590,6 +620,8 @@ final class CanvasView: NSView {
         // rotated, so a plain axis-aligned `NSRect.contains` sufficed then;
         // this reduces to exactly that check when `rotation == 0`, and
         // handles any angle now that round 2 lets `rotation` be nonzero.
+        // Only reached when `!transform.hasDistortion`, matching the
+        // `sourcePixel`/`hasDistortion` split above.
         let centerView = CGPoint(x: transform.centerX * Double(scale), y: transform.centerY * Double(scale))
         let cosR = cos(transform.rotation)
         let sinR = sin(transform.rotation)
@@ -1364,9 +1396,27 @@ final class CanvasView: NSView {
                 transform.centerY = startTransform.centerY + dy
                 activeTransform = transform
             case .corner(let corner):
-                activeTransform = CanvasView.resizeByCorner(corner, start: startTransform, dx: dx, dy: dy, keepAspect: event.modifierFlags.contains(.shift))
+                // `resizeByCorner`'s anchor math always reads the plain
+                // UNDISTORTED rectangle's own local-frame corner position,
+                // never the anchor corner's own `distort*` offset (issue #9
+                // review should-3) — so once any corner has been distorted,
+                // an ordinary (non-Option) corner resize is not guaranteed
+                // to preserve the existing distortion correctly. Rather than
+                // risk a silently-wrong shape, this simply disables plain
+                // resize entirely while `hasDistortion` is true: dragging a
+                // corner/edge handle here is a no-op (see the corresponding
+                // `.edge` case below) until the transform is committed/
+                // cancelled and a fresh, undistorted one is started. Option+
+                // corner (`.distort` below) is unaffected — that's still how
+                // you adjust an already-distorted transform further.
+                if !startTransform.hasDistortion {
+                    activeTransform = CanvasView.resizeByCorner(corner, start: startTransform, dx: dx, dy: dy, keepAspect: event.modifierFlags.contains(.shift))
+                }
             case .edge(let edge):
-                activeTransform = CanvasView.resizeByEdge(edge, start: startTransform, dx: dx, dy: dy)
+                // Same reasoning as `.corner` above.
+                if !startTransform.hasDistortion {
+                    activeTransform = CanvasView.resizeByEdge(edge, start: startTransform, dx: dx, dy: dy)
+                }
             case .rotate:
                 // Angle of the mouse relative to the rectangle's own center,
                 // in view space (canvas pixel space scaled by `zoomScale` —
