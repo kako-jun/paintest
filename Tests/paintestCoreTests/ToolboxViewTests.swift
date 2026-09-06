@@ -94,7 +94,7 @@ final class ToolboxViewTests: XCTestCase {
             XCTFail("could not find the toolbox's scroll view")
             return
         }
-        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 17 buttons in one column run taller than the window")
+        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 19 buttons in one column run taller than the window")
     }
 
     func testGrid_hasSingleColumn() {
@@ -203,7 +203,7 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off, "selecting pen must turn the default-on pencil off")
     }
 
-    func testCyclingThroughAllFourWiredTools_alwaysLeavesExactlyOneOfAll17ButtonsPressed() {
+    func testCyclingThroughAllFourWiredTools_alwaysLeavesExactlyOneOfAll19ButtonsPressed() {
         let view = makeView()
         guard let pencil = button(toolTip: "鉛筆", in: view),
               let eraser = button(toolTip: "消しゴム", in: view),
@@ -215,7 +215,7 @@ final class ToolboxViewTests: XCTestCase {
 
         func assertExactlyOnePressed(_ label: String) {
             let pressed = allButtons(in: view).filter { $0.state == .on }
-            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 17 buttons pressed after \(label)")
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 19 buttons pressed after \(label)")
         }
 
         assertExactlyOnePressed("initial state")
@@ -276,7 +276,7 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off, "selecting the magnifier must turn the default-on pencil off")
     }
 
-    func testCyclingThroughAllFiveWiredTools_alwaysLeavesExactlyOneOfAll17ButtonsPressed() {
+    func testCyclingThroughAllFiveWiredTools_alwaysLeavesExactlyOneOfAll19ButtonsPressed() {
         // Extends `testCyclingThroughAllFourWiredTools_...` (issue #10) with
         // the magnifier (issue #13), now that there are five wired tools
         // instead of four. (Two more — rectangle/ellipse select, issue #11 —
@@ -294,7 +294,7 @@ final class ToolboxViewTests: XCTestCase {
 
         func assertExactlyOnePressed(_ label: String) {
             let pressed = allButtons(in: view).filter { $0.state == .on }
-            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 17 buttons pressed after \(label)")
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 19 buttons pressed after \(label)")
         }
 
         assertExactlyOnePressed("initial state")
@@ -330,7 +330,7 @@ final class ToolboxViewTests: XCTestCase {
     // for this fix (see review notes on ToolboxView.swift). Both fixes were
     // manually verified with scratch edits (reverted before commit):
     // temporarily changing the "鉛筆" label confirmed the fallback selects
-    // index 0 instead of crashing, and temporarily appending a 17th tool
-    // (making the count odd) confirmed all 17 buttons render, including the
+    // index 0 instead of crashing, and temporarily appending a 19th tool
+    // (making the count odd) confirmed all 19 buttons render, including the
     // trailing unpaired one in its own row.
 }

@@ -12,7 +12,7 @@ import AppKit
 /// column still communicates "this is the active tool" the way the
 /// reference screenshots do.
 ///
-/// A single column of 17 icons runs taller than the window at typical
+/// A single column of 19 icons runs taller than the window at typical
 /// sizes, so (like `DocumentTabBarView`) the column is wrapped in a
 /// vertically-scrolling `NSScrollView` rather than widened back into extra
 /// columns.
