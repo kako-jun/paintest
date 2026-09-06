@@ -47,6 +47,19 @@ final class CanvasView: NSView {
     private static let penLineWidth: CGFloat = 3
     private var lastPixel: (x: Int, y: Int)?
 
+    /// A drag gesture below this distance (in view points) counts as a
+    /// "click" for the magnifier tool rather than a rectangle drag (issue
+    /// #13) — mouse-down/mouse-up rarely land on the exact same point even
+    /// when the user meant a plain click.
+    private static let magnifierClickThreshold: CGFloat = 4
+
+    /// The magnifier tool's in-progress drag rectangle, in view-space
+    /// coordinates — used both to draw the rubber-band overlay in `draw(_:)`
+    /// and to compute the zoomed-to rectangle in `mouseUp(with:)` (issue
+    /// #13). Both are `nil` outside of an active magnifier drag.
+    private var magnifierDragStart: NSPoint?
+    private var magnifierDragCurrent: NSPoint?
+
     override var isFlipped: Bool { true }
 
     init(layerStack: LayerStack) {
@@ -103,6 +116,28 @@ final class CanvasView: NSView {
         needsDisplay = true
     }
 
+    /// Picks the largest of `levels` at which a pixel-space rectangle of
+    /// `size` still fits entirely inside `viewportSize` (issue #13's
+    /// drag-to-zoom): the magnifier tool wants the dragged rectangle to fill
+    /// as much of the viewport as possible without being clipped. Pulled out
+    /// as a pure function (no `NSScrollView`/`NSEvent` dependency), the same
+    /// "pure function + thin runtime wrapper" split as
+    /// `pixelCoordinate(forPoint:zoomScale:)`, so the selection math can be
+    /// unit tested directly.
+    ///
+    /// Falls back to `levels.first` (the smallest zoom) when even that
+    /// doesn't fit — the best effort available when the dragged rectangle is
+    /// larger than the viewport can show at any supported zoom. This
+    /// fallback assumes `levels` is sorted ascending: `fitting.max()` above
+    /// doesn't care about order, but `levels.first` as "the smallest zoom"
+    /// only holds if it is.
+    static func bestFitZoomLevel(forPixelSize size: (width: Int, height: Int), viewportSize: NSSize, levels: [Int]) -> Int {
+        let fitting = levels.filter { level in
+            CGFloat(size.width * level) <= viewportSize.width && CGFloat(size.height * level) <= viewportSize.height
+        }
+        return fitting.max() ?? levels.first ?? 1
+    }
+
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -120,6 +155,31 @@ final class CanvasView: NSView {
             height: layerStack.height * zoomScale
         )
         context.draw(image, in: destRect)
+
+        // Magnifier drag rubber-band (issue #13): a dashed selection-style
+        // rectangle drawn over the already-composited canvas image. This is
+        // a temporary UI overlay, not canvas pixel data, so it deliberately
+        // doesn't go through the dot-perfect/no-antialiasing path above —
+        // see the doc comment on `magnifierDragStart`.
+        if activeTool == .magnifier, let start = magnifierDragStart, let current = magnifierDragCurrent {
+            let rect = NSRect(
+                x: min(start.x, current.x),
+                y: min(start.y, current.y),
+                width: abs(current.x - start.x),
+                height: abs(current.y - start.y)
+            )
+            // Guards against the zero-size rect right after `mouseDown`,
+            // before `mouseDragged` has fired even once: `start == current`
+            // there, and insetting a zero-size rect by (0.5, 0.5) would
+            // make its width/height negative.
+            if rect.width > 0 && rect.height > 0 {
+                context.setShouldAntialias(true)
+                context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+                context.setLineWidth(1)
+                context.setLineDash(phase: 0, lengths: [4, 3])
+                context.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
+            }
+        }
     }
 
     // MARK: - Pencil tool (mouse-driven, 1px, no anti-aliasing)
@@ -167,6 +227,12 @@ final class CanvasView: NSView {
             // branch to `sampleColor(at:)` before calling `paint(at:)`
             // (issue #14). Kept only to satisfy this switch's exhaustiveness.
             return
+        case .magnifier:
+            // The magnifier never reaches here either: `mouseDown`/
+            // `mouseDragged`/`mouseUp` branch to the zoom/drag handling
+            // before calling `paint(at:)` (issue #13). Kept only to satisfy
+            // this switch's exhaustiveness.
+            return
         }
     }
 
@@ -181,6 +247,10 @@ final class CanvasView: NSView {
         case .eyedropper:
             // Same as `paint(at:)` above: the eyedropper never drags into a
             // stroke (issue #14), this exists only for exhaustiveness.
+            return
+        case .magnifier:
+            // Same as `paint(at:)` above: the magnifier never drags into a
+            // stroke (issue #13), this exists only for exhaustiveness.
             return
         }
     }
@@ -206,12 +276,30 @@ final class CanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Unconditionally clear any leftover magnifier drag state at the
+        // start of every new mouse-down session (issue #13 hardening): the
+        // current mouse-event dispatch model can't actually switch
+        // `activeTool` mid-drag, but a future keyboard-shortcut tool switch
+        // could, and without this reset a stale rubber-band rectangle could
+        // flash on screen the next time the magnifier is reselected.
+        magnifierDragStart = nil
+        magnifierDragCurrent = nil
         let pixel = pixelCoordinate(for: event)
         if activeTool == .eyedropper {
             if let pixelColor = sampleColor(at: pixel) {
                 let isSecondary = event.modifierFlags.contains(.option)
                 onColorPicked?(pixelColor, isSecondary)
             }
+            return
+        }
+        if activeTool == .magnifier {
+            // Just records the drag's start point (issue #13); the actual
+            // zoom happens in `mouseUp(with:)` once the gesture — click or
+            // drag — is known. Skips the pixel-painting path entirely, same
+            // as the eyedropper branch above.
+            let point = convert(event.locationInWindow, from: nil)
+            magnifierDragStart = point
+            magnifierDragCurrent = point
             return
         }
         paint(at: pixel)
@@ -226,6 +314,11 @@ final class CanvasView: NSView {
             // dragging is out of scope for this issue.
             return
         }
+        if activeTool == .magnifier {
+            magnifierDragCurrent = convert(event.locationInWindow, from: nil)
+            needsDisplay = true
+            return
+        }
         let pixel = pixelCoordinate(for: event)
         if let last = lastPixel {
             paintLine(from: last, to: pixel)
@@ -238,6 +331,77 @@ final class CanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        lastPixel = nil
+        guard activeTool == .magnifier else {
+            lastPixel = nil
+            return
+        }
+        defer {
+            magnifierDragStart = nil
+            magnifierDragCurrent = nil
+            needsDisplay = true
+        }
+        guard let start = magnifierDragStart, let current = magnifierDragCurrent else { return }
+
+        let distance = hypot(current.x - start.x, current.y - start.y)
+        if distance < Self.magnifierClickThreshold {
+            // A plain click (issue #13): Option-click zooms out one step,
+            // a plain click zooms in one step — both simple single-step
+            // zooms via the existing `zoomIn()`/`zoomOut()`. The clicked
+            // pixel must be read at the *pre*-zoom scale — `zoomIn()`/
+            // `zoomOut()` overwrite `zoomScale` — since `current` is a
+            // view-space point captured while the canvas was still
+            // displayed at the old zoom.
+            let pixel = CanvasView.pixelCoordinate(forPoint: current, zoomScale: zoomScale)
+            if event.modifierFlags.contains(.option) {
+                zoomOut()
+            } else {
+                zoomIn()
+            }
+            centerScroll(onPixelPoint: pixel)
+            return
+        }
+
+        // A rectangle drag (issue #13): zoom to whichever supported level
+        // fits the dragged rectangle as large as possible inside the
+        // viewport, then scroll so the rectangle's center lands in the
+        // middle of the viewport.
+        let rectStart = CanvasView.pixelCoordinate(forPoint: start, zoomScale: zoomScale)
+        let rectEnd = CanvasView.pixelCoordinate(forPoint: current, zoomScale: zoomScale)
+        let pixelWidth = abs(rectEnd.x - rectStart.x)
+        let pixelHeight = abs(rectEnd.y - rectStart.y)
+        let viewportSize = enclosingScrollView?.contentView.bounds.size ?? bounds.size
+        let bestLevel = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: max(pixelWidth, 1), height: max(pixelHeight, 1)),
+            viewportSize: viewportSize,
+            levels: CanvasView.zoomLevels
+        )
+        setZoomScale(bestLevel)
+
+        let centerPixel = (
+            x: (min(rectStart.x, rectEnd.x) + max(rectStart.x, rectEnd.x)) / 2,
+            y: (min(rectStart.y, rectEnd.y) + max(rectStart.y, rectEnd.y)) / 2
+        )
+        centerScroll(onPixelPoint: centerPixel)
+    }
+
+    /// Scrolls the enclosing scroll view so that `pixel` (in canvas
+    /// pixel-space) lands in the middle of the viewport, at the current
+    /// `zoomScale` (issue #13). `CanvasView` is expected to sit inside an
+    /// `NSScrollView` at runtime (see `AppDelegate.makeRootView()`); when
+    /// there isn't one — e.g. an off-screen view built directly in a test —
+    /// this is a no-op rather than a crash.
+    private func centerScroll(onPixelPoint pixel: (x: Int, y: Int)) {
+        guard let scrollView = enclosingScrollView else { return }
+        let pointInView = NSPoint(
+            x: (CGFloat(pixel.x) + 0.5) * CGFloat(zoomScale),
+            y: (CGFloat(pixel.y) + 0.5) * CGFloat(zoomScale)
+        )
+        let viewportSize = scrollView.contentView.bounds.size
+        let origin = NSPoint(
+            x: pointInView.x - viewportSize.width / 2,
+            y: pointInView.y - viewportSize.height / 2
+        )
+        scrollView.contentView.scroll(to: origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 }

@@ -227,6 +227,117 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(result.y, 3)
     }
 
+    // MARK: - bestFitZoomLevel(forPixelSize:viewportSize:levels:) — pure
+    // zoom-selection math for the magnifier's drag-to-zoom (issue #13).
+    // Minimal smoke coverage here; deeper test-case design is a follow-up
+    // for a dedicated test-authoring pass.
+
+    func testBestFitZoomLevel_picksLargestLevelThatFits() {
+        // A 10x10 pixel selection in a 100x100 viewport fits at 8x (80x80)
+        // but not at 16x (160x160).
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 10, height: 10),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, 8)
+    }
+
+    func testBestFitZoomLevel_fallsBackToSmallestLevel_whenNothingFits() {
+        // A selection larger than the viewport even at the smallest level
+        // (1x) still returns that smallest level as a best-effort fallback,
+        // rather than crashing or returning something outside `levels`.
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 500, height: 500),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, CanvasView.zoomLevels.first)
+    }
+
+    func testBestFitZoomLevel_exactFit_isIncluded() {
+        // Exactly filling the viewport at a given level should still count
+        // as "fits" (`<=`, not `<`).
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 25, height: 25),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, 4)
+    }
+
+    func testBestFitZoomLevel_nonSquareSelection_bindsToTheMoreRestrictiveDimension() {
+        // A 5x10 selection in a 100x100 viewport: width alone would allow up
+        // to 16x (5*16=80<=100, 5*32=160>100), but height alone only allows
+        // up to 8x (10*8=80<=100, 10*16=160>100). Both dimensions must fit
+        // simultaneously, so the tighter (height) constraint wins and the
+        // answer is 8, not width's looser 16.
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 5, height: 10),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, 8, "the level must fit BOTH dimensions, not just the looser one")
+    }
+
+    func testBestFitZoomLevel_gappyLevels_picksTheAvailableLevelBelowTheIdealOne() {
+        // With a 2x2 selection in a 10x10 viewport, the ideal level would be
+        // somewhere around 4-5x, but `levels` only offers 1, 4, and 32 here
+        // (a gap where 2, 8, 16 would normally sit): 4x2=8<=10 fits, but the
+        // next available level, 32, doesn't (32*2=64>10). The answer must be
+        // the highest level that actually appears in `levels`, not an
+        // interpolated value.
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 2, height: 2),
+            viewportSize: NSSize(width: 10, height: 10),
+            levels: [1, 4, 32]
+        )
+        XCTAssertEqual(level, 4)
+    }
+
+    func testBestFitZoomLevel_viewportNarrowInOneDimensionOnly_stillFitsBothAxes() {
+        // A wide-but-short viewport (200x20): the width axis alone would
+        // tolerate up to 16x (10*16=160<=200), but the short height axis
+        // caps it at 2x (10*2=20<=20, 10*4=40>20). The fit check must apply
+        // per-axis even when only one axis is actually the bottleneck.
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 10, height: 10),
+            viewportSize: NSSize(width: 200, height: 20),
+            levels: CanvasView.zoomLevels
+        )
+        XCTAssertEqual(level, 2)
+    }
+
+    func testBestFitZoomLevel_emptyLevels_fallsBackTo1_doesNotCrash() {
+        // No supported zoom levels at all is a degenerate input this
+        // function must survive without crashing, falling back to a sane
+        // default of 1 rather than force-unwrapping `levels.first`.
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 10, height: 10),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: []
+        )
+        XCTAssertEqual(level, 1)
+    }
+
+    func testBestFitZoomLevel_singleLevelThatFits_returnsThatLevel() {
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 10, height: 10),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: [8]
+        )
+        XCTAssertEqual(level, 8)
+    }
+
+    func testBestFitZoomLevel_singleLevelThatDoesNotFit_stillReturnsThatLevelAsFallback() {
+        let level = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: 500, height: 500),
+            viewportSize: NSSize(width: 100, height: 100),
+            levels: [8]
+        )
+        XCTAssertEqual(level, 8, "with only one level offered, it must be returned even when it doesn't fit")
+    }
+
     // MARK: - mouseDown routes to the active layer only (test list 44-45)
     //
     // Driving `mouseDown(with:)` for real requires an actual `NSEvent` and
@@ -279,6 +390,27 @@ final class CanvasViewTests: XCTestCase {
             with: .leftMouseDragged,
             location: windowPoint,
             modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )!
+    }
+
+    /// `mouseUp(with:)`'s magnifier branch (issue #13) never reads
+    /// `event.locationInWindow` — only `event.modifierFlags` — since the
+    /// drag rectangle's start/current points are already captured in
+    /// `magnifierDragStart`/`magnifierDragCurrent` by prior `mouseDown`/
+    /// `mouseDragged` calls. `windowPoint` here is therefore a required but
+    /// functionally inert argument for this event type; `modifierFlags` is
+    /// what actually matters for Option-click zoom-out.
+    private func mouseUpEvent(at windowPoint: NSPoint, in window: NSWindow, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: windowPoint,
+            modifierFlags: modifierFlags,
             timestamp: 0,
             windowNumber: window.windowNumber,
             context: nil,
@@ -718,5 +850,201 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(dragTargetBefore?.g, dragTargetAfter?.g)
         XCTAssertEqual(dragTargetBefore?.b, dragTargetAfter?.b)
         XCTAssertEqual(dragTargetBefore?.a, dragTargetAfter?.a)
+    }
+
+    // MARK: - Magnifier tool: mouseUp click-vs-drag + zoom (issue #13)
+    //
+    // Option's role is deliberately narrow, matching Photoshop's own
+    // magnifier: it only flips a *click*'s direction (in -> out).
+    // `mouseUp(with:)` never reads `event.modifierFlags` in the drag
+    // (rectangle-zoom) branch at all — a drag always best-fit-zooms in,
+    // Option held or not. That is confirmed as intentional, not a gap, by
+    // `testMouseUp_magnifierOptionDrag_optionIsIgnored_bestFitZoomStillApplies`
+    // below.
+    //
+    // All views here come from `makeViewInWindow`, which (like real
+    // `AppDelegate` construction is expected to, per `centerScroll`'s doc
+    // comment) has no `NSScrollView` ancestor — so `enclosingScrollView` is
+    // always `nil` in this section, exercising the `?? bounds.size` /
+    // early-return fallbacks throughout `mouseUp`/`centerScroll` on every
+    // single test below, not just the dedicated one at the end.
+    //
+    // Horizontal-only drags at window y = 16 (the exact vertical midpoint of
+    // the 32pt-tall window) are used throughout so the view's y-flip
+    // (`convert(_:from: nil)`) never has to be reasoned about: it maps
+    // (x, 16) to the same (x, 16) in view space.
+
+    private func makeMagnifierViewInWindow(zoomScale: Int = 4) -> CanvasView {
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .magnifier
+        return view
+    }
+
+    func testMouseUp_magnifierDragAtExactClickThreshold_isTreatedAsADrag_notAClick() {
+        // `magnifierClickThreshold` is 4 view-points and the comparison is
+        // `distance < threshold`, so a distance of exactly 4 must NOT count
+        // as a click. Pins the `<` (not `<=`) direction of that comparison:
+        // a plain click here would zoomIn() to 8, but the drag branch's
+        // best-fit computation for this exact rectangle lands on 32 — a
+        // value only reachable via the drag path.
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 14, y: 16), in: window)) // distance == 4
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 14, y: 16), in: window))
+
+        XCTAssertEqual(view.zoomScale, 32, "distance == threshold must take the drag/best-fit branch (32), not the click/zoomIn branch (8)")
+    }
+
+    func testMouseUp_magnifierDragBelowClickThreshold_isTreatedAsAClick_zoomsIn() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 13, y: 16), in: window)) // distance == 3, below threshold
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 13, y: 16), in: window))
+
+        XCTAssertEqual(view.zoomScale, 8, "a sub-threshold drag distance must be treated as a plain click and zoom in one step (4 -> 8)")
+    }
+
+    func testMouseUp_magnifierDragAboveClickThreshold_isTreatedAsADrag_bestFitZooms() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 2, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 11, y: 16), in: window)) // distance == 9
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 11, y: 16), in: window))
+
+        XCTAssertEqual(view.zoomScale, 16, "a clearly-above-threshold drag must best-fit zoom to the dragged rectangle, not just zoomIn() one step")
+    }
+
+    func testMouseUp_magnifierOptionClick_zoomsOutOneStep() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 13, y: 16), in: window)) // distance == 3, a click
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 13, y: 16), in: window, modifierFlags: [.option]))
+
+        XCTAssertEqual(view.zoomScale, 2, "Option-click must zoom out one step (4 -> 2), the reverse of a plain click")
+    }
+
+    func testMouseUp_magnifierPlainClick_zoomsInOneStep() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 13, y: 16), in: window)) // distance == 3, a click
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 13, y: 16), in: window)) // no Option
+
+        XCTAssertEqual(view.zoomScale, 8, "a plain click with no modifier must zoom in one step (4 -> 8)")
+    }
+
+    func testMouseUp_magnifierOptionDrag_optionIsIgnored_bestFitZoomStillApplies() {
+        // Confirmed-intentional spec (see this file's MARK comment above):
+        // Photoshop's own magnifier tool only lets Option reverse a
+        // *click*'s direction — it has no effect on a drag's rectangle
+        // zoom. `mouseUp(with:)`'s drag branch never even reads
+        // `event.modifierFlags`, so holding Option through a drag must
+        // produce the exact same best-fit result as not holding it
+        // (same rectangle as `testMouseUp_magnifierDragAboveClickThreshold_isTreatedAsADrag_bestFitZooms` -> 16).
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 2, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 11, y: 16), in: window)) // distance == 9
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 11, y: 16), in: window, modifierFlags: [.option]))
+
+        XCTAssertEqual(view.zoomScale, 16, "Option held during a drag must be ignored — this is Photoshop's own magnifier behavior, not a bug")
+    }
+
+    func testMouseUp_magnifierZeroSizeDrag_startEqualsEnd_isTreatedAsAClick() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: window))
+        // No mouseDragged call at all: magnifierDragCurrent stays exactly
+        // equal to magnifierDragStart, as mouseDown itself set it.
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 10, y: 16), in: window))
+
+        XCTAssertEqual(view.zoomScale, 8, "a zero-distance drag (start == end) must be treated as a click and zoom in")
+    }
+
+    func testMouseUp_magnifierDragFromNegativeOutOfCanvasCoordinates_doesNotCrash() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        // Window x = -20 / -12 both convert to negative pixel columns
+        // (floor(-20/4) = -5, floor(-12/4) = -3), well outside the 8x8
+        // canvas — the magnifier's drag math must tolerate this.
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: -20, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: -12, y: 16), in: window)) // distance == 8
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: -12, y: 16), in: window))
+
+        XCTAssertEqual(view.zoomScale, 16, "an out-of-canvas negative-coordinate drag must not crash and must still resolve to a valid best-fit zoom level")
+    }
+
+    func testMouseUp_magnifierWithNoEnclosingScrollView_clickAndDragBothUpdateZoomScaleWithoutCrashing() {
+        // `makeViewInWindow` deliberately never wraps the view in an
+        // `NSScrollView` (its own doc comment notes this is more than its
+        // pure-function tests need) — every test above already runs in
+        // this no-scroll-view environment, but this test makes the
+        // assumption explicit and checks it directly for both gesture
+        // kinds, since `centerScroll(onPixelPoint:)` silently no-ops
+        // without one while `mouseUp` itself must still update `zoomScale`.
+        let clickView = makeMagnifierViewInWindow()
+        XCTAssertNil(clickView.enclosingScrollView, "precondition: no NSScrollView ancestor")
+        let clickWindow = clickView.window!
+        clickView.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: clickWindow))
+        clickView.mouseUp(with: mouseUpEvent(at: NSPoint(x: 10, y: 16), in: clickWindow))
+        XCTAssertEqual(clickView.zoomScale, 8, "a click must still zoom in with no enclosing scroll view")
+
+        let dragView = makeMagnifierViewInWindow()
+        XCTAssertNil(dragView.enclosingScrollView, "precondition: no NSScrollView ancestor")
+        let dragWindow = dragView.window!
+        dragView.mouseDown(with: mouseDownEvent(at: NSPoint(x: 2, y: 16), in: dragWindow))
+        dragView.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 11, y: 16), in: dragWindow))
+        dragView.mouseUp(with: mouseUpEvent(at: NSPoint(x: 11, y: 16), in: dragWindow))
+        XCTAssertEqual(dragView.zoomScale, 16, "a drag must still best-fit zoom with no enclosing scroll view")
+    }
+
+    func testMouseUp_magnifierWithoutAPriorMouseDown_doesNotCrash_leavesZoomScaleUnchanged() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        XCTAssertEqual(view.zoomScale, 4, "precondition: default zoom")
+
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 10, y: 16), in: window))
+
+        XCTAssertEqual(view.zoomScale, 4, "mouseUp with no magnifierDragStart/Current recorded must be a no-op, not a crash")
+    }
+
+    func testMouseUp_afterACompletedDrag_aFreshMouseDownDoesNotInheritTheOldDragsPoints() {
+        // Indirect check on `magnifierDragStart`/`magnifierDragCurrent`
+        // (both private) being correctly re-seeded by `mouseDown`, not left
+        // over from the previous drag gesture: if the second `mouseDown`
+        // below failed to overwrite the stale rectangle from the first
+        // drag, the immediately-following zero-distance `mouseUp` would
+        // still see the old, far-apart start/current pair and take the
+        // drag/best-fit branch — instead it must see a fresh, equal
+        // start/current pair and take the click/zoomIn branch.
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+
+        // First gesture: a real drag, established distance-9 rectangle from
+        // the earlier best-fit tests (result: zoomScale 16).
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 2, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 11, y: 16), in: window))
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 11, y: 16), in: window))
+        XCTAssertEqual(view.zoomScale, 16, "precondition: first drag completed as expected")
+
+        // Second gesture: mouseDown at a brand-new point, then mouseUp with
+        // no dragging in between at all — a plain click, provided
+        // mouseDown correctly reset magnifierDragCurrent to this new point
+        // rather than leaving it at the first drag's (11, 16).
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 20, y: 20), in: window))
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 20, y: 20), in: window))
+
+        XCTAssertEqual(view.zoomScale, 32, "the second mouseDown must have reset the drag state to its own point: a zero-distance click must zoomIn() one step from 16, not re-run the stale first drag's best-fit result")
     }
 }

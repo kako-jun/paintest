@@ -1,11 +1,12 @@
 import AppKit
 
 /// Photoshop's left-hand toolbox: a single vertical column of tool icons
-/// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, and
-/// the eyedropper are wired to real behavior (issues #5, #10, #14) —
-/// clicking any of them fires `onToolSelected` and exclusively toggles that
-/// button's pressed state against the others' — so every other button here
-/// stays a purely visual placeholder with no target/action, same as before.
+/// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, the
+/// eyedropper, and the magnifier are wired to real behavior (issues #5,
+/// #10, #14, #13) — clicking any of them fires `onToolSelected` and
+/// exclusively toggles that button's pressed state against the others' — so
+/// every other button here stays a purely visual placeholder with no
+/// target/action, same as before.
 /// The pencil cell renders pressed (`state == .on`) by default so the
 /// column still communicates "this is the active tool" the way the
 /// reference screenshots do.
@@ -19,9 +20,10 @@ final class ToolboxView: NSView {
         let symbol: String
         let label: String
         // Non-nil only for the buttons wired up so far — pencil/eraser
-        // (issue #5), pen (issue #10), and the eyedropper (issue #14);
-        // every other descriptor stays `nil` and its button gets no
-        // target/action, matching the previous all-placeholder behavior.
+        // (issue #5), pen (issue #10), the eyedropper (issue #14), and the
+        // magnifier (issue #13); every other descriptor stays `nil` and its
+        // button gets no target/action, matching the previous
+        // all-placeholder behavior.
         let tool: Tool?
     }
 
@@ -33,7 +35,7 @@ final class ToolboxView: NSView {
         ToolDescriptor(symbol: "eraser", label: "消しゴム", tool: .eraser),
         ToolDescriptor(symbol: "drop.fill", label: "塗りつぶし", tool: nil),
         ToolDescriptor(symbol: "eyedropper", label: "スポイト", tool: .eyedropper),
-        ToolDescriptor(symbol: "magnifyingglass", label: "拡大鏡", tool: nil),
+        ToolDescriptor(symbol: "magnifyingglass", label: "拡大鏡", tool: .magnifier),
         ToolDescriptor(symbol: "pencil", label: "鉛筆", tool: .pencil),
         ToolDescriptor(symbol: "paintbrush.fill", label: "ペン", tool: .pen),
         ToolDescriptor(symbol: "aqi.medium", label: "エアブラシ", tool: nil),
