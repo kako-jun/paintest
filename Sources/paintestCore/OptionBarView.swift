@@ -19,12 +19,27 @@ final class OptionBarView: NSView {
     static let height: CGFloat = 30
     private static let horizontalPadding: CGFloat = 8
     private static let popUpWidth: CGFloat = 90
+    private static let toleranceSliderWidth: CGFloat = 150
+    private static let toleranceRange: ClosedRange<Double> = 0...255
+    private static let controlSpacing: CGFloat = 8
+
+    /// The magic wand's current-value readout (issue #11, round 3) — kept as
+    /// a stored reference (unlike the zoom popup, which reads its own
+    /// selection back via `sender`) so `toleranceSliderChanged(_:)` can
+    /// update its text directly instead of needing to look the label back up
+    /// among `subviews`.
+    private var toleranceValueLabel: NSTextField?
 
     /// Fired when the zoom presets popup's selection changes (issue #13).
     /// `AppDelegate` forwards the picked level straight into
     /// `CanvasView.setZoomScale(_:)`, the same entry point used for
     /// click/drag zoom and the View menu's zoom-in/out.
     private var onZoomPresetSelected: ((Int) -> Void)?
+
+    /// Fired when the magic wand's tolerance slider moves (issue #11, round
+    /// 3). `AppDelegate` forwards the new value straight into
+    /// `CanvasView.magicWandTolerance`.
+    private var onToleranceChanged: ((Int) -> Void)?
 
     init() {
         super.init(frame: .zero)
@@ -67,12 +82,63 @@ final class OptionBarView: NSView {
         ])
     }
 
+    /// Populates the bar with the magic wand's tolerance control (issue #11,
+    /// round 3): a "許容誤差" label, an `NSSlider` over
+    /// `SelectionMask.magicWand(...)`'s tolerance range, and a numeric
+    /// readout of the current value. Same "rebuilt from scratch on every
+    /// call" pattern as `showZoomPresets` above — no incremental
+    /// "just update the selection" path to keep in sync separately.
+    func showMagicWandOptions(currentTolerance: Int, onToleranceChanged: @escaping (Int) -> Void) {
+        clear()
+        self.onToleranceChanged = onToleranceChanged
+
+        let label = NSTextField(labelWithString: "許容誤差")
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let slider = NSSlider(
+            value: Double(currentTolerance),
+            minValue: Self.toleranceRange.lowerBound,
+            maxValue: Self.toleranceRange.upperBound,
+            target: self,
+            action: #selector(toleranceSliderChanged(_:))
+        )
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        slider.isContinuous = true
+
+        let valueLabel = NSTextField(labelWithString: "\(currentTolerance)")
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        toleranceValueLabel = valueLabel
+
+        addSubview(label)
+        addSubview(slider)
+        addSubview(valueLabel)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalPadding),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            slider.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: Self.controlSpacing),
+            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
+            slider.widthAnchor.constraint(equalToConstant: Self.toleranceSliderWidth),
+
+            valueLabel.leadingAnchor.constraint(equalTo: slider.trailingAnchor, constant: Self.controlSpacing),
+            valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
     /// Removes every control from the bar, returning it to the empty frame
     /// it starts as (issue #13) — used when switching to a tool that has no
     /// options of its own.
     func clear() {
         subviews.forEach { $0.removeFromSuperview() }
         onZoomPresetSelected = nil
+        onToleranceChanged = nil
+        toleranceValueLabel = nil
+    }
+
+    @objc private func toleranceSliderChanged(_ sender: NSSlider) {
+        let tolerance = Int(sender.doubleValue.rounded())
+        toleranceValueLabel?.stringValue = "\(tolerance)"
+        onToleranceChanged?(tolerance)
     }
 
     @objc private func zoomPresetChanged(_ sender: NSPopUpButton) {

@@ -840,14 +840,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Populates (or clears) the options bar to match the newly selected
-    /// tool (issue #13). Only the magnifier has options of its own so far —
-    /// its zoom-level dropdown — so every other tool just clears the bar
+    /// tool (issue #13). The magnifier's zoom-level dropdown and the magic
+    /// wand's tolerance slider (issue #11, round 3) are the only tools with
+    /// options of their own so far — every other tool just clears the bar
     /// back to its empty frame.
     private func updateOptionBar(for tool: Tool) {
         switch tool {
         case .magnifier:
             optionBarView.showZoomPresets(currentZoomScale: canvasView.zoomScale, levels: CanvasView.zoomLevels) { [weak self] scale in
                 self?.canvasView.setZoomScale(scale)
+            }
+        case .magicWandSelect:
+            optionBarView.showMagicWandOptions(currentTolerance: canvasView.magicWandTolerance) { [weak self] tolerance in
+                self?.canvasView.magicWandTolerance = tolerance
             }
         default:
             optionBarView.clear()
