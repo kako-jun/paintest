@@ -1,5 +1,16 @@
 import AppKit
 
+/// How a newly dragged selection combines with whatever `CanvasView.selection`
+/// already held before the drag started (issue #11), mirroring Photoshop's
+/// modifier-key conventions: Shift adds, Option subtracts, Shift+Option
+/// intersects, and no modifier replaces the old selection outright.
+enum SelectionCombineMode {
+    case replace
+    case add
+    case subtract
+    case intersect
+}
+
 /// Displays a `LayerStack`'s composited image at an integer zoom factor and
 /// routes mouse input into pencil strokes on the active layer.
 ///
@@ -37,6 +48,11 @@ final class CanvasView: NSView {
     /// the foreground color.
     var onColorPicked: ((NSColor, _ isSecondary: Bool) -> Void)?
 
+    /// The active selection, if any — `nil` means "no restriction", i.e. the
+    /// whole canvas is editable (issue #11). `AppDelegate` keeps this in
+    /// sync with `Document.selection` the same way it does `zoomScale`.
+    var selection: SelectionMask? { didSet { needsDisplay = true } }
+
     static let zoomLevels = [1, 2, 4, 8, 16, 32]
     static let defaultZoomScale = 4
     /// The pen's fixed stroke width — the pencil paints crisp 1px-at-a-time
@@ -59,6 +75,19 @@ final class CanvasView: NSView {
     /// #13). Both are `nil` outside of an active magnifier drag.
     private var magnifierDragStart: NSPoint?
     private var magnifierDragCurrent: NSPoint?
+
+    /// The rectangle/ellipse select tools' in-progress drag, in view-space
+    /// coordinates (issue #11) — same role as `magnifierDragStart`/
+    /// `magnifierDragCurrent` above, but tracked separately (and drawn by
+    /// its own code in `draw(_:)`) rather than reusing the magnifier's
+    /// rubber-band state, since the two tools are otherwise unrelated.
+    private var selectionDragStart: NSPoint?
+    private var selectionDragCurrent: NSPoint?
+    /// Which modifier keys were held when the selection drag started
+    /// (issue #11) — captured at `mouseDown` time (matching how real
+    /// selection tools read modifiers) and consumed in `mouseUp` to decide
+    /// how the drawn shape combines with the existing `selection`.
+    private var selectionCombineMode: SelectionCombineMode?
 
     override var isFlipped: Bool { true }
 
@@ -180,6 +209,54 @@ final class CanvasView: NSView {
                 context.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
             }
         }
+
+        // Rectangle/ellipse select drag preview (issue #11): a dashed
+        // rubber-band shape drawn while the drag is in progress, separate
+        // from the magnifier's own rubber-band above (different tool,
+        // different state, different code path — see `selectionDragStart`'s
+        // doc comment) and separate from the committed-selection outline
+        // below (that one draws `selection`'s actual boundary once the drag
+        // has ended; this one is just a live preview of the shape being
+        // dragged out).
+        if (activeTool == .rectangleSelect || activeTool == .ellipseSelect),
+           let start = selectionDragStart, let current = selectionDragCurrent {
+            let rect = NSRect(
+                x: min(start.x, current.x),
+                y: min(start.y, current.y),
+                width: abs(current.x - start.x),
+                height: abs(current.y - start.y)
+            )
+            if rect.width > 0 && rect.height > 0 {
+                context.setShouldAntialias(true)
+                context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+                context.setLineWidth(1)
+                context.setLineDash(phase: 0, lengths: [4, 3])
+                let inset = rect.insetBy(dx: 0.5, dy: 0.5)
+                if activeTool == .rectangleSelect {
+                    context.stroke(inset)
+                } else {
+                    context.strokeEllipse(in: inset)
+                }
+            }
+        }
+
+        // Committed selection outline (issue #11): a static dashed
+        // "marching ants"-style border around every selected region.
+        // Animation is out of scope (round 1) — this is deliberately a
+        // fixed dash pattern, not a timer-driven phase offset.
+        if let selection {
+            context.setShouldAntialias(true)
+            context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+            context.setLineWidth(1)
+            context.setLineDash(phase: 0, lengths: [4, 3])
+            let scale = CGFloat(zoomScale)
+            context.beginPath()
+            for (from, to) in selection.boundaryEdges() {
+                context.move(to: CGPoint(x: from.x * scale, y: from.y * scale))
+                context.addLine(to: CGPoint(x: to.x * scale, y: to.y * scale))
+            }
+            context.strokePath()
+        }
     }
 
     // MARK: - Pencil tool (mouse-driven, 1px, no anti-aliasing)
@@ -219,9 +296,9 @@ final class CanvasView: NSView {
     private func paint(at pixel: (x: Int, y: Int)) {
         switch activeTool {
         case .pencil, .eraser:
-            layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor)
+            layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor, mask: selection)
         case .pen:
-            layerStack.activeLayer.canvas.drawAntialiasedDot(at: pixel, color: paintColor, diameter: Self.penLineWidth)
+            layerStack.activeLayer.canvas.drawAntialiasedDot(at: pixel, color: paintColor, diameter: Self.penLineWidth, mask: selection)
         case .eyedropper:
             // The eyedropper never reaches here: `mouseDown`/`mouseDragged`
             // branch to `sampleColor(at:)` before calling `paint(at:)`
@@ -233,6 +310,12 @@ final class CanvasView: NSView {
             // before calling `paint(at:)` (issue #13). Kept only to satisfy
             // this switch's exhaustiveness.
             return
+        case .rectangleSelect, .ellipseSelect:
+            // Same as the magnifier above: these branch to their own
+            // drag/combine handling in `mouseDown`/`mouseDragged`/`mouseUp`
+            // before calling `paint(at:)` (issue #11). Kept only to satisfy
+            // this switch's exhaustiveness.
+            return
         }
     }
 
@@ -241,9 +324,9 @@ final class CanvasView: NSView {
     private func paintLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int)) {
         switch activeTool {
         case .pencil, .eraser:
-            layerStack.activeLayer.canvas.drawLine(from: p0, to: p1, color: paintColor)
+            layerStack.activeLayer.canvas.drawLine(from: p0, to: p1, color: paintColor, mask: selection)
         case .pen:
-            layerStack.activeLayer.canvas.drawAntialiasedLine(from: p0, to: p1, color: paintColor, lineWidth: Self.penLineWidth)
+            layerStack.activeLayer.canvas.drawAntialiasedLine(from: p0, to: p1, color: paintColor, lineWidth: Self.penLineWidth, mask: selection)
         case .eyedropper:
             // Same as `paint(at:)` above: the eyedropper never drags into a
             // stroke (issue #14), this exists only for exhaustiveness.
@@ -251,6 +334,10 @@ final class CanvasView: NSView {
         case .magnifier:
             // Same as `paint(at:)` above: the magnifier never drags into a
             // stroke (issue #13), this exists only for exhaustiveness.
+            return
+        case .rectangleSelect, .ellipseSelect:
+            // Same as `paint(at:)` above: these never drag into a stroke
+            // (issue #11), this exists only for exhaustiveness.
             return
         }
     }
@@ -302,6 +389,26 @@ final class CanvasView: NSView {
             magnifierDragCurrent = point
             return
         }
+        if activeTool == .rectangleSelect || activeTool == .ellipseSelect {
+            // Records the drag's start point and the modifier-derived
+            // combine mode (issue #11); the actual mask is built once the
+            // drag ends, in `mouseUp(with:)`. Skips the pixel-painting path
+            // entirely, same as the eyedropper/magnifier branches above.
+            let point = convert(event.locationInWindow, from: nil)
+            selectionDragStart = point
+            selectionDragCurrent = point
+            let flags = event.modifierFlags
+            if flags.contains(.shift) && flags.contains(.option) {
+                selectionCombineMode = .intersect
+            } else if flags.contains(.shift) {
+                selectionCombineMode = .add
+            } else if flags.contains(.option) {
+                selectionCombineMode = .subtract
+            } else {
+                selectionCombineMode = .replace
+            }
+            return
+        }
         paint(at: pixel)
         lastPixel = pixel
         needsDisplay = true
@@ -319,6 +426,11 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if activeTool == .rectangleSelect || activeTool == .ellipseSelect {
+            selectionDragCurrent = convert(event.locationInWindow, from: nil)
+            needsDisplay = true
+            return
+        }
         let pixel = pixelCoordinate(for: event)
         if let last = lastPixel {
             paintLine(from: last, to: pixel)
@@ -331,6 +443,75 @@ final class CanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if activeTool == .rectangleSelect || activeTool == .ellipseSelect {
+            defer {
+                selectionDragStart = nil
+                selectionDragCurrent = nil
+                selectionCombineMode = nil
+                needsDisplay = true
+            }
+            guard let start = selectionDragStart, let current = selectionDragCurrent else { return }
+
+            let p0 = CanvasView.pixelCoordinate(forPoint: start, zoomScale: zoomScale)
+            let p1 = CanvasView.pixelCoordinate(forPoint: current, zoomScale: zoomScale)
+
+            let newMask: SelectionMask
+            if activeTool == .rectangleSelect {
+                newMask = SelectionMask.rectangle(x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y, width: layerStack.width, height: layerStack.height)
+            } else {
+                // The dragged rectangle's two pixel corners bound the
+                // ellipse: pixel index `x` occupies the continuous range
+                // `[x, x + 1)`, so the bounding box's continuous extent runs
+                // from `min(x0, x1)` to `max(x0, x1) + 1` (and likewise for
+                // y) — that's where `+ 1` below comes from, not an
+                // off-by-one.
+                let minX = min(p0.x, p1.x)
+                let maxX = max(p0.x, p1.x)
+                let minY = min(p0.y, p1.y)
+                let maxY = max(p0.y, p1.y)
+                let centerX = Double(minX + maxX + 1) / 2
+                let centerY = Double(minY + maxY + 1) / 2
+                let radiusX = Double(maxX - minX + 1) / 2
+                let radiusY = Double(maxY - minY + 1) / 2
+                newMask = SelectionMask.ellipse(centerX: centerX, centerY: centerY, radiusX: radiusX, radiusY: radiusY, width: layerStack.width, height: layerStack.height)
+            }
+
+            // For combine math (union/subtract/intersect), a `nil` existing
+            // selection is treated as an *empty* mask — not "everything
+            // selected" — so Shift/Option-dragging from a clean,
+            // no-selection state behaves the way users actually expect:
+            // Shift-drag (`.add`) starts a brand-new selection exactly as a
+            // plain drag would; Option-drag (`.subtract`) / Shift+Option-drag
+            // (`.intersect`) are no-ops, since there's nothing yet to
+            // subtract from or intersect with. This is a *different* rule
+            // from `AppDelegate`'s "選択範囲を反転" command, which
+            // deliberately treats `nil` as "everything selected" for that
+            // command's own semantics (see its doc comment) — the two
+            // operations don't share one universal "what does nil mean"
+            // rule, they're each documented independently.
+            let base = selection ?? SelectionMask(width: layerStack.width, height: layerStack.height)
+            let combined: SelectionMask
+            switch selectionCombineMode ?? .replace {
+            case .replace:
+                combined = newMask
+            case .add:
+                combined = base.unioned(with: newMask)
+            case .subtract:
+                combined = base.subtracting(newMask)
+            case .intersect:
+                combined = base.intersected(with: newMask)
+            }
+
+            // An empty mask would block all editing everywhere — an
+            // effectively broken state, functionally worse than no
+            // selection at all — so it's deliberately collapsed back to
+            // `nil` (unrestricted) instead of being kept as a real,
+            // all-`false` `SelectionMask` (issue #11, decision made ahead of
+            // implementation). This also makes "select all, then invert"
+            // equivalent to "deselect", matching Photoshop.
+            selection = combined.isEmpty ? nil : combined
+            return
+        }
         guard activeTool == .magnifier else {
             lastPixel = nil
             return
