@@ -101,4 +101,15 @@ final class HistoryManager {
         currentIndex += 1
         return entries[currentIndex].layerStack.copy()
     }
+
+    /// Jumps straight to an arbitrary entry (issue #19 round 2: clicking a
+    /// row in the history panel) instead of stepping one at a time like
+    /// `undo()`/`redo()`. Returns `nil` for an out-of-range `index` without
+    /// touching `currentIndex`. Same copy-out contract as `undo()`/`redo()`
+    /// — the returned `LayerStack` is always a fresh `.copy()`.
+    func jump(to index: Int) -> LayerStack? {
+        guard entries.indices.contains(index) else { return nil }
+        currentIndex = index
+        return entries[index].layerStack.copy()
+    }
 }
