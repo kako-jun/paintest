@@ -267,6 +267,14 @@ final class CanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Unconditionally clear any leftover magnifier drag state at the
+        // start of every new mouse-down session (issue #13 hardening): the
+        // current mouse-event dispatch model can't actually switch
+        // `activeTool` mid-drag, but a future keyboard-shortcut tool switch
+        // could, and without this reset a stale rubber-band rectangle could
+        // flash on screen the next time the magnifier is reselected.
+        magnifierDragStart = nil
+        magnifierDragCurrent = nil
         let pixel = pixelCoordinate(for: event)
         if activeTool == .eyedropper {
             if let pixelColor = sampleColor(at: pixel) {
