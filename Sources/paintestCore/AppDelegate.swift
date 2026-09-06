@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var colorPaletteView: ColorPaletteView!
     private var currentColorIndicator: CurrentColorIndicatorView!
     private var layerPanelView: LayerPanelView!
+    private var historyPanelView: HistoryPanelView!
     private var optionBarView: OptionBarView!
     private var documentTabBarView: DocumentTabBarView!
     private var documentManager: DocumentManager!
@@ -438,8 +439,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let propertyPanelView = PlaceholderPanelView(title: "プロパティ")
         propertyPanelView.translatesAutoresizingMaskIntoConstraints = false
 
-        let historyPanelView = PlaceholderPanelView(title: "ヒストリー")
+        historyPanelView = HistoryPanelView(
+            entries: documentManager.activeDocument.history.entries,
+            currentIndex: documentManager.activeDocument.history.currentIndex
+        )
+        // Jumping from the panel needs the exact same pre/post treatment as
+        // Cmd+Z/Cmd+Shift+Z (issue #19 round 2): cancel — not commit — an
+        // in-progress layer transform first (same reasoning as `undo()`/
+        // `redo()` above: the transform was never itself recorded as a
+        // history entry), then adopt the jumped-to snapshot via the same
+        // `applyRestoredLayerStack(_:)` every other history-restoring path
+        // uses, then refresh this panel so its highlight follows the new
+        // `currentIndex`.
+        historyPanelView.onJumpToIndex = { [weak self] index in
+            guard let self else { return }
+            if self.canvasView.isTransforming { self.canvasView.cancelLayerTransform() }
+            guard let restored = self.documentManager.activeDocument.history.jump(to: index) else { return }
+            self.applyRestoredLayerStack(restored)
+            self.refreshHistoryPanel()
+        }
         historyPanelView.translatesAutoresizingMaskIntoConstraints = false
+        historyPanelView.wantsLayer = true
+        historyPanelView.layer?.backgroundColor = Self.chromeColor.cgColor
 
         group.addSubview(layerPanelView)
         group.addSubview(topDivider)
@@ -682,6 +703,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         layerPanelView.replaceLayerStack(document.layerStack)
         documentTabBarView.reload()
         updateWindowTitle(for: document)
+        // The newly active document has its own independent `HistoryManager`
+        // (issue #19 round 2): without this, switching tabs would leave the
+        // panel showing the previous document's history list/highlight.
+        refreshHistoryPanel()
 
         // No separate options-bar refresh needed here: `setZoomScale(_:)`
         // above synchronously fires `onZoomChanged`, which already calls
@@ -719,6 +744,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func recordHistoryCheckpoint(label: String) {
         let document = documentManager.activeDocument
         document.history.record(document.layerStack, label: label)
+        refreshHistoryPanel()
+    }
+
+    /// Redraws the history panel from the active document's current
+    /// `HistoryManager` state. Called after every operation that can move
+    /// or extend the history — recording a checkpoint (above), `undo()`/
+    /// `redo()`, a jump from the panel itself, and switching to a different
+    /// document's tab in `activateActiveDocument()` — so the panel never
+    /// shows a stale list or a stale current-position highlight.
+    private func refreshHistoryPanel() {
+        let history = documentManager.activeDocument.history
+        historyPanelView.reload(entries: history.entries, currentIndex: history.currentIndex)
     }
 
     /// "元に戻す" (Cmd+Z). An in-progress layer transform is cancelled first
@@ -730,6 +767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         guard let restored = documentManager.activeDocument.history.undo() else { return }
         applyRestoredLayerStack(restored)
+        refreshHistoryPanel()
     }
 
     /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform handling as
@@ -738,6 +776,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         guard let restored = documentManager.activeDocument.history.redo() else { return }
         applyRestoredLayerStack(restored)
+        refreshHistoryPanel()
     }
 
     /// Adopts `layerStack` (already a fresh deep copy handed back by
