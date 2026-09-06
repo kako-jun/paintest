@@ -148,6 +148,12 @@ final class CanvasView: NSView {
         case corner(TransformCorner)
         case edge(TransformEdge)
         case rotate
+        /// Free-transform / distort (issue #9, round 3): grabbed when
+        /// `mouseDown` hits a corner handle while Option is held (Photoshop's
+        /// own "hold Option, drag a corner" convention for the free-transform
+        /// distort gesture) — see `mouseDown`'s conversion of `.corner` into
+        /// this right after `hitTestTransformHandle` runs.
+        case distort(TransformCorner)
     }
 
     private enum TransformCorner: CaseIterable {
@@ -400,6 +406,9 @@ final class CanvasView: NSView {
     /// results) it always did.
     static func sourcePixel(forDestination pixel: (x: Int, y: Int), transform: LayerTransform, sourceWidth: Int, sourceHeight: Int) -> (x: Int, y: Int)? {
         guard transform.width > 0, transform.height > 0 else { return nil }
+        if transform.hasDistortion {
+            return sourcePixelDistorted(forDestination: pixel, transform: transform, sourceWidth: sourceWidth, sourceHeight: sourceHeight)
+        }
         let dx = Double(pixel.x) - transform.centerX
         let dy = Double(pixel.y) - transform.centerY
         let cosR = cos(transform.rotation)
@@ -423,6 +432,39 @@ final class CanvasView: NSView {
         // short), which would make `commitLayerTransform()` with no actual
         // transform applied silently corrupt a sprinkling of pixels instead
         // of reproducing the canvas byte-exactly.
+        let epsilon = 1e-9
+        let sourceX = Int(u * Double(sourceWidth) + epsilon)
+        let sourceY = Int(v * Double(sourceHeight) + epsilon)
+        return (sourceX, sourceY)
+    }
+
+    /// The `hasDistortion` counterpart to the plain rotation-only inverse
+    /// mapping above (round 3): `transform.corners` (already including each
+    /// corner's own `distort*` offset) is treated as an arbitrary
+    /// quadrilateral, modeled as `ProjectiveTransform` mapping the unit
+    /// square onto it, and `pixel` is mapped back through that transform's
+    /// `inverse(x:y:)` to a normalized `(u,v)` — same epsilon-guarded
+    /// truncation into source pixel coordinates as the plain-rectangle path,
+    /// for the same reason (see its comment above).
+    ///
+    /// Because `ProjectiveTransform`'s corner-order convention matches
+    /// `LayerTransform.corners`'s exactly (`topLeft`→`(0,0)`, `topRight`→
+    /// `(1,0)`, `bottomRight`→`(1,1)`, `bottomLeft`→`(0,1)`), and because a
+    /// transform with every `distort*` offset at `.zero` makes `corners`
+    /// produce the exact same rotated rectangle round 1/2's rectangle-only
+    /// math already handles, this path is only ever reached once at least
+    /// one `distort*` offset is non-zero — verified by
+    /// `testProjectiveTransform_noDistortion_matchesPlainRectangleMapping`.
+    private static func sourcePixelDistorted(forDestination pixel: (x: Int, y: Int), transform: LayerTransform, sourceWidth: Int, sourceHeight: Int) -> (x: Int, y: Int)? {
+        let corners = transform.corners
+        let projective = ProjectiveTransform(
+            topLeft: corners.topLeft,
+            topRight: corners.topRight,
+            bottomRight: corners.bottomRight,
+            bottomLeft: corners.bottomLeft
+        )
+        guard let (u, v) = projective.inverse(x: Double(pixel.x), y: Double(pixel.y)) else { return nil }
+        guard u >= 0, u < 1, v >= 0, v < 1 else { return nil }
         let epsilon = 1e-9
         let sourceX = Int(u * Double(sourceWidth) + epsilon)
         let sourceY = Int(v * Double(sourceHeight) + epsilon)
@@ -1126,7 +1168,14 @@ final class CanvasView: NSView {
         // `mouseUp` below.
         if let activeTransform {
             let point = convert(event.locationInWindow, from: nil)
-            let handle = hitTestTransformHandle(at: point, transform: activeTransform)
+            var handle = hitTestTransformHandle(at: point, transform: activeTransform)
+            // Option+corner is the free-transform / distort gesture (round
+            // 3), Photoshop's own convention — every other handle (move,
+            // edge, rotate) is unaffected by Option and keeps its round 1/2
+            // meaning.
+            if case .some(.corner(let corner)) = handle, event.modifierFlags.contains(.option) {
+                handle = .distort(corner)
+            }
             if event.clickCount == 2, handle == .move {
                 commitLayerTransform()
                 return
@@ -1278,6 +1327,30 @@ final class CanvasView: NSView {
                 }
                 var transform = startTransform
                 transform.rotation = newRotation
+                activeTransform = transform
+            case .distort(let corner):
+                // Updates only the dragged corner's own offset, by the total
+                // screen/canvas-axis movement since the drag began (same
+                // "recompute from `startTransform` plus total movement, not
+                // an incremental per-event delta" convention as every other
+                // handle above) — every other corner, the center, the size,
+                // and the rotation are all left exactly as `startTransform`
+                // had them. No rotation correction here (unlike
+                // `resizeByCorner`/`resizeByEdge`): a distort drag moves the
+                // corner freely in screen space rather than along the
+                // rectangle's local axes, per issue #9's round-3 plan.
+                var transform = startTransform
+                let moved = CGVector(dx: dx, dy: dy)
+                switch corner {
+                case .topLeft:
+                    transform.distortTopLeft = CGVector(dx: startTransform.distortTopLeft.dx + moved.dx, dy: startTransform.distortTopLeft.dy + moved.dy)
+                case .topRight:
+                    transform.distortTopRight = CGVector(dx: startTransform.distortTopRight.dx + moved.dx, dy: startTransform.distortTopRight.dy + moved.dy)
+                case .bottomRight:
+                    transform.distortBottomRight = CGVector(dx: startTransform.distortBottomRight.dx + moved.dx, dy: startTransform.distortBottomRight.dy + moved.dy)
+                case .bottomLeft:
+                    transform.distortBottomLeft = CGVector(dx: startTransform.distortBottomLeft.dx + moved.dx, dy: startTransform.distortBottomLeft.dy + moved.dy)
+                }
                 activeTransform = transform
             }
             needsDisplay = true
