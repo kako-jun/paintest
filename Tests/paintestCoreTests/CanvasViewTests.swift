@@ -426,4 +426,77 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(midPixel?.g, 0)
         XCTAssertEqual(midPixel?.b, 0)
     }
+
+    // MARK: - Pen tool routes through the antialiased path (issue #10)
+    //
+    // `PixelCanvasTests` already covers `drawAntialiasedDot`/
+    // `drawAntialiasedLine` in isolation, but before this pair, nothing
+    // exercised `.pen` through `CanvasView`'s real `mouseDown`/
+    // `mouseDragged` entry points at all — the integration wiring in
+    // `CanvasView.paint(at:)`/`paintLine(from:to:)` that picks the
+    // antialiased path for `.pen` (vs. `setPixel`/`drawLine` for
+    // `.pencil`/`.eraser`) had no test of its own.
+
+    func testMouseDown_withPenActive_paintsWithAntialiasing() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+
+        let targetPoint = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let center = view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)
+        XCTAssertLessThan(center?.r ?? 255, 255, "the pen should have painted with the foreground color at the click point")
+
+        // The defining signature of the antialiased path (vs. `setPixel`'s
+        // hard 0/255 edges): somewhere around the dot's rim there must be a
+        // partially-covered, non-binary value.
+        var foundPartialCoverage = false
+        for y in 3...5 {
+            for x in 3...5 {
+                guard let pixel = view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y) else { continue }
+                if pixel.r != 0, pixel.r != 255 {
+                    foundPartialCoverage = true
+                }
+            }
+        }
+        XCTAssertTrue(foundPartialCoverage, "a pen dot should have a soft, anti-aliased edge — the setPixel path never produces this")
+    }
+
+    func testMouseDragged_withPenActive_paintsAntialiasedLine() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+
+        let startPoint = windowPoint(forPixelCol: 1, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: startPoint, in: view.window!))
+        let dragPoint = windowPoint(forPixelCol: 6, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: view.window!))
+
+        let midpoint = view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)
+        XCTAssertLessThan(midpoint?.r ?? 255, 255, "the stroke should be painted along the dragged path")
+
+        // `drawLine` (pencil/eraser) is exactly 1px wide with hard edges;
+        // `drawAntialiasedLine` (pen) is round-capped and soft-edged
+        // (issue #10's fixed pen line width), so around its rounded end
+        // caps there should be partial (non-binary) coverage instead of
+        // either staying untouched white or being hard-painted black.
+        // (Empirically confirmed: along the straight middle of the stroke
+        // the coverage is a hard 0/255 edge here too, since a horizontal
+        // stroke's vertical extent happens to land exactly on the pixel
+        // grid — it's specifically the round caps at the ends that expose
+        // the anti-aliasing this test is after.)
+        var foundPartialCoverage = false
+        for (x, y) in [(1, 3), (1, 5), (6, 3), (6, 5)] {
+            guard let pixel = view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y) else { continue }
+            if pixel.r != 0, pixel.r != 255 {
+                foundPartialCoverage = true
+            }
+        }
+        XCTAssertTrue(foundPartialCoverage, "an antialiased stroke's round end caps should show partial coverage — drawLine's hard 1px edge never does this")
+    }
 }

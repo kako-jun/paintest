@@ -177,6 +177,63 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off)
     }
 
+    // MARK: - Pen tool exclusive selection (issue #10)
+    //
+    // `ToolboxView` generalized its exclusive-selection bookkeeping from a
+    // hardcoded pencil/eraser pair to a `[Tool: NSButton]` dictionary keyed
+    // by every wired tool (issue #10), but nothing exercised the pen
+    // button itself, nor a full pencil -> eraser -> pen -> pencil cycle
+    // across all three wired buttons at once.
+
+    func testPenClick_firesOnToolSelectedWithPen_andTogglesPressedStates() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let pen = button(toolTip: "ペン", in: view) else {
+            XCTFail("could not find pencil/pen buttons")
+            return
+        }
+        XCTAssertEqual(pencil.state, .on, "precondition: pencil starts pressed by default")
+        var selected: Tool?
+        view.onToolSelected = { selected = $0 }
+
+        pen.performClick(nil)
+
+        XCTAssertEqual(selected, .pen)
+        XCTAssertEqual(pen.state, .on)
+        XCTAssertEqual(pencil.state, .off, "selecting pen must turn the default-on pencil off")
+    }
+
+    func testCyclingThroughAllThreeWiredTools_alwaysLeavesExactlyOneOfAll16ButtonsPressed() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view),
+              let eraser = button(toolTip: "消しゴム", in: view),
+              let pen = button(toolTip: "ペン", in: view) else {
+            XCTFail("could not find pencil/eraser/pen buttons")
+            return
+        }
+
+        func assertExactlyOnePressed(_ label: String) {
+            let pressed = allButtons(in: view).filter { $0.state == .on }
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 16 buttons pressed after \(label)")
+        }
+
+        assertExactlyOnePressed("initial state")
+
+        pencil.performClick(nil)
+        assertExactlyOnePressed("pencil click")
+
+        eraser.performClick(nil)
+        assertExactlyOnePressed("eraser click")
+
+        pen.performClick(nil)
+        assertExactlyOnePressed("pen click")
+
+        pencil.performClick(nil)
+        assertExactlyOnePressed("pencil click again")
+        XCTAssertEqual(pencil.state, .on)
+        XCTAssertEqual(eraser.state, .off)
+        XCTAssertEqual(pen.state, .off)
+    }
+
     // Not independently unit-tested here: `Self.tools` is a private static
     // constant, so exercising `pencilIndex`'s `?? 0` fallback or
     // `buildGrid()`'s odd-count trailing row would require refactoring

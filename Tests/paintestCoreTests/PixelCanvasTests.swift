@@ -145,6 +145,121 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertEqual(farAbove?.r, 255)
     }
 
+    // MARK: - drawAntialiasedDot/Line alpha compositing (issue #10 follow-up)
+    //
+    // The tests above cover the coordinate flip and the basic soft-edge
+    // shape; these cover `drawAntialiased`'s actual "source over
+    // destination" compositing math and its boundary/degenerate inputs.
+    //
+    // Compositing math note: `drawAntialiasedDot`/`Line` fill/stroke with
+    // `color.cgColor` directly, while `setPixel`'s `components(of:)` helper
+    // goes through `color.usingColorSpace(.deviceRGB)` first. For the
+    // colors used below (built via `NSColor(deviceRed:green:blue:alpha:)`,
+    // already in the device RGB space, and plain black/white/gray values
+    // that are invariant across common RGB profiles) the two paths were
+    // empirically confirmed to agree to within a couple of 8-bit levels, so
+    // assertions here use a small `accuracy` tolerance rather than exact
+    // equality — matching how `CanvasViewTests` already tolerates
+    // color-space rounding (`accuracy: 0.01` on a composited color sample)
+    // instead of asserting byte-exact equality there.
+
+    func testDrawAntialiasedDot_srcAlphaZero_leavesCanvasUnchanged() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let fullyTransparent = NSColor(deviceRed: 0.6, green: 0.2, blue: 0.8, alpha: 0)
+
+        canvas.drawAntialiasedDot(at: (x: 6, y: 6), color: fullyTransparent, diameter: 8)
+
+        for y in 0..<12 {
+            for x in 0..<12 {
+                let pixel = canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(pixel?.r, 255, "pixel (\(x),\(y)) should be untouched by a fully transparent color")
+                XCTAssertEqual(pixel?.g, 255, "pixel (\(x),\(y)) should be untouched by a fully transparent color")
+                XCTAssertEqual(pixel?.b, 255, "pixel (\(x),\(y)) should be untouched by a fully transparent color")
+                XCTAssertEqual(pixel?.a, 255, "pixel (\(x),\(y)) should be untouched by a fully transparent color")
+            }
+        }
+    }
+
+    func testDrawAntialiasedDot_translucentColorOverTransparentDestination_resultAlphaEqualsSrcAlpha() {
+        // A fully transparent destination (alpha 0, arbitrary RGB) so
+        // `destAlpha == 0` and the "source over" formula collapses to
+        // "result == source" — the destination must contribute nothing.
+        let canvas = PixelCanvas(width: 12, height: 12, background: NSColor(deviceWhite: 1, alpha: 0))
+        let translucentBlack = NSColor(deviceRed: 0, green: 0, blue: 0, alpha: 0.5)
+
+        canvas.drawAntialiasedDot(at: (x: 6, y: 6), color: translucentBlack, diameter: 8)
+
+        guard let center = canvas.rawPixel(x: 6, y: 6) else {
+            XCTFail("expected a readable center pixel")
+            return
+        }
+        XCTAssertEqual(Double(center.a), 0.5 * 255, accuracy: 3, "result alpha over a fully transparent destination should equal the source's own alpha")
+        XCTAssertEqual(Double(center.r), 0, accuracy: 3, "result color should be exactly the source color; the transparent destination must not contribute")
+    }
+
+    func testDrawAntialiasedDot_translucentColorOverOpaqueBackground_blendsProportionally() {
+        // Black at alpha 0.5 over opaque white: outAlpha = srcAlpha +
+        // destAlpha*(1-srcAlpha) = 0.5 + 1*0.5 = 1.0 (still opaque), and the
+        // resulting gray should sit halfway between black and white.
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let translucentBlack = NSColor(deviceRed: 0, green: 0, blue: 0, alpha: 0.5)
+
+        canvas.drawAntialiasedDot(at: (x: 6, y: 6), color: translucentBlack, diameter: 8)
+
+        guard let center = canvas.rawPixel(x: 6, y: 6) else {
+            XCTFail("expected a readable center pixel")
+            return
+        }
+        XCTAssertEqual(center.a, 255, "compositing a 50%-alpha color over an opaque background must stay fully opaque")
+        XCTAssertEqual(Double(center.r), 127.5, accuracy: 3, "expected outColor = srcAlpha*src + (1-srcAlpha)*dest = 0.5*0 + 0.5*255")
+        XCTAssertEqual(center.r, center.g, "gray blend should keep channels equal")
+        XCTAssertEqual(center.g, center.b, "gray blend should keep channels equal")
+    }
+
+    func testDrawAntialiasedDot_diameterZero_doesNotCrashAndPaintsNothingOrNegligible() {
+        let canvas = PixelCanvas(width: 8, height: 8, background: .white)
+
+        canvas.drawAntialiasedDot(at: (x: 4, y: 4), color: .black, diameter: 0)
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let pixel = canvas.rawPixel(x: x, y: y)
+                XCTAssertGreaterThanOrEqual(pixel?.r ?? 0, 250, "a zero-diameter dot should paint nothing (or only negligible coverage) at (\(x),\(y))")
+            }
+        }
+    }
+
+    func testDrawAntialiasedLine_lineWidthZeroOrNegative_doesNotCrash() {
+        let canvas = PixelCanvas(width: 8, height: 8, background: .white)
+
+        canvas.drawAntialiasedLine(from: (x: 1, y: 4), to: (x: 6, y: 4), color: .black, lineWidth: 0)
+        canvas.drawAntialiasedLine(from: (x: 1, y: 5), to: (x: 6, y: 5), color: .black, lineWidth: -3)
+
+        // Reaching here without a crash/trap is the main assertion; confirm
+        // the canvas is still a normal, usable canvas afterward.
+        canvas.setPixel(x: 0, y: 0, color: .black)
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+    }
+
+    func testDrawAntialiasedDot_centeredOffCanvasEdge_doesNotCrashAndClipsToCanvas() {
+        let canvas = PixelCanvas(width: 10, height: 10, background: .white)
+
+        // Center is off the top-left corner, but the dot is wide enough to
+        // overlap the canvas: should clip in cleanly, no crash, and darken
+        // the corner it overlaps.
+        canvas.drawAntialiasedDot(at: (x: -2, y: -2), color: .black, diameter: 10)
+        let corner = canvas.rawPixel(x: 0, y: 0)
+        XCTAssertLessThan(corner?.r ?? 255, 255, "the overlapping part of the off-canvas dot should still paint the corner it reaches")
+        let farCorner = canvas.rawPixel(x: 9, y: 9)
+        XCTAssertEqual(farCorner?.r, 255, "the far corner, well outside the dot's reach, must stay untouched")
+
+        // Center is entirely outside the canvas with no overlap at all:
+        // should be a no-op, not a crash.
+        canvas.drawAntialiasedDot(at: (x: -100, y: -100), color: .black, diameter: 4)
+        canvas.setPixel(x: 0, y: 0, color: .black) // canvas still usable afterward
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+    }
+
     // MARK: - drawLine
 
     func testDrawLine_horizontal_fillsExactRunAndNothingElse() {
