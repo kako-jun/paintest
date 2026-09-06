@@ -464,4 +464,27 @@ final class LayerStackTests: XCTestCase {
         XCTAssertEqual(duplicate.layers[1].opacity, 0.5)
         XCTAssertEqual(duplicate.layers[2].isVisible, false)
     }
+
+    // MARK: - copy() with 2+ layers: per-layer independence (issue #19 test list 4)
+
+    func testCopy_twoOrMoreLayers_editingOneLayerOfTheCopyLeavesTheOtherCopyLayerAndTheOriginalUntouched() {
+        // Each layer gets its own distinct, opaque fill color (rather than
+        // relying on `addLayer()`'s default `.clear` background, which would
+        // make an untouched layer indistinguishable from a wrongly-aliased
+        // one at this same pixel) so a genuine cross-layer aliasing bug and
+        // an merely-still-blank layer can't be confused with each other.
+        let stack = LayerStack(width: 2, height: 2, background: .white) // layer 0: white
+        stack.addLayer() // layer 1
+        stack.layers[1].canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // green
+        stack.addLayer() // layer 2
+        stack.layers[2].canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1)) // blue
+        let duplicate = stack.copy()
+
+        duplicate.layers[1].canvas.setPixel(x: 0, y: 0, color: .black)
+
+        XCTAssertEqual(duplicate.layers[1].canvas.rawPixel(x: 0, y: 0)?.r, 0, "the edited layer of the copy reflects the edit")
+        XCTAssertEqual(duplicate.layers[0].canvas.rawPixel(x: 0, y: 0)?.r, 255, "an untouched layer (white) of the SAME copy must be unaffected")
+        XCTAssertEqual(duplicate.layers[2].canvas.rawPixel(x: 0, y: 0)?.b, 255, "another untouched layer (blue) of the same copy must be unaffected")
+        XCTAssertEqual(stack.layers[1].canvas.rawPixel(x: 0, y: 0)?.g, 255, "the original stack's corresponding layer (green) must be unaffected")
+    }
 }

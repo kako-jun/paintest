@@ -115,4 +115,228 @@ final class HistoryManagerTests: XCTestCase {
         XCTAssertFalse(history.canRedo)
         XCTAssertTrue(history.canUndo)
     }
+
+    // MARK: - jump(to:) aliasing (issue #19 round 2, test list 1-2)
+
+    func testJump_returnsACopy_mutatingItDoesNotCorruptAnyStoredEntry() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0: white
+        stack.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
+        history.record(stack, label: "黒") // entry 1: black
+
+        guard let jumped = history.jump(to: 0) else {
+            XCTFail("expected jump(to: 0) to return entry 0")
+            return
+        }
+        jumped.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
+
+        XCTAssertEqual(blackPixel(of: history.entries[0].layerStack), 255, "mutating the jump destination's returned copy must not corrupt that stored entry")
+        XCTAssertEqual(blackPixel(of: history.entries[1].layerStack), 0, "...or any other stored entry")
+    }
+
+    func testJump_thenRecord_discardsEverythingAfterTheJumpTarget() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0
+        history.record(stack, label: "A") // entry 1
+        history.record(stack, label: "B") // entry 2
+        _ = history.jump(to: 0) // jump back to entry 0
+
+        history.record(stack, label: "C") // must discard "A" and "B" (everything past entry 0)
+
+        XCTAssertEqual(history.entries.map { $0.label }, ["初期状態", "C"])
+        XCTAssertFalse(history.canRedo)
+    }
+
+    // MARK: - record() copy-in across two chained records (test list 3)
+
+    func testRecord_mutatingLiveStackBetweenTwoRecords_leavesTheFirstRecordedEntryIntact() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack)
+        history.record(stack, label: "A") // entry 1: white
+        stack.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
+        history.record(stack, label: "B") // entry 2: black
+
+        XCTAssertEqual(blackPixel(of: history.entries[1].layerStack), 255, "entry \"A\" must not see the edit made before recording \"B\"")
+        XCTAssertEqual(blackPixel(of: history.entries[2].layerStack), 0)
+    }
+
+    // MARK: - undo()'s returned stack: layer add/remove must not reach the stored entry (test list 5)
+
+    func testUndo_addingOrRemovingLayersOnTheReturnedStack_doesNotAffectTheStoredEntrysLayers() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer() // 2 layers
+        let history = HistoryManager(initialLayerStack: stack) // entry 0: 2 layers
+        history.record(stack, label: "A") // entry 1: 2 layers
+
+        guard let restored = history.undo() else {
+            XCTFail("expected undo() to return entry 0")
+            return
+        }
+        restored.addLayer()
+        restored.removeLayer(at: 0)
+
+        XCTAssertEqual(history.entries[0].layerStack.layers.count, 2, "adding/removing layers on the stack undo() handed back must not reach the stored entry's own layers array")
+    }
+
+    // MARK: - Normal round-trip semantics (test list 6-7)
+
+    func testUndoRedoUndo_roundTrip_contentsStayConsistentAtEachStep() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0: white
+        stack.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
+        history.record(stack, label: "黒") // entry 1: black
+
+        XCTAssertEqual(blackPixel(of: history.undo()!), 255, "undo() -> entry 0 (white)")
+        XCTAssertEqual(blackPixel(of: history.redo()!), 0, "redo() -> entry 1 (black)")
+        XCTAssertEqual(blackPixel(of: history.undo()!), 255, "undo() again -> entry 0 (white)")
+    }
+
+    func testJump_toCurrentIndex_succeedsWithNoSideEffectOnCurrentIndex() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack)
+        history.record(stack, label: "A")
+        let before = history.currentIndex
+
+        let jumped = history.jump(to: history.currentIndex)
+
+        XCTAssertNotNil(jumped)
+        XCTAssertEqual(history.currentIndex, before)
+    }
+
+    // MARK: - jump(to:) out-of-range indices (test list 8-9)
+
+    func testJump_negativeIndex_returnsNilAndLeavesCurrentIndexUnchanged() {
+        let history = HistoryManager(initialLayerStack: LayerStack(width: 2, height: 2))
+        history.record(LayerStack(width: 2, height: 2), label: "A")
+        let before = history.currentIndex
+
+        XCTAssertNil(history.jump(to: -1))
+        XCTAssertEqual(history.currentIndex, before)
+    }
+
+    func testJump_indexEqualToEntriesCount_returnsNilAndLeavesCurrentIndexUnchanged() {
+        let history = HistoryManager(initialLayerStack: LayerStack(width: 2, height: 2))
+        history.record(LayerStack(width: 2, height: 2), label: "A")
+        let before = history.currentIndex
+
+        XCTAssertNil(history.jump(to: history.entries.count))
+        XCTAssertEqual(history.currentIndex, before)
+    }
+
+    // Test list 10 ("entries.count == 1 -> undo() is nil, canUndo is false") is
+    // already exhaustively covered by `testInitialState_cannotUndoOrRedo`
+    // above (a freshly-initialized history always has exactly 1 entry) — not
+    // duplicated here.
+
+    // MARK: - Capacity boundary values (test list 11-14)
+
+    func testRecord_upToExactlyCapacity_noEvictionYet() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack, capacity: 3) // entry 0
+        history.record(stack, label: "A") // entry 1
+        history.record(stack, label: "B") // entry 2: exactly at capacity (3 entries)
+
+        XCTAssertEqual(history.entries.map { $0.label }, ["初期状態", "A", "B"], "reaching capacity exactly must not evict yet")
+    }
+
+    func testRecord_repeatedlyBeyondCapacity_alwaysKeepsEntryCountWithinCapacityAndCurrentIndexAtTheEnd() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack, capacity: 3)
+        for i in 0..<20 {
+            history.record(stack, label: "記録\(i)")
+            XCTAssertLessThanOrEqual(history.entries.count, 3)
+            XCTAssertEqual(history.currentIndex, history.entries.count - 1)
+        }
+    }
+
+    func testUndo_repeatedlyFromTheMiddle_reachesTheStart_canUndoBecomesFalse() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0
+        history.record(stack, label: "A") // entry 1
+        history.record(stack, label: "B") // entry 2
+
+        _ = history.undo() // entry 1
+        _ = history.undo() // entry 0
+
+        XCTAssertEqual(history.currentIndex, 0)
+        XCTAssertFalse(history.canUndo)
+    }
+
+    func testInit_capacityZeroOrNegative_isClampedToOne() {
+        let zero = HistoryManager(initialLayerStack: LayerStack(width: 2, height: 2), capacity: 0)
+        let negative = HistoryManager(initialLayerStack: LayerStack(width: 2, height: 2), capacity: -5)
+
+        XCTAssertEqual(zero.capacity, 1)
+        XCTAssertEqual(negative.capacity, 1)
+    }
+
+    // MARK: - Decision table: record/undo/redo/jump operation sequences (test list 15-19)
+
+    func testDecisionTable_recordRecordJumpToOldEntryRecord_thatRecordAlsoDiscardsTheFuture() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0
+        history.record(stack, label: "A") // entry 1
+        history.record(stack, label: "B") // entry 2
+        _ = history.jump(to: 0) // jump back to entry 0
+
+        history.record(stack, label: "C") // discards "A" and "B"
+
+        XCTAssertEqual(history.entries.map { $0.label }, ["初期状態", "C"])
+    }
+
+    func testDecisionTable_recordUndoUndoRedoRecord_discardsEverythingAfterTheCurrentPosition() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0
+        history.record(stack, label: "A") // entry 1
+        history.record(stack, label: "B") // entry 2
+        _ = history.undo() // entry 1
+        _ = history.undo() // entry 0
+        _ = history.redo() // entry 1
+
+        history.record(stack, label: "C") // discards "B" (it was ahead of entry 1)
+
+        XCTAssertEqual(history.entries.map { $0.label }, ["初期状態", "A", "C"])
+    }
+
+    func testDecisionTable_jumpToStartThenEndThenUndo_undoActsRelativeToTheLastJump() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0
+        history.record(stack, label: "A") // entry 1
+        history.record(stack, label: "B") // entry 2
+        _ = history.jump(to: 0) // jump to entry 0 (先頭)
+        _ = history.jump(to: 2) // jump to entry 2 (末尾)
+
+        let undone = history.undo() // must step back to entry 1 ("A") relative to the last jump
+
+        XCTAssertNotNil(undone)
+        XCTAssertEqual(history.currentIndex, 1)
+    }
+
+    func testDecisionTable_undoOnSingleEntryHistoryBeforeAnyRecord_failsCleanly_thenRecordWorksNormally() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0 only
+
+        XCTAssertNil(history.undo(), "undo() on a single-entry (pre-record) history must fail without side effects")
+
+        history.record(stack, label: "A")
+
+        XCTAssertEqual(history.entries.map { $0.label }, ["初期状態", "A"])
+        XCTAssertEqual(history.currentIndex, 1)
+    }
+
+    func testDecisionTable_multipleJumpsBackAndForth_neverMutatesTheEntriesArrayItself() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0
+        history.record(stack, label: "A") // entry 1
+        history.record(stack, label: "B") // entry 2
+        history.record(stack, label: "C") // entry 3
+
+        _ = history.jump(to: 1) // 中間
+        _ = history.jump(to: 0) // 過去
+        _ = history.jump(to: 3) // 未来
+        _ = history.jump(to: 2)
+        _ = history.jump(to: 1)
+
+        XCTAssertEqual(history.entries.map { $0.label }, ["初期状態", "A", "B", "C"], "jump() is non-destructive — repeated jumping must never alter the entries array itself")
+    }
 }
