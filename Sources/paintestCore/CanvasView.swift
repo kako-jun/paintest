@@ -545,60 +545,116 @@ final class CanvasView: NSView {
     /// locks the aspect ratio: whichever axis moved further (by raw pixel
     /// distance) drives a single scale factor applied to both axes, rather
     /// than letting each axis resize independently.
+    ///
+    /// `dx`/`dy` arrive in screen/canvas axes (see `mouseDragged`), but
+    /// `width`/`height`/`centerX`/`centerY` describe the rectangle in its own
+    /// *local*, unrotated frame — round 1 got away with feeding screen-axis
+    /// deltas straight into the axis-aligned math below because `rotation`
+    /// was always `0`, making the two frames identical. Round 2 lets
+    /// `rotation` be nonzero, so a screen-axis drag has to be rotated by
+    /// `-start.rotation` first to recover the local-frame `(localDx,
+    /// localDy)` this function's math actually expects — otherwise a
+    /// diagonal (screen-axis) drag on a tilted rectangle changes `width` and
+    /// `height` by the wrong, screen-relative amounts and shears the
+    /// rectangle into a parallelogram instead of scaling it in place. The
+    /// resulting local-frame center shift is rotated back by `+start.
+    /// rotation` at the end to land back in screen/canvas coordinates before
+    /// being added to `centerX`/`centerY`. Both rotations are identity when
+    /// `rotation == 0`, so this is byte-for-byte round 1's behavior in that
+    /// case.
     private static func resizeByCorner(_ corner: TransformCorner, start: LayerTransform, dx: Double, dy: Double, keepAspect: Bool) -> LayerTransform {
-        let corners = start.corners
+        let cosR = cos(start.rotation)
+        let sinR = sin(start.rotation)
+        // Inverse rotation (by `-start.rotation`) — same formula
+        // `sourcePixel(forDestination:transform:sourceWidth:sourceHeight:)`
+        // uses to recover a local offset from a screen-space one.
+        let localDx = dx * cosR + dy * sinR
+        let localDy = -dx * sinR + dy * cosR
+
+        let halfWidth = start.width / 2
+        let halfHeight = start.height / 2
+        // The local-frame corners, relative to the rectangle's own center —
+        // i.e. exactly what `start.corners` would be if `start.rotation`
+        // were `0`.
         let (draggedStart, anchor): (CGPoint, CGPoint)
         switch corner {
-        case .topLeft: (draggedStart, anchor) = (corners.topLeft, corners.bottomRight)
-        case .topRight: (draggedStart, anchor) = (corners.topRight, corners.bottomLeft)
-        case .bottomRight: (draggedStart, anchor) = (corners.bottomRight, corners.topLeft)
-        case .bottomLeft: (draggedStart, anchor) = (corners.bottomLeft, corners.topRight)
+        case .topLeft: (draggedStart, anchor) = (CGPoint(x: -halfWidth, y: -halfHeight), CGPoint(x: halfWidth, y: halfHeight))
+        case .topRight: (draggedStart, anchor) = (CGPoint(x: halfWidth, y: -halfHeight), CGPoint(x: -halfWidth, y: halfHeight))
+        case .bottomRight: (draggedStart, anchor) = (CGPoint(x: halfWidth, y: halfHeight), CGPoint(x: -halfWidth, y: -halfHeight))
+        case .bottomLeft: (draggedStart, anchor) = (CGPoint(x: -halfWidth, y: halfHeight), CGPoint(x: halfWidth, y: -halfHeight))
         }
 
-        var (width, centerX) = resizedAxis(anchor: Double(anchor.x), draggedStart: Double(draggedStart.x), delta: dx)
-        var (height, centerY) = resizedAxis(anchor: Double(anchor.y), draggedStart: Double(draggedStart.y), delta: dy)
+        var (width, localCenterX) = resizedAxis(anchor: Double(anchor.x), draggedStart: Double(draggedStart.x), delta: localDx)
+        var (height, localCenterY) = resizedAxis(anchor: Double(anchor.y), draggedStart: Double(draggedStart.y), delta: localDy)
 
         if keepAspect, start.width > 0, start.height > 0 {
-            let scale = abs(dx) >= abs(dy) ? width / start.width : height / start.height
+            let scale = abs(localDx) >= abs(localDy) ? width / start.width : height / start.height
             width = max(transformMinimumSize, start.width * scale)
             height = max(transformMinimumSize, start.height * scale)
-            let signX: Double = Double(draggedStart.x) + dx >= Double(anchor.x) ? 1 : -1
-            let signY: Double = Double(draggedStart.y) + dy >= Double(anchor.y) ? 1 : -1
-            centerX = (Double(anchor.x) + (Double(anchor.x) + signX * width)) / 2
-            centerY = (Double(anchor.y) + (Double(anchor.y) + signY * height)) / 2
+            let signX: Double = Double(draggedStart.x) + localDx >= Double(anchor.x) ? 1 : -1
+            let signY: Double = Double(draggedStart.y) + localDy >= Double(anchor.y) ? 1 : -1
+            localCenterX = (Double(anchor.x) + (Double(anchor.x) + signX * width)) / 2
+            localCenterY = (Double(anchor.y) + (Double(anchor.y) + signY * height)) / 2
         }
+
+        // Forward rotation (by `+start.rotation`) — same convention
+        // `LayerTransform.corners` uses to place a local offset back into
+        // canvas space — turning the local-frame center shift back into a
+        // screen/canvas-space one before it's added to `start.centerX`/
+        // `centerY` below.
+        let offsetX = localCenterX * cosR - localCenterY * sinR
+        let offsetY = localCenterX * sinR + localCenterY * cosR
 
         var result = start
         result.width = width
         result.height = height
-        result.centerX = centerX
-        result.centerY = centerY
+        result.centerX = start.centerX + offsetX
+        result.centerY = start.centerY + offsetY
         return result
     }
 
     /// Resizes `start` along a single axis by dragging `edge`'s midpoint,
     /// holding the opposite edge fixed as the anchor — left/right handles
-    /// change only `width`/`centerX`, top/bottom only `height`/`centerY`.
+    /// change only `width`/`centerX` (in `start`'s local frame — see below),
+    /// top/bottom only `height`/`centerY`.
+    ///
+    /// Same local-frame rotation fix as `resizeByCorner` above: `dx`/`dy`
+    /// are rotated by `-start.rotation` into the rectangle's local frame
+    /// before being used as a size delta, and the resulting local-frame
+    /// center shift is rotated back by `+start.rotation` into screen/canvas
+    /// space before being applied to `centerX`/`centerY`. Identity in both
+    /// directions when `rotation == 0`.
     private static func resizeByEdge(_ edge: TransformEdge, start: LayerTransform, dx: Double, dy: Double) -> LayerTransform {
-        let corners = start.corners
+        let cosR = cos(start.rotation)
+        let sinR = sin(start.rotation)
+        let localDx = dx * cosR + dy * sinR
+        let localDy = -dx * sinR + dy * cosR
+
+        let halfWidth = start.width / 2
+        let halfHeight = start.height / 2
+
         var result = start
         switch edge {
         case .left:
-            let (width, centerX) = resizedAxis(anchor: Double(corners.topRight.x), draggedStart: Double(corners.topLeft.x), delta: dx)
+            let (width, localCenterX) = resizedAxis(anchor: halfWidth, draggedStart: -halfWidth, delta: localDx)
             result.width = width
-            result.centerX = centerX
+            result.centerX = start.centerX + localCenterX * cosR
+            result.centerY = start.centerY + localCenterX * sinR
         case .right:
-            let (width, centerX) = resizedAxis(anchor: Double(corners.topLeft.x), draggedStart: Double(corners.topRight.x), delta: dx)
+            let (width, localCenterX) = resizedAxis(anchor: -halfWidth, draggedStart: halfWidth, delta: localDx)
             result.width = width
-            result.centerX = centerX
+            result.centerX = start.centerX + localCenterX * cosR
+            result.centerY = start.centerY + localCenterX * sinR
         case .top:
-            let (height, centerY) = resizedAxis(anchor: Double(corners.bottomLeft.y), draggedStart: Double(corners.topLeft.y), delta: dy)
+            let (height, localCenterY) = resizedAxis(anchor: halfHeight, draggedStart: -halfHeight, delta: localDy)
             result.height = height
-            result.centerY = centerY
+            result.centerX = start.centerX - localCenterY * sinR
+            result.centerY = start.centerY + localCenterY * cosR
         case .bottom:
-            let (height, centerY) = resizedAxis(anchor: Double(corners.topLeft.y), draggedStart: Double(corners.bottomLeft.y), delta: dy)
+            let (height, localCenterY) = resizedAxis(anchor: -halfHeight, draggedStart: halfHeight, delta: localDy)
             result.height = height
-            result.centerY = centerY
+            result.centerX = start.centerX - localCenterY * sinR
+            result.centerY = start.centerY + localCenterY * cosR
         }
         return result
     }

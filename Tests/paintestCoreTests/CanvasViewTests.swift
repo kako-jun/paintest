@@ -1928,4 +1928,201 @@ final class CanvasViewTests: XCTestCase {
         assertPixel(3, 1, equalsBefore: 1, 3)
         assertPixel(1, 3, equalsBefore: 3, 1)
     }
+
+    // MARK: - Layer transform: resizing after rotation (issue #9, round 2
+    // follow-up fix)
+    //
+    // Round 2's own completion report flagged this as a known bug:
+    // `resizeByCorner`/`resizeByEdge` fed the mouse's raw screen-axis drag
+    // deltas straight into `width`/`height`/`centerX`/`centerY` math that
+    // assumes those axes match the rectangle's own — true only while
+    // `rotation == 0`. Once a rectangle is rotated, a screen-axis drag on a
+    // corner/edge handle has to be rotated into the rectangle's *local*
+    // frame first (and the resulting center shift rotated back out again)
+    // or the rectangle shears into a parallelogram instead of staying a
+    // rectangle. Both tests below rotate the identity rectangle by exactly
+    // 90° first (clean, non-fractional geometry — no `cos`/`sin` rounding to
+    // fuzz pixel-boundary assertions), then drag a resize handle, then
+    // assert the *actual* committed rasterization against
+    // `CanvasView.sourcePixel`'s already-trusted (see the 90°/180°/identity
+    // tests above) inverse mapping fed the transform this fix's own algebra
+    // predicts — which only matches if the fix is doing its local-frame
+    // rotation math rather than round 1's raw screen-axis math.
+
+    /// Corner-handle case. Starting from an 8x8 identity transform
+    /// (`centerX == centerY == 4`, `width == height == 8`) rotated 90°, the
+    /// `topLeft`-labeled corner physically sits at canvas `(8, 0)` (a 90°
+    /// turn swaps which physical corner each label sits at) with the
+    /// diagonally opposite `bottomRight` anchor at `(0, 8)`.
+    ///
+    /// Dragging that corner from `(8, 0)` straight down the screen y-axis to
+    /// `(8, 4)` — screen `dx == 0`, `dy == 4` — is, once rotated into the
+    /// rectangle's local frame, a pure `localDx == 4, localDy == 0` move:
+    /// only the local `width` axis (currently spanning local x
+    /// `-4...4`) moves, from `-4` to `0`, halving `width` from 8 to 4 while
+    /// `height` and `rotation` stay exactly as the rotate step left them.
+    /// Working through `resizeByCorner`'s anchor-relative math by hand (and
+    /// confirmed by running it) that lands on `centerX = 4, centerY = 6,
+    /// width = 4, height = 8, rotation = π/2` — worked out independently
+    /// below via `LayerTransform.corners` as a self-consistency check: the
+    /// dragged corner's new physical position falls out to exactly `(8, 4)`,
+    /// the same point the mouse was dragged to.
+    ///
+    /// A pre-fix `resizeByCorner` applying `(dx, dy) == (0, 4)` directly to
+    /// the (already-rotated) screen-space corners would instead have left
+    /// `width` at 8 and shrunk `height` to 4 — the two fields swapped,
+    /// because at exactly 90° the screen axes and the rectangle's local axes
+    /// are exactly swapped — so this test only passes with the fix in
+    /// place.
+    func testLayerTransform_resizeCornerAfterRotation_scalesLocalWidthAxisWithoutShearing() {
+        let zoomScale = 8
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        // `makeViewInWindow`'s `zoomScale` only sizes the test window/frame
+        // — `CanvasView`'s own `zoomScale` (which the rotate/resize math
+        // below actually reads) defaults to 4 regardless, so it has to be
+        // set explicitly to match or every view-space distance/angle
+        // computed from `transformWindowPoint` below would be off by a
+        // 4-vs-8 scale factor.
+        view.setZoomScale(zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.6, alpha: 1))
+            }
+        }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 {
+            before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! })
+        }
+
+        view.beginLayerTransform()
+
+        // Step 1: rotate the identity rectangle by exactly 90°, the same
+        // rotate-ring gesture as the half-circle test above, but a quarter
+        // turn so step 2's corner drag lands on clean integer canvas
+        // coordinates. Center (4, 4); grabbing 1 canvas pixel diagonally
+        // outside the top-left corner (0, 0) — offset (-5, -5) from center —
+        // and dragging to the point at exactly +90° around the center at the
+        // same radius — offset (5, -5), i.e. canvas (9, -1) — turns the
+        // rectangle exactly 90° (Shift locks it to the nearest 15°, so any
+        // small floating-point slop in this hand-picked point still snaps
+        // cleanly to π/2).
+        let rotateDown = transformWindowPoint(canvasX: -1, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let rotateDrag = transformWindowPoint(canvasX: 9, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: rotateDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: rotateDrag, in: window, modifierFlags: [.shift]))
+        view.mouseUp(with: mouseUpEvent(at: rotateDrag, in: window))
+
+        // Step 2: the rectangle is now rotated 90°, so its `topLeft`-labeled
+        // corner sits at physical canvas (8, 0) (see this test's doc
+        // comment). Drag it to (8, 4).
+        let cornerDown = transformWindowPoint(canvasX: 8, canvasY: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let cornerDrag = transformWindowPoint(canvasX: 8, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: cornerDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: cornerDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: cornerDrag, in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        var expected = LayerTransform.identity(width: 8, height: 8)
+        expected.centerX = 4
+        expected.centerY = 6
+        expected.width = 4
+        expected.height = 8
+        expected.rotation = .pi / 2
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 8, sourceHeight: 8) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual?.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent (outside the resized rectangle)")
+                }
+            }
+        }
+    }
+
+    /// Edge-handle case, same setup and same rotate-90°-first approach as
+    /// the corner test above. After the rotate step (identity 8x8, then
+    /// rotated 90°), the `top`-labeled edge handle physically sits at canvas
+    /// `(8, 4)`.
+    ///
+    /// Dragging it to `(4, 4)` — screen `dx == -4, dy == 0` — is, rotated
+    /// into the local frame, a pure `localDy == 4` move: only the local
+    /// `height` axis (spanning local y `-4...4`) moves, from `-4` to `0`,
+    /// halving `height` from 8 to 4 while `width` and `rotation` are left
+    /// untouched. Worked out by hand (and confirmed by running it) that
+    /// lands on `centerX = 2, centerY = 4, width = 8, height = 4,
+    /// rotation = π/2`.
+    ///
+    /// A pre-fix `resizeByEdge` applying `(dx, dy) == (-4, 0)` directly to
+    /// the screen axes would have read this as a `left`/`right`-style
+    /// horizontal move on the (rotated) rectangle instead of shrinking its
+    /// local height, producing different `width`/`height`/`center` values
+    /// than the ones asserted here — so, like the corner test, this only
+    /// passes with the fix in place.
+    func testLayerTransform_resizeTopEdgeAfterRotation_scalesLocalHeightAxisWithoutShearing() {
+        let zoomScale = 8
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        // See `testLayerTransform_resizeCornerAfterRotation_...` above for
+        // why this explicit `setZoomScale` call is required.
+        view.setZoomScale(zoomScale)
+        let window = view.window!
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.6, alpha: 1))
+            }
+        }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 {
+            before.append((0..<8).map { canvas.rawPixel(x: $0, y: y)! })
+        }
+
+        view.beginLayerTransform()
+
+        let rotateDown = transformWindowPoint(canvasX: -1, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let rotateDrag = transformWindowPoint(canvasX: 9, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: rotateDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: rotateDrag, in: window, modifierFlags: [.shift]))
+        view.mouseUp(with: mouseUpEvent(at: rotateDrag, in: window))
+
+        // The rectangle is now rotated 90°, so its `top`-labeled edge
+        // handle's midpoint sits at physical canvas (8, 4).
+        let edgeDown = transformWindowPoint(canvasX: 8, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let edgeDrag = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: edgeDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: edgeDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: edgeDrag, in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        var expected = LayerTransform.identity(width: 8, height: 8)
+        expected.centerX = 2
+        expected.centerY = 4
+        expected.width = 8
+        expected.height = 4
+        expected.rotation = .pi / 2
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                if let source = CanvasView.sourcePixel(forDestination: (x, y), transform: expected, sourceWidth: 8, sourceHeight: 8) {
+                    let expectedPixel = before[source.y][source.x]
+                    XCTAssertEqual(actual?.r, expectedPixel.r, "x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expectedPixel.g, "x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expectedPixel.b, "x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expectedPixel.a, "x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "x=\(x) y=\(y) should be left transparent (outside the resized rectangle)")
+                }
+            }
+        }
+    }
 }
