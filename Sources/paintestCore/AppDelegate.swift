@@ -16,7 +16,7 @@ public func runPaintestApp() {
     app.run()
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var window: NSWindow!
     private var canvasView: CanvasView!
     private var scrollView: NSScrollView!
@@ -153,6 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // never merely from switching tools or tabs — the correct
             // "dirty" signal for issue #4's unsaved-changes tracking.
             self?.documentManager.activeDocument.isDirty = true
+        }
+        // Records an undo/redo checkpoint at the end of every completed
+        // editing gesture (issue #19) — see `CanvasView.onEditCompleted`'s
+        // own doc comment for exactly which gestures fire this.
+        canvasView.onEditCompleted = { [weak self] label in
+            self?.recordHistoryCheckpoint(label: label)
         }
 
         scrollView = NSScrollView()
@@ -391,6 +397,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Layer add/remove/duplicate/reorder/opacity/visibility changes
             // are content edits too, same as a pencil stroke (issue #4).
             self?.documentManager.activeDocument.isDirty = true
+            // Same content-edit treatment for undo/redo (issue #19). Round 1
+            // uses one generic "レイヤー操作" label for every kind of layer
+            // panel change rather than distinguishing add/remove/reorder/
+            // opacity/visibility — finer-grained labels are round 2's call.
+            self?.recordHistoryCheckpoint(label: "レイヤー操作")
         }
         // Selecting a different layer row is not a content edit (issue #4
         // self-review must): redraw so the canvas reflects the new active
@@ -567,7 +578,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (issue #11) — two same-labeled-in-spirit items on two different
         // menus looked like a bug, so the dead placeholder is dropped and
         // 選択範囲's own item is the single real entry point.
-        mainMenu.addItem(makeMenuItem(title: "編集", placeholders: ["元に戻す", "切り取り", "コピー", "貼り付け"]))
+        // "元に戻す"/"やり直す" are wired to real undo/redo (issue #19);
+        // 切り取り/コピー/貼り付け stay decorative placeholders, out of this
+        // issue's scope. "やり直す"'s keyEquivalent is uppercase "Z" so Cmd+Z
+        // maps to 元に戻す and Shift+Cmd+Z maps to やり直す — `NSMenu` derives
+        // the Shift modifier automatically from an uppercase keyEquivalent
+        // letter, the same convention macOS apps use for this exact pairing.
+        let editMenuItem = makeMenuItem(title: "編集", items: [
+            ("元に戻す", #selector(undo), "z"),
+            ("やり直す", #selector(redo), "Z")
+        ], placeholders: ["切り取り", "コピー", "貼り付け"])
+        mainMenu.addItem(editMenuItem)
 
         mainMenu.addItem(makeMenuItem(title: "表示", items: [
             ("拡大", #selector(zoomIn), "+"),
@@ -669,6 +690,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can't change in between.
 
         displayedDocument = document
+    }
+
+    // MARK: - NSMenuItemValidation (issue #19)
+
+    /// Grays out "元に戻す"/"やり直す" when there's nothing left to undo/redo
+    /// in the active document's history; every other menu item stays
+    /// enabled, unchanged from before this conformance was added.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(undo):
+            return documentManager?.activeDocument.history.canUndo ?? false
+        case #selector(redo):
+            return documentManager?.activeDocument.history.canRedo ?? false
+        default:
+            return true
+        }
+    }
+
+    // MARK: - History / Undo / Redo (issue #19)
+
+    /// Records the currently displayed document's `layerStack` as a new
+    /// history checkpoint. Called from `canvasView.onEditCompleted` (pencil/
+    /// eraser/pen strokes, selection confirms, layer transform commit) and
+    /// from `layerPanelView.onChange` (layer add/remove/reorder/opacity/
+    /// visibility) — every place this app currently considers a "content
+    /// edit" for `isDirty` tracking also gets a history checkpoint here.
+    private func recordHistoryCheckpoint(label: String) {
+        let document = documentManager.activeDocument
+        document.history.record(document.layerStack, label: label)
+    }
+
+    /// "元に戻す" (Cmd+Z). An in-progress layer transform is cancelled first
+    /// (not committed) — Photoshop's own convention: undoing while
+    /// free-transforming abandons the in-progress adjustment rather than
+    /// baking it in first, since the transform itself was never recorded as
+    /// its own history entry until `commitLayerTransform()` runs.
+    @objc private func undo() {
+        if canvasView.isTransforming { canvasView.cancelLayerTransform() }
+        guard let restored = documentManager.activeDocument.history.undo() else { return }
+        applyRestoredLayerStack(restored)
+    }
+
+    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform handling as
+    /// `undo()` above.
+    @objc private func redo() {
+        if canvasView.isTransforming { canvasView.cancelLayerTransform() }
+        guard let restored = documentManager.activeDocument.history.redo() else { return }
+        applyRestoredLayerStack(restored)
+    }
+
+    /// Adopts `layerStack` (already a fresh deep copy handed back by
+    /// `HistoryManager.undo()`/`redo()`) as the active document's live
+    /// state, and rewires every view that holds a reference to the old
+    /// `LayerStack` — same set of updates `activateActiveDocument()` does
+    /// when swapping in a different document's stack, minus the
+    /// zoom/selection/window-title bookkeeping that only applies when the
+    /// *document* changes, not just its content.
+    private func applyRestoredLayerStack(_ layerStack: LayerStack) {
+        documentManager.activeDocument.layerStack = layerStack
+        canvasView.replaceLayerStack(layerStack)
+        layerPanelView.replaceLayerStack(layerStack)
+        documentTabBarView.reload()
+        canvasView.needsDisplay = true
     }
 
     // MARK: - Selection menu (issue #11)
