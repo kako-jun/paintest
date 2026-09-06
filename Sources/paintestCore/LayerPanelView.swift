@@ -49,6 +49,27 @@ final class LayerPanelView: NSView {
     /// must: selecting a different layer in a saved document was wrongly
     /// popping the unsaved-changes dialog).
     var onSelectionChanged: (() -> Void)?
+    /// Fired right before `layerStack.activeLayerIndex` is about to change
+    /// as a result of a user action here — `selectLayer(at:)` (clicking a
+    /// different row) and the add/duplicate/remove buttons, all of which
+    /// reassign `activeLayerIndex` themselves (see `LayerStack.addLayer()`/
+    /// `duplicateLayer(at:)`/`removeLayer(at:)`) — but NOT
+    /// `moveLayerUpTapped()`/`moveLayerDownTapped()` (reordering leaves the
+    /// active layer *object* unchanged, even though its numeric index
+    /// shifts) or `visibilityToggled(_:)`/`opacitySliderChanged()`
+    /// (attribute-only edits that never touch which layer is active).
+    ///
+    /// Exists so `AppDelegate` can auto-confirm an in-progress layer
+    /// transform before its target layer is swapped out from under it
+    /// (issue #9 review must-1) — `CanvasView.commitLayerTransform()`
+    /// writes into whatever `layerStack.activeLayer` is *at confirm time*,
+    /// so it has to run while that's still the layer the transform actually
+    /// belongs to, not after this panel has already moved on to a
+    /// different one. Named "will" (not "did") specifically because the
+    /// confirm has to happen before the change, mirroring
+    /// `AppDelegate.activateActiveDocument()`'s own placement of its
+    /// auto-confirm check ahead of `canvasView.replaceLayerStack(...)`.
+    var willChangeActiveLayer: (() -> Void)?
 
     private let rowsStack = FlippedStackView()
     private let opacitySlider = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
@@ -271,6 +292,7 @@ final class LayerPanelView: NSView {
 
     private func selectLayer(at index: Int) {
         guard layerStack.layers.indices.contains(index) else { return }
+        willChangeActiveLayer?()
         layerStack.activeLayerIndex = index
         reload()
         // Selection only, not a content change (issue #4 self-review must):
@@ -282,18 +304,21 @@ final class LayerPanelView: NSView {
     // MARK: - Actions
 
     @objc private func addLayerTapped() {
+        willChangeActiveLayer?()
         layerStack.addLayer()
         reload()
         onChange?()
     }
 
     @objc private func removeLayerTapped() {
+        willChangeActiveLayer?()
         layerStack.removeLayer(at: layerStack.activeLayerIndex)
         reload()
         onChange?()
     }
 
     @objc private func duplicateLayerTapped() {
+        willChangeActiveLayer?()
         layerStack.duplicateLayer(at: layerStack.activeLayerIndex)
         reload()
         onChange?()

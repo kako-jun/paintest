@@ -132,7 +132,17 @@ final class LayerStack {
     /// on the compositing context itself, mirroring `CanvasView`'s existing
     /// "no anti-aliasing, no interpolation" policy so the flattened result
     /// stays exactly as dot-exact as any individual layer.
-    func compositeImage() -> CGImage? {
+    ///
+    /// `excludingLayerAtIndex` (issue #9) skips one layer's own contents
+    /// entirely, still compositing every other visible layer normally.
+    /// `CanvasView` uses this while a layer transform is in progress: the
+    /// active layer's *unmoved* pixels would otherwise show through
+    /// underneath the transform's live preview (drawn separately, at the
+    /// dragged position) since the transform isn't written back to the real
+    /// layer canvas until it's confirmed. Defaults to `nil` so every
+    /// pre-existing call site keeps compositing all visible layers exactly
+    /// as before.
+    func compositeImage(excludingLayerAtIndex excludedIndex: Int? = nil) -> CGImage? {
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         guard let context = CGContext(
             data: nil,
@@ -148,7 +158,7 @@ final class LayerStack {
         context.setShouldAntialias(false)
 
         let rect = CGRect(x: 0, y: 0, width: width, height: height)
-        for layer in layers where layer.isVisible {
+        for (index, layer) in layers.enumerated() where layer.isVisible && index != excludedIndex {
             guard let cgImage = layer.canvas.cgImage else { continue }
             context.setAlpha(CGFloat(layer.opacity))
             context.draw(cgImage, in: rect)

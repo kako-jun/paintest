@@ -403,6 +403,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layerPanelView.onSelectionChanged = { [weak self] in
             self?.canvasView.needsDisplay = true
         }
+        // Auto-confirms an in-progress layer transform before the panel
+        // changes `activeLayerIndex` out from under it (issue #9 review
+        // must-1) — same reasoning, and the same
+        // `commitLayerTransform()`/`isTransforming` pairing, as
+        // `activateActiveDocument()`'s own auto-confirm above. Fired from
+        // `LayerPanelView` *before* it actually reassigns
+        // `layerStack.activeLayerIndex` (select/add/duplicate/remove a
+        // layer — see `LayerPanelView.willChangeActiveLayer`'s doc comment
+        // for exactly which operations), so `canvasView.layerStack` is
+        // still pointing at the transform's own layer when this runs.
+        layerPanelView.willChangeActiveLayer = { [weak self] in
+            guard let self, self.canvasView.isTransforming else { return }
+            self.canvasView.commitLayerTransform()
+        }
         layerPanelView.translatesAutoresizingMaskIntoConstraints = false
         layerPanelView.wantsLayer = true
         layerPanelView.layer?.backgroundColor = Self.chromeColor.cgColor
@@ -565,7 +579,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // one placeholder item joins Image's placeholders instead of
         // staying a separate top-level menu.
         mainMenu.addItem(makeMenuItem(title: "イメージ", placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…", "色の編集…"]))
-        mainMenu.addItem(makeMenuItem(title: "レイヤー", placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
+        mainMenu.addItem(makeMenuItem(title: "レイヤー", items: [
+            ("自由変形", #selector(beginLayerTransform), "t")
+        ], placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
         mainMenu.addItem(makeMenuItem(title: "選択範囲", items: [
             ("すべてを選択", #selector(selectAll), "a"),
             ("選択を解除", #selector(deselectAll), "d"),
@@ -609,6 +625,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// state on the single `CanvasView` instance instead of following each
     /// document independently.
     private func activateActiveDocument() {
+        // Auto-confirms an in-progress layer transform (issue #9 review
+        // must-1) *before* touching anything else below — at this point
+        // `canvasView.layerStack` still points at the outgoing document
+        // (the one the transform actually belongs to), so
+        // `commitLayerTransform()` rasterizes onto the correct layer.
+        // Without this, `canvasView.replaceLayerStack(document.layerStack)`
+        // a few lines down would swap `layerStack` out from under a
+        // still-live transform, and confirming it later (Return) would
+        // silently overwrite whatever layer happens to be active in the
+        // *new* document instead — a silent, unrecoverable data-loss bug
+        // (no undo exists yet). This mirrors Photoshop's own behavior:
+        // switching documents/tabs while a free-transform is in progress
+        // auto-applies it rather than leaving it dangling. Every call site
+        // that can change which document/layer `canvasView` is showing
+        // (tab switch, new canvas, open, drag-and-drop open, close tab) all
+        // route through this one method, so this one check covers all of
+        // them.
+        if canvasView.isTransforming {
+            canvasView.commitLayerTransform()
+        }
         displayedDocument?.zoomScale = canvasView.zoomScale
         // Selection is per-document state too, same pattern as zoom above
         // (issue #11): write the outgoing document's selection back from
@@ -921,6 +957,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func zoomOut() {
         canvasView.zoomOut()
+    }
+
+    /// "レイヤー" > "自由変形" (Cmd+T, issue #9 round 1: move + scale only —
+    /// confirming with Return/double-click and canceling with Escape are
+    /// handled inside `CanvasView` itself once transform mode is active, not
+    /// via separate menu items).
+    @objc private func beginLayerTransform() {
+        canvasView.beginLayerTransform()
     }
 
     private func presentError(_ message: String) {
