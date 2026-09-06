@@ -137,6 +137,16 @@ final class CanvasViewTests: XCTestCase {
     // those two types must honor for tab switching to keep zoom independent.
 
     private func activate(_ incoming: Document, previouslyDisplayed: Document?, on view: CanvasView) {
+        // Auto-confirms an in-progress layer transform before anything else
+        // (issue #9 review must-1), mirroring the real
+        // `AppDelegate.activateActiveDocument()`'s own ordering: at this
+        // point `view.layerStack` still points at the OUTGOING document —
+        // the one the transform actually belongs to — so
+        // `commitLayerTransform()` here rasterizes onto the correct layer,
+        // not whatever ends up active in `incoming` after the swap below.
+        if view.isTransforming {
+            view.commitLayerTransform()
+        }
         previouslyDisplayed?.zoomScale = view.zoomScale
         // Selection write-back/restore, same pattern as zoom above and in
         // the real `AppDelegate.activateActiveDocument()` (issue #11).
@@ -190,6 +200,103 @@ final class CanvasViewTests: XCTestCase {
         // not reset" actually means here: the exact same mask object should
         // come back, not an equivalent-but-different one.
         XCTAssertTrue(view.selection === selectionA, "\"a\"'s selection must be restored, not reset to none")
+    }
+
+    // MARK: - Layer transform auto-confirm on document switch (issue #9
+    // review must-1)
+    //
+    // Before this fix, `commitLayerTransform()` always wrote into whatever
+    // `layerStack.activeLayer` happened to be AT CONFIRM TIME — so
+    // switching documents (or layers) between `beginLayerTransform()` and
+    // pressing Return would silently rasterize the transform onto a
+    // completely unrelated layer/document, destroying its real content with
+    // no undo. The fix calls `commitLayerTransform()` proactively, from
+    // `activate(_:previouslyDisplayed:on:)` above, the instant a document
+    // switch is about to happen — while `view.layerStack` still points at
+    // the transform's own document. This test drives that exact sequence
+    // and checks both halves of the guarantee: the originating document
+    // ends up correctly transformed, and the destination document is
+    // completely untouched.
+
+    func testLayerTransform_activeWhenSwitchingDocuments_autoCommitsOntoTheOriginatingDocument_leavesTheOtherDocumentUntouched() {
+        let zoomScale = 4
+        // 8x8 (not e.g. 4x4): the click point below has to be far enough
+        // from every corner to avoid the rotate ring
+        // (`transformRotateHandleOuterRadius`, 14 *view* points) as well as
+        // the plain hit radius, same reasoning as
+        // `testMouseDragged_moveHandleWithShiftAndOptionHeld_stillJustTranslates`
+        // above — on a small canvas at ordinary zoom, the rectangle's own
+        // center can actually fall inside a corner's rotate ring, silently
+        // turning an intended "drag the interior" test into a rotate-handle
+        // test instead.
+        let docA = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "b")
+        let canvasA = docA.layerStack.activeLayer.canvas
+        let canvasB = docB.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                canvasA.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.2, alpha: 1))
+                canvasB.setPixel(x: x, y: y, color: NSColor(deviceRed: 0.1, green: 0.2, blue: Double(x + y) / 14, alpha: 1))
+            }
+        }
+        var beforeA: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { beforeA.append((0..<8).map { canvasA.rawPixel(x: $0, y: y)! }) }
+        var beforeB: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { beforeB.append((0..<8).map { canvasB.rawPixel(x: $0, y: y)! }) }
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(docA.layerStack)
+        let window = view.window!
+
+        view.beginLayerTransform()
+        // Canvas (4, 4) is the rectangle's own center — comfortably past
+        // the rotate ring at this zoom (see the comment above) — dragged by
+        // (+1, +1), same scenario as
+        // `testMouseDragged_moveHandleWithShiftAndOptionHeld_stillJustTranslates`.
+        let down = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 5, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        XCTAssertTrue(view.isTransforming, "precondition: still mid-transform, not yet confirmed")
+
+        // Switch tabs to "b" WITHOUT ever pressing Return — exactly the
+        // sequence that used to silently corrupt whichever layer/document
+        // ended up active afterward.
+        activate(docB, previouslyDisplayed: docA, on: view)
+
+        XCTAssertFalse(view.isTransforming, "switching documents must auto-confirm the in-progress transform")
+
+        // A pure (+1, +1) translation onto docA: destination (x, y) shows
+        // source (x - 1, y - 1), for the interior region only (the
+        // shifted-in edge is left transparent — same cropping convention as
+        // `testMouseDragged_moveHandleWithShiftAndOptionHeld_stillJustTranslates`).
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvasA.rawPixel(x: x, y: y)
+                if x >= 1, y >= 1 {
+                    let expected = beforeA[y - 1][x - 1]
+                    XCTAssertEqual(actual?.r, expected.r, "docA x=\(x) y=\(y) red")
+                    XCTAssertEqual(actual?.g, expected.g, "docA x=\(x) y=\(y) green")
+                    XCTAssertEqual(actual?.b, expected.b, "docA x=\(x) y=\(y) blue")
+                    XCTAssertEqual(actual?.a, expected.a, "docA x=\(x) y=\(y) alpha")
+                } else {
+                    XCTAssertEqual(actual?.a, 0, "docA x=\(x) y=\(y) should be left transparent (shifted in from outside)")
+                }
+            }
+        }
+
+        // docB — the tab switched TO — must be completely untouched: not
+        // one pixel of it should have changed.
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = canvasB.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, beforeB[y][x].r, "docB x=\(x) y=\(y) red")
+                XCTAssertEqual(actual?.g, beforeB[y][x].g, "docB x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, beforeB[y][x].b, "docB x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, beforeB[y][x].a, "docB x=\(x) y=\(y) alpha")
+            }
+        }
     }
 
     // MARK: - onZoomChanged callback

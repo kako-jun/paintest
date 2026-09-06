@@ -201,6 +201,17 @@ final class CanvasView: NSView {
     /// per-event deltas instead of the drag's overall shape).
     private var transformDragStartTransform: LayerTransform?
 
+    /// Whether a layer transform is currently in progress (issue #9 review
+    /// must-1) — `true` exactly when `activeTransform` is non-`nil`. Exposed
+    /// read-only so `AppDelegate` can auto-confirm the in-progress transform
+    /// before it swaps `layerStack` out from under `commitLayerTransform()`
+    /// (document tab switch, new/open, drag-and-drop) or before the layer
+    /// panel changes `activeLayerIndex` out from under it (select/add/
+    /// duplicate/remove a layer) — see `commitLayerTransform()`'s own doc
+    /// comment for why doing this *before* either of those changes actually
+    /// lands is what makes the confirm land on the correct layer.
+    var isTransforming: Bool { activeTransform != nil }
+
     /// A transform handle is hit-testable within this many *view* points of
     /// its exact position (so the hitbox stays a constant on-screen size
     /// regardless of zoom) — mirrors `magnifierClickThreshold`/
@@ -365,6 +376,21 @@ final class CanvasView: NSView {
     /// `rasterizeTransform(_:from:into:)`), then leaves transform mode. A
     /// no-op unless both `activeTransform` and `transformOriginalCanvas` are
     /// set (i.e. only meaningful while actually in transform mode).
+    ///
+    /// Writes into `layerStack.activeLayer.canvas` — whatever `layerStack`
+    /// and `activeLayerIndex` happen to be *right now*, at confirm time, not
+    /// whatever they were when `beginLayerTransform()` snapshotted
+    /// `transformOriginalCanvas` (issue #9 review must-1). Left unattended,
+    /// switching documents or layers between begin and confirm would
+    /// silently rasterize the transform onto a completely unrelated layer,
+    /// clobbering its real content with no way to undo it. The actual fix
+    /// is upstream of this method: `AppDelegate` calls this proactively
+    /// (via `isTransforming`) the instant a document/layer switch is about
+    /// to happen, while `layerStack`/`activeLayerIndex` still point at the
+    /// transform's own layer — see `AppDelegate.activateActiveDocument()`
+    /// and `LayerPanelView.willChangeActiveLayer`. This method itself stays
+    /// simple and just writes to "whatever is active right now", trusting
+    /// callers to have kept that in sync.
     func commitLayerTransform() {
         guard let transform = activeTransform, let originalCanvas = transformOriginalCanvas else { return }
         rasterizeTransform(transform, from: originalCanvas, into: layerStack.activeLayer.canvas)
@@ -476,10 +502,20 @@ final class CanvasView: NSView {
     /// pixel via `sourcePixel(forDestination:transform:sourceWidth:sourceHeight:)`
     /// and copies it across. Pixels outside `transform`'s rectangle are left
     /// as the clear color `destination` was just filled with.
+    ///
+    /// Loops over `source`'s own dimensions (the `transformOriginalCanvas`
+    /// snapshot taken at `beginLayerTransform()` time), not `layerStack`'s
+    /// current `width`/`height` (issue #9 review must-1, defensive
+    /// hardening): the auto-confirm wiring in `AppDelegate` (see
+    /// `commitLayerTransform()`'s doc comment) keeps these in lock-step in
+    /// practice, but reading the loop bound from the snapshot that's
+    /// actually being sampled — rather than from mutable ambient state this
+    /// method doesn't otherwise touch — is the strictly correct thing to do
+    /// regardless.
     private func rasterizeTransform(_ transform: LayerTransform, from source: PixelCanvas, into destination: PixelCanvas) {
         destination.fill(with: .clear)
-        for y in 0..<layerStack.height {
-            for x in 0..<layerStack.width {
+        for y in 0..<source.height {
+            for x in 0..<source.width {
                 guard let sample = CanvasView.sourcePixel(forDestination: (x, y), transform: transform, sourceWidth: source.width, sourceHeight: source.height),
                       let raw = source.rawPixel(x: sample.x, y: sample.y) else { continue }
                 let color = NSColor(

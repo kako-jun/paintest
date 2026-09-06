@@ -186,4 +186,140 @@ final class LayerPanelViewTests: XCTestCase {
         XCTAssertEqual(onChangeCount, 1, "addLayerTapped is a content edit and must fire onChange")
         XCTAssertEqual(onSelectionChangedCount, 0, "addLayerTapped must not fire onSelectionChanged")
     }
+
+    // MARK: - willChangeActiveLayer (issue #9 review must-1)
+    //
+    // `AppDelegate` wires this to auto-confirm an in-progress layer
+    // transform before its target layer is swapped out from under it (see
+    // `AppDelegate.swift`'s comment at the wiring site — no direct
+    // `AppDelegate`-level test per this suite's own convention above). It
+    // must fire, *before* `activeLayerIndex` actually changes, for every
+    // operation that reassigns it (select a row, add/duplicate/remove a
+    // layer) — but NOT for reordering (`moveLayerUpTapped`/
+    // `moveLayerDownTapped`, which leave the active layer *object*
+    // unchanged even though its numeric index shifts) or attribute-only
+    // edits (`visibilityToggled`/`opacitySliderChanged`, which never touch
+    // which layer is active).
+
+    func testRowClick_selectingADifferentLayerFiresWillChangeActiveLayer() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        stack.addLayer(name: "B") // index 1, active
+        stack.activeLayerIndex = 0 // "レイヤー1" active, so clicking row 0 (top, "B") actually changes something
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        let allRows = rows(in: panel)
+        allRows[0].mouseDown(with: dummyMouseDownEvent())
+
+        XCTAssertEqual(stack.activeLayerIndex, 1, "precondition: the click actually selected a different layer")
+        XCTAssertEqual(willChangeCount, 1)
+    }
+
+    func testAddButton_firesWillChangeActiveLayer() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        tap("追加", on: panel)
+
+        XCTAssertEqual(willChangeCount, 1)
+    }
+
+    func testDuplicateButton_firesWillChangeActiveLayer() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        tap("複製", on: panel)
+
+        XCTAssertEqual(willChangeCount, 1)
+    }
+
+    func testRemoveButton_firesWillChangeActiveLayer() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        stack.addLayer(name: "B")
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        tap("削除", on: panel)
+
+        XCTAssertEqual(willChangeCount, 1)
+    }
+
+    func testMoveUpAndMoveDownButtons_doNotFireWillChangeActiveLayer() {
+        // Reordering shifts the active layer's numeric *index* but not the
+        // active layer *object itself* (`LayerStack.moveLayer` re-resolves
+        // `activeLayerIndex` to wherever the previously-active layer object
+        // ended up) — not a "which layer is active" change from the user's
+        // perspective, so this must not trigger an auto-confirm.
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        stack.addLayer(name: "B") // index 1, active
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        tap("下へ", on: panel)
+        tap("上へ", on: panel)
+
+        XCTAssertEqual(willChangeCount, 0)
+    }
+
+    /// Recursively finds the visibility checkbox (`NSButton(checkboxWithTitle:
+    /// ...)`, distinguished from the button-bar's icon buttons — the only
+    /// other `NSButton`s in this panel — by `toolTip`: `makeIconButton` always
+    /// sets one (see `findButton(toolTip:in:)` above), `makeRow`'s checkbox
+    /// never does. `NSButton.buttonType` has no Swift-visible getter
+    /// (`-setButtonType:` is a setter-only Cocoa method), so this can't just
+    /// check for `.switch` directly.
+    private func findCheckbox(in view: NSView) -> NSButton? {
+        for subview in view.subviews {
+            if let button = subview as? NSButton, button.toolTip == nil { return button }
+            if let found = findCheckbox(in: subview) { return found }
+        }
+        return nil
+    }
+
+    /// Recursively finds the opacity `NSSlider` (matching the walk-based
+    /// pattern `OptionBarViewTests.toleranceSlider(in:)` uses for a slider
+    /// nested a level deeper than a flat `subviews` list can reach).
+    private func findSlider(in view: NSView) -> NSSlider? {
+        for subview in view.subviews {
+            if let slider = subview as? NSSlider { return slider }
+            if let found = findSlider(in: subview) { return found }
+        }
+        return nil
+    }
+
+    func testVisibilityToggle_doesNotFireWillChangeActiveLayer() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        guard let checkbox = findCheckbox(in: panel) else {
+            return XCTFail("expected to find the visibility checkbox")
+        }
+        checkbox.performClick(nil)
+
+        XCTAssertEqual(willChangeCount, 0)
+    }
+
+    func testOpacitySlider_doesNotFireWillChangeActiveLayer() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        guard let slider = findSlider(in: panel) else {
+            return XCTFail("expected to find the opacity slider")
+        }
+        slider.doubleValue = 50
+        _ = slider.sendAction(slider.action, to: slider.target)
+
+        XCTAssertEqual(willChangeCount, 0)
+    }
 }
