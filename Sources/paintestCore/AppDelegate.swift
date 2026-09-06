@@ -565,7 +565,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // one placeholder item joins Image's placeholders instead of
         // staying a separate top-level menu.
         mainMenu.addItem(makeMenuItem(title: "イメージ", placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…", "色の編集…"]))
-        mainMenu.addItem(makeMenuItem(title: "レイヤー", placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
+        mainMenu.addItem(makeMenuItem(title: "レイヤー", items: [
+            ("自由変形", #selector(beginLayerTransform), "t")
+        ], placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
         mainMenu.addItem(makeMenuItem(title: "選択範囲", items: [
             ("すべてを選択", #selector(selectAll), "a"),
             ("選択を解除", #selector(deselectAll), "d"),
@@ -921,6 +923,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func zoomOut() {
         canvasView.zoomOut()
+    }
+
+    /// "レイヤー" > "自由変形" (Cmd+T, issue #9 round 1: move + scale only —
+    /// confirming with Return/double-click and canceling with Escape are
+    /// handled inside `CanvasView` itself once transform mode is active, not
+    /// via separate menu items).
+    @objc private func beginLayerTransform() {
+        canvasView.beginLayerTransform()
     }
 
     private func presentError(_ message: String) {
