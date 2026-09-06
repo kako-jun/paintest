@@ -75,7 +75,14 @@ final class OptionBarView: NSView {
     }
 
     @objc private func zoomPresetChanged(_ sender: NSPopUpButton) {
-        guard let title = sender.titleOfSelectedItem, let level = Int(title.dropLast()) else { return }
-        onZoomPresetSelected?(level)
+        // Bug fix (found while writing tests for issue #13): the item's
+        // title is "\(level * 100)%" (e.g. "3200%" for level 32), so
+        // `dropLast()` alone only strips the "%" and leaves the *percentage*
+        // (3200), not the level (32). Passing that straight to `onSelect`
+        // meant every dropdown selection silently did nothing in
+        // production, since `CanvasView.setZoomScale(_:)` rejects any value
+        // not in `zoomLevels` ([1, 2, 4, 8, 16, 32]) — 3200 never matches.
+        guard let title = sender.titleOfSelectedItem, let percent = Int(title.dropLast()) else { return }
+        onZoomPresetSelected?(percent / 100)
     }
 }
