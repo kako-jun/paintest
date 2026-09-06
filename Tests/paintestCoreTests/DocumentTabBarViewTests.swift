@@ -177,6 +177,87 @@ final class DocumentTabBarViewTests: XCTestCase {
         XCTAssertEqual(closeCount, 1, "onClose should fire exactly once")
     }
 
+    // MARK: - Close button -> onRequestClose gate (issue #4: unsaved-changes confirmation)
+
+    func testCloseButtonTap_onRequestCloseReturnsFalse_doesNotCloseAndDoesNotFireOnClose() {
+        let manager = DocumentManager(initialDocument: makeDocument("a"))
+        manager.addDocument(makeDocument("b"))
+        let tabBar = DocumentTabBarView(documentManager: manager)
+        var closeCount = 0
+        tabBar.onClose = { closeCount += 1 }
+        tabBar.onRequestClose = { _ in false }
+
+        let closeButtons = findButtons(titled: "×", in: tabBar)
+        guard let firstCloseButton = closeButtons.first(where: { $0.tag == 0 }) else {
+            XCTFail("could not find the close button tagged with index 0 (\"a\"'s row)")
+            return
+        }
+
+        firstCloseButton.performClick(nil)
+
+        XCTAssertEqual(manager.documents.map(\.displayName), ["a", "b"], "a false answer from onRequestClose must leave both documents in place")
+        XCTAssertEqual(closeCount, 0, "onClose must not fire when onRequestClose vetoes the close")
+    }
+
+    func testCloseButtonTap_onRequestCloseReturnsTrue_closesNormally() {
+        let manager = DocumentManager(initialDocument: makeDocument("a"))
+        manager.addDocument(makeDocument("b"))
+        let tabBar = DocumentTabBarView(documentManager: manager)
+        var closeCount = 0
+        tabBar.onClose = { closeCount += 1 }
+        tabBar.onRequestClose = { _ in true }
+
+        let closeButtons = findButtons(titled: "×", in: tabBar)
+        guard let firstCloseButton = closeButtons.first(where: { $0.tag == 0 }) else {
+            XCTFail("could not find the close button tagged with index 0 (\"a\"'s row)")
+            return
+        }
+
+        firstCloseButton.performClick(nil)
+
+        XCTAssertEqual(manager.documents.map(\.displayName), ["b"], "a true answer from onRequestClose must let the close through")
+        XCTAssertEqual(closeCount, 1, "onClose should fire exactly once")
+    }
+
+    /// Past-incident regression (see issue #4 discussion): a missing
+    /// `onRequestClose` handler must default to "okay to close", not
+    /// silently block every close forever. `?? true`, not `?? false`.
+    func testCloseButtonTap_onRequestCloseNotWired_defaultsToClosing() {
+        let manager = DocumentManager(initialDocument: makeDocument("only"))
+        let tabBar = DocumentTabBarView(documentManager: manager)
+        var closeCount = 0
+        tabBar.onClose = { closeCount += 1 }
+        // onRequestClose deliberately left nil.
+
+        guard let closeButton = findButtons(titled: "×", in: tabBar).first else {
+            XCTFail("could not find the close button")
+            return
+        }
+
+        closeButton.performClick(nil)
+
+        XCTAssertEqual(closeCount, 1, "onClose should still fire when onRequestClose isn't wired up")
+    }
+
+    func testCloseButtonTap_onRequestClose_receivesTheClickedRowsIndexNotAlwaysZero() {
+        let manager = DocumentManager(initialDocument: makeDocument("a"))
+        manager.addDocument(makeDocument("b"))
+        manager.addDocument(makeDocument("c"))
+        let tabBar = DocumentTabBarView(documentManager: manager)
+        var receivedIndex: Int?
+        tabBar.onRequestClose = { index in receivedIndex = index; return true }
+
+        let closeButtons = findButtons(titled: "×", in: tabBar)
+        guard let middleCloseButton = closeButtons.first(where: { $0.tag == 1 }) else {
+            XCTFail("could not find the close button tagged with index 1 (\"b\"'s row)")
+            return
+        }
+
+        middleCloseButton.performClick(nil)
+
+        XCTAssertEqual(receivedIndex, 1, "onRequestClose must receive the index of the row that was actually clicked, not a hardcoded 0")
+    }
+
     // MARK: - Add button -> onNewDocumentRequested
 
     func testAddButtonTap_firesOnNewDocumentRequested() {

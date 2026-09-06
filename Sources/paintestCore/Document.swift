@@ -21,6 +21,13 @@ final class Document {
     /// selection is transient UI state, not document content, so it doesn't
     /// round-trip through save/open (out of scope for issue #11).
     var selection: SelectionMask?
+    /// Whether this document has unsaved changes (issue #4). Set on actual
+    /// content edits (pixel drawing, layer add/remove/reorder/opacity —
+    /// wired from `AppDelegate`'s `onLayerContentChanged`/`layerPanelView.
+    /// onChange`), cleared on a successful save. Defaults to `false`: a
+    /// brand-new document or one just loaded from disk hasn't diverged from
+    /// what's on disk (or from "nothing", for a new document) yet.
+    var isDirty: Bool = false
 
     // `zoomScale`'s default reaches into `CanvasView` (a view-layer type) for
     // its initial value, so this model type isn't fully independent of the

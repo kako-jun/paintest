@@ -149,6 +149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // next time some other action happened to call
             // `documentTabBarView.reload()`.
             self?.documentTabBarView.reload()
+            // Only fires on an actual pixel edit (pencil/pen/bucket/etc.),
+            // never merely from switching tools or tabs — the correct
+            // "dirty" signal for issue #4's unsaved-changes tracking.
+            self?.documentManager.activeDocument.isDirty = true
         }
 
         scrollView = NSScrollView()
@@ -225,13 +229,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// Confirms unsaved changes across every open tab before quitting
+    /// (issue #4) — this app is single-window, so "close the window" and
+    /// "quit the app" are the same event. Each dirty document's tab is
+    /// activated before its own confirmation dialog, so the user can see
+    /// which document is being asked about; the first "キャンセル" answer
+    /// aborts the whole quit and leaves the rest unasked.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for index in documentManager.documents.indices {
+            let document = documentManager.documents[index]
+            guard document.isDirty else { continue }
+
+            documentManager.selectDocument(at: index)
+            activateActiveDocument()
+
+            guard resolveUnsavedChanges(for: document) else {
+                return .terminateCancel
+            }
+        }
+        return .terminateNow
+    }
+
     // MARK: - Root layout (issue #2: classic Paint's toolbox + canvas +
     // color palette + status bar impression, replacing #1's NSToolbar).
 
     private func makeRootView() -> NSView {
-        let root = NSView()
+        let root = DropTargetView()
         root.wantsLayer = true
         root.layer?.backgroundColor = Self.chromeColor.cgColor
+        // Dropping an image file anywhere on the window opens it in a new
+        // tab (issue #4), the same as "開く…" — each dropped URL goes
+        // through the same `openDocument(from:)` used by the panel, so
+        // multiple files dropped at once each get their own tab.
+        root.onFilesDropped = { [weak self] urls in
+            urls.forEach { self?.openDocument(from: $0) }
+        }
 
         // Photoshop's options bar (issue #7): spans the full window width,
         // above everything else — the document tab strip, toolbox, canvas,
@@ -254,6 +286,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         documentTabBarView.onNewDocumentRequested = { [weak self] in
             self?.newCanvas()
+        }
+        // Confirms unsaved changes before a tab actually closes (issue #4):
+        // `DocumentTabBarView` itself doesn't know about dirty state, so it
+        // asks back here before calling into `documentManager.closeDocument`.
+        // An out-of-range index (shouldn't happen, but `sender.tag` is a
+        // plain `Int` with no compile-time guarantee) is treated as "go
+        // ahead and close" rather than silently blocking the close.
+        documentTabBarView.onRequestClose = { [weak self] index in
+            guard let self, self.documentManager.documents.indices.contains(index) else { return true }
+            return self.resolveUnsavedChanges(for: self.documentManager.documents[index])
         }
         documentTabBarView.translatesAutoresizingMaskIntoConstraints = false
         documentTabBarView.wantsLayer = true
@@ -345,6 +387,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // untouched here.
         layerPanelView = LayerPanelView(layerStack: canvasView.layerStack)
         layerPanelView.onChange = { [weak self] in
+            self?.canvasView.needsDisplay = true
+            // Layer add/remove/duplicate/reorder/opacity/visibility changes
+            // are content edits too, same as a pencil stroke (issue #4).
+            self?.documentManager.activeDocument.isDirty = true
+        }
+        // Selecting a different layer row is not a content edit (issue #4
+        // self-review must): redraw so the canvas reflects the new active
+        // layer, but do NOT touch `isDirty`, or opening a saved document
+        // and merely clicking another row would spuriously ask to save on
+        // close/quit/open. (No AppDelegate-level wiring test exists for
+        // this panel per this repo's convention; verified by running the
+        // app: open a saved file, click another layer row, confirm no
+        // save-changes prompt on quit.)
+        layerPanelView.onSelectionChanged = { [weak self] in
             self?.canvasView.needsDisplay = true
         }
         layerPanelView.translatesAutoresizingMaskIntoConstraints = false
@@ -679,6 +735,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
+        openDocument(from: url)
+    }
+
+    /// Loads `url` into a new `Document` and opens it in a new tab. Shared
+    /// by `openCanvas()` (panel-driven "開く…") and drag-and-drop (issue
+    /// #4) so the `.paintestdoc`-vs-PNG branch and its error handling live
+    /// in exactly one place.
+    private func openDocument(from url: URL) {
         if url.pathExtension.lowercased() == "paintestdoc" {
             guard let layerStack = PaintestDocument.read(from: url) else {
                 presentError("ドキュメントの読み込みに失敗しました。")
@@ -707,8 +771,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// / Cmd+W). `DocumentManager.closeDocument(at:)` never leaves zero open
     /// documents — closing the last tab replaces it with a fresh blank one
     /// — so this is always safe to invoke, the same as clicking a tab's own
-    /// close button.
+    /// close button. Unsaved changes on the tab being closed are confirmed
+    /// first (issue #4); a "キャンセル" answer aborts the close entirely.
     @objc private func closeActiveTab() {
+        guard resolveUnsavedChanges(for: documentManager.activeDocument) else { return }
         documentManager.closeDocument(at: documentManager.activeDocumentIndex)
         activateActiveDocument()
     }
@@ -730,6 +796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try data.write(to: url)
             document.displayName = url.deletingPathExtension().lastPathComponent
             document.fileURL = url
+            document.isDirty = false
             documentTabBarView.reload()
             updateWindowTitle(for: document)
         } catch {
@@ -738,20 +805,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func saveLayeredCanvas() {
-        let document = documentManager.activeDocument
+        saveLayeredCanvasWithPanel(documentManager.activeDocument)
+    }
+
+    /// Shows the panel for "名前を付けて保存（レイヤー保持）…" for `document`
+    /// and writes it as `.paintestdoc`. Factored out of the `@objc` menu
+    /// action (issue #4) so `quickSave(_:)` can fall back to this same
+    /// panel flow for a document that has never been saved before, instead
+    /// of duplicating the panel/write/error-handling logic. Named
+    /// distinctly from `saveLayeredCanvas()` (rather than overloaded on
+    /// parameters) so `#selector(saveLayeredCanvas)` above stays
+    /// unambiguous — Swift's `#selector` cannot disambiguate between
+    /// overloads that differ only in parameters.
+    @discardableResult
+    private func saveLayeredCanvasWithPanel(_ document: Document) -> Bool {
         let panel = NSSavePanel()
         let paintestDocType = UTType(filenameExtension: "paintestdoc") ?? .data
         panel.allowedContentTypes = [paintestDocType]
         panel.nameFieldStringValue = "\(document.displayName).paintestdoc"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
         do {
             try PaintestDocument.write(document.layerStack, to: url)
             document.displayName = url.deletingPathExtension().lastPathComponent
             document.fileURL = url
+            document.isDirty = false
             documentTabBarView.reload()
             updateWindowTitle(for: document)
+            return true
         } catch {
             presentError("ドキュメントの保存に失敗しました: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// A quick save that overwrites the document's existing save location
+    /// (issue #4), used by the unsaved-changes confirmation dialog's "保存"
+    /// button: re-showing a save panel every time that dialog appears would
+    /// be an odd UX detour when the document already has a known save
+    /// location.
+    ///
+    /// If `document.fileURL` is set, overwrites it directly — `.paintestdoc`
+    /// via `PaintestDocument.write`, anything else (PNG, etc.) via
+    /// flattened PNG data. If there is no `fileURL` yet (never saved),
+    /// falls back to the layer-preserving save panel rather than the
+    /// flattening PNG one: in the confirmation-dialog context, the save
+    /// that loses the least information is the more sensible default.
+    ///
+    /// Returns `true` once the save has actually completed (so the
+    /// caller's original operation — closing a tab, quitting — may
+    /// proceed), `false` if it failed or the panel was canceled.
+    private func quickSave(_ document: Document) -> Bool {
+        guard let url = document.fileURL else {
+            return saveLayeredCanvasWithPanel(document)
+        }
+
+        if url.pathExtension.lowercased() == "paintestdoc" {
+            do {
+                try PaintestDocument.write(document.layerStack, to: url)
+                document.isDirty = false
+                documentTabBarView.reload()
+                updateWindowTitle(for: document)
+                return true
+            } catch {
+                presentError("ドキュメントの保存に失敗しました: \(error.localizedDescription)")
+                return false
+            }
+        }
+
+        guard let data = document.layerStack.flattenedPNGData() else {
+            presentError("PNGへの変換に失敗しました。")
+            return false
+        }
+        do {
+            try data.write(to: url)
+            document.isDirty = false
+            documentTabBarView.reload()
+            updateWindowTitle(for: document)
+            return true
+        } catch {
+            presentError("ファイルの保存に失敗しました: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Unsaved-changes confirmation (issue #4). If `document` is not dirty,
+    /// returns `true` immediately without showing anything. Otherwise
+    /// shows a 保存/破棄/キャンセル `NSAlert` and acts on the choice.
+    ///
+    /// Returns `true` if the caller's own operation (closing a tab,
+    /// quitting the app) may proceed, `false` if it should be aborted.
+    private func resolveUnsavedChanges(for document: Document) -> Bool {
+        guard document.isDirty else { return true }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\"\(document.displayName)\" に未保存の変更があります"
+        alert.informativeText = "変更を保存しますか？"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "破棄")
+        alert.addButton(withTitle: "キャンセル")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return quickSave(document)
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
         }
     }
 

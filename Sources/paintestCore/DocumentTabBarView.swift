@@ -69,6 +69,13 @@ final class DocumentTabBarView: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
     var onNewDocumentRequested: (() -> Void)?
+    /// Asks the host (`AppDelegate`) whether the tab at `index` may actually
+    /// close (issue #4: unsaved-changes confirmation) before
+    /// `closeTapped(_:)` calls into `documentManager.closeDocument(at:)`.
+    /// `nil` (no handler wired) or a `true` result both mean "go ahead and
+    /// close" — this view has no dirty-state concept of its own, so a
+    /// missing handler must not silently block every close.
+    var onRequestClose: ((Int) -> Bool)?
 
     private let rowsStack = FlippedTabStackView()
 
@@ -300,12 +307,11 @@ final class DocumentTabBarView: NSView {
         onNewDocumentRequested?()
     }
 
-    /// Closes a tab unconditionally — no "unsaved changes?" prompt. Issue
-    /// #4 (unsaved-changes confirmation) isn't implemented yet, so for now
-    /// a tab closes regardless of whether it's been saved. Once #4 lands,
-    /// this is the spot to ask before calling `closeDocument(at:)` when the
-    /// target document has unsaved edits.
+    /// Closes a tab, first asking `onRequestClose` whether that's actually
+    /// okay (issue #4: unsaved-changes confirmation) — a `false` answer
+    /// aborts the close entirely, leaving `documentManager` untouched.
     @objc private func closeTapped(_ sender: NSButton) {
+        guard onRequestClose?(sender.tag) ?? true else { return }
         documentManager.closeDocument(at: sender.tag)
         // Not calling `reload()` here for the same reason as
         // `onSelectRow` above: `onClose` leads back to
