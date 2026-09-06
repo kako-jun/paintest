@@ -210,6 +210,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // self-review already caught once (must-1 above).
         window.minSize = NSSize(width: 560, height: 507)
         window.makeKeyAndOrderFront(nil)
+        // Without this, the window's first responder stays whatever AppKit
+        // defaults to for a plain, non-`NSResponder`-opinionated content
+        // view (effectively nothing) — `canvasView` would never see a
+        // `keyDown(with:)` at all, breaking the polygon select tool's
+        // Escape-to-cancel/Return-to-close shortcuts (issue #11 round 2)
+        // right from launch.
+        window.makeFirstResponder(canvasView)
 
         NSApp.activate(ignoringOtherApps: true)
     }

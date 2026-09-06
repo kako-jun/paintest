@@ -29,7 +29,6 @@ final class CanvasView: NSView {
     /// old single `penColor`.
     var foregroundColor: NSColor = .black
     var backgroundColor: NSColor = .white
-    var activeTool: Tool = .pencil
     var onZoomChanged: ((Int) -> Void)?
     /// Fired after a pixel-editing gesture (`mouseDown`/`mouseDragged`)
     /// writes to the active layer's canvas, so `AppDelegate` can refresh
@@ -89,7 +88,65 @@ final class CanvasView: NSView {
     /// how the drawn shape combines with the existing `selection`.
     private var selectionCombineMode: SelectionCombineMode?
 
+    /// The lasso tool's in-progress free-form path, in pixel-space
+    /// coordinates (issue #11 round 2) — accumulated across one continuous
+    /// `mouseDown`→`mouseDragged`→`mouseUp` gesture, then scan-converted by
+    /// `SelectionMask.polygon(...)` and cleared. Unlike `selectionDragStart`/
+    /// `selectionDragCurrent` above (a single rectangle/ellipse bounding
+    /// box), this needs every intermediate point, not just the two
+    /// endpoints.
+    private var lassoVertices: [(x: Int, y: Int)] = []
+    /// Same role as `selectionCombineMode`, captured at the lasso gesture's
+    /// `mouseDown` and consumed at its `mouseUp`.
+    private var lassoCombineMode: SelectionCombineMode?
+
+    /// The polygon tool's placed-so-far vertices, in pixel-space coordinates
+    /// (issue #11 round 2) — unlike the lasso's `lassoVertices`, this
+    /// persists *across* separate `mouseDown`/`mouseUp` pairs (one click per
+    /// vertex) until the shape is closed (click near the first vertex, or
+    /// Return) or cancelled (Escape). Deliberately not sharing state or code
+    /// with the lasso's drag-based gesture — see this tool's own doc comment
+    /// on `Tool.polygonSelect`.
+    private var polygonVertices: [(x: Int, y: Int)] = []
+    /// The first vertex's *view-space* point (not pixel-space, unlike
+    /// `polygonVertices` itself) — kept separately so the "click near the
+    /// first vertex closes the shape" hit-test in `mouseDown` can compare
+    /// against the exact spot clicked rather than that pixel's rounded
+    /// center, which would be off by up to half a pixel's screen size (up to
+    /// 16pt at the highest zoom level) and make the close-hitbox wildly
+    /// inconsistent across zoom levels.
+    private var polygonFirstPoint: NSPoint?
+    /// Same role as `selectionCombineMode`, captured at the polygon
+    /// gesture's first click and consumed when the shape closes.
+    private var polygonCombineMode: SelectionCombineMode?
+
+    /// A click within this many view points (not pixel-space, so it already
+    /// scales correctly with zoom — same reasoning as
+    /// `magnifierClickThreshold`) of the polygon's first vertex closes the
+    /// shape instead of placing a new vertex on top of it.
+    private static let polygonCloseDistance: CGFloat = 6
+
     override var isFlipped: Bool { true }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    var activeTool: Tool = .pencil {
+        didSet {
+            guard oldValue != activeTool else { return }
+            // Switching tools mid-gesture would otherwise leave a stale
+            // lasso path or polygon vertex list behind — most visibly for
+            // the polygon tool, whose vertex list persists *across*
+            // separate mouseDown/mouseUp cycles until the shape is closed or
+            // cancelled (issue #11 round 2 hardening, mirroring the existing
+            // `magnifierDragStart` reset at the top of `mouseDown`).
+            lassoVertices = []
+            lassoCombineMode = nil
+            polygonVertices = []
+            polygonFirstPoint = nil
+            polygonCombineMode = nil
+            needsDisplay = true
+        }
+    }
 
     init(layerStack: LayerStack) {
         self.layerStack = layerStack
@@ -240,6 +297,63 @@ final class CanvasView: NSView {
             }
         }
 
+        // Lasso drag preview (issue #11 round 2): an open (not yet closed)
+        // dashed line through every point accumulated so far, drawn through
+        // pixel *centers* at the current zoom — same convention as the
+        // committed-selection outline below, just not yet closed into a
+        // loop since the shape isn't final until `mouseUp`.
+        if activeTool == .lassoSelect, lassoVertices.count >= 2 {
+            context.setShouldAntialias(true)
+            context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+            context.setLineWidth(1)
+            context.setLineDash(phase: 0, lengths: [4, 3])
+            let scale = CGFloat(zoomScale)
+            let points = lassoVertices.map {
+                CGPoint(x: (CGFloat($0.x) + 0.5) * scale, y: (CGFloat($0.y) + 0.5) * scale)
+            }
+            context.beginPath()
+            context.move(to: points[0])
+            for point in points.dropFirst() {
+                context.addLine(to: point)
+            }
+            context.strokePath()
+        }
+
+        // Polygon vertex-placement preview (issue #11 round 2): an open
+        // dashed line through the vertices placed so far, plus a small
+        // filled marker at each one so it's clear where a click will land
+        // relative to the existing vertices (in particular, the first one,
+        // clicking near which closes the shape).
+        if activeTool == .polygonSelect, !polygonVertices.isEmpty {
+            let scale = CGFloat(zoomScale)
+            let points = polygonVertices.map {
+                CGPoint(x: (CGFloat($0.x) + 0.5) * scale, y: (CGFloat($0.y) + 0.5) * scale)
+            }
+            context.setShouldAntialias(true)
+            if points.count >= 2 {
+                context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+                context.setLineWidth(1)
+                context.setLineDash(phase: 0, lengths: [4, 3])
+                context.beginPath()
+                context.move(to: points[0])
+                for point in points.dropFirst() {
+                    context.addLine(to: point)
+                }
+                context.strokePath()
+            }
+            context.setLineDash(phase: 0, lengths: [])
+            context.setFillColor(NSColor.selectedControlColor.cgColor)
+            let markerRadius: CGFloat = 3
+            for point in points {
+                context.fillEllipse(in: CGRect(
+                    x: point.x - markerRadius,
+                    y: point.y - markerRadius,
+                    width: markerRadius * 2,
+                    height: markerRadius * 2
+                ))
+            }
+        }
+
         // Committed selection outline (issue #11): a static dashed
         // "marching ants"-style border around every selected region.
         // Animation is out of scope (round 1) — this is deliberately a
@@ -310,7 +424,7 @@ final class CanvasView: NSView {
             // before calling `paint(at:)` (issue #13). Kept only to satisfy
             // this switch's exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect:
             // Same as the magnifier above: these branch to their own
             // drag/combine handling in `mouseDown`/`mouseDragged`/`mouseUp`
             // before calling `paint(at:)` (issue #11). Kept only to satisfy
@@ -335,7 +449,7 @@ final class CanvasView: NSView {
             // Same as `paint(at:)` above: the magnifier never drags into a
             // stroke (issue #13), this exists only for exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect:
             // Same as `paint(at:)` above: these never drag into a stroke
             // (issue #11), this exists only for exhaustiveness.
             return
@@ -362,7 +476,100 @@ final class CanvasView: NSView {
         return rep.colorAt(x: pixel.x, y: pixel.y)
     }
 
+    /// Reads Shift/Option out of `flags` into a `SelectionCombineMode`
+    /// (issue #11), matching Photoshop's modifier-key conventions — see
+    /// `SelectionCombineMode`'s own doc comment. Shared by every selection
+    /// tool's `mouseDown` (rectangle/ellipse drag, lasso drag, polygon's
+    /// first click) so this mapping lives in exactly one place instead of
+    /// being re-derived per tool (round 2 pulled this out of the
+    /// rectangle/ellipse branch below, which had it inline under round 1).
+    private static func combineMode(for flags: NSEvent.ModifierFlags) -> SelectionCombineMode {
+        if flags.contains(.shift) && flags.contains(.option) {
+            return .intersect
+        } else if flags.contains(.shift) {
+            return .add
+        } else if flags.contains(.option) {
+            return .subtract
+        } else {
+            return .replace
+        }
+    }
+
+    /// Combines `newMask` into the current `selection` per `mode`
+    /// (`.replace` when `nil`), then normalizes an empty result back to
+    /// `nil` — shared by every selection tool's finalize step (rectangle/
+    /// ellipse `mouseUp`, lasso `mouseUp`, polygon close) so the union/
+    /// subtract/intersect/replace-then-collapse-to-nil rule lives in exactly
+    /// one place. See `SelectionCombineMode`'s doc comment for the
+    /// Shift/Option semantics, and the original round-1 `mouseUp` comment
+    /// (now here) for why `nil` is treated as an *empty* base mask (not
+    /// "everything selected") and why an empty combined result collapses
+    /// back to `nil` (an all-false mask would block all editing everywhere —
+    /// worse than no selection at all).
+    private func applyCombinedSelection(_ newMask: SelectionMask, mode: SelectionCombineMode?) {
+        let base = selection ?? SelectionMask(width: layerStack.width, height: layerStack.height)
+        let combined: SelectionMask
+        switch mode ?? .replace {
+        case .replace:
+            combined = newMask
+        case .add:
+            combined = base.unioned(with: newMask)
+        case .subtract:
+            combined = base.subtracting(newMask)
+        case .intersect:
+            combined = base.intersected(with: newMask)
+        }
+        selection = combined.isEmpty ? nil : combined
+    }
+
+    /// Closes the in-progress polygon selection (issue #11 round 2): builds
+    /// a mask from `polygonVertices` via `SelectionMask.polygon(...)`,
+    /// combines it into `selection` with `polygonCombineMode`, and clears
+    /// all polygon gesture state either way. Called both from `mouseDown`
+    /// (click near the first vertex) and `keyDown` (Return).
+    private func closePolygon() {
+        defer {
+            polygonVertices = []
+            polygonFirstPoint = nil
+            polygonCombineMode = nil
+            needsDisplay = true
+        }
+        guard polygonVertices.count >= 3 else { return }
+        let newMask = SelectionMask.polygon(vertices: polygonVertices, width: layerStack.width, height: layerStack.height)
+        applyCombinedSelection(newMask, mode: polygonCombineMode)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Only the polygon tool, and only mid-gesture, cares about Escape/
+        // Return (issue #11 round 2) — every other key, and every other
+        // tool, falls through to `super` unchanged.
+        guard activeTool == .polygonSelect, !polygonVertices.isEmpty else {
+            super.keyDown(with: event)
+            return
+        }
+        switch event.keyCode {
+        case 53: // Escape: cancel the in-progress polygon, no selection change.
+            polygonVertices = []
+            polygonFirstPoint = nil
+            polygonCombineMode = nil
+            needsDisplay = true
+        case 36, 76: // Return / keypad Enter: close with the vertices placed so far.
+            closePolygon()
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
+        // Reclaims first responder on every click (issue #11 round 2):
+        // `CanvasView` overrides `mouseDown(with:)` without calling `super`,
+        // so it doesn't get AppKit's normal "clicking a view makes it first
+        // responder" behavior for free. Without this, once some other
+        // control (e.g. the zoom text field) had taken first responder,
+        // clicking back on the canvas wouldn't restore it, and the polygon
+        // select tool's Escape/Return shortcuts in `keyDown(with:)` would
+        // silently stop working after the first such detour.
+        window?.makeFirstResponder(self)
         // Unconditionally clear any leftover magnifier drag state at the
         // start of every new mouse-down session (issue #13 hardening): the
         // current mouse-event dispatch model can't actually switch
@@ -397,16 +604,38 @@ final class CanvasView: NSView {
             let point = convert(event.locationInWindow, from: nil)
             selectionDragStart = point
             selectionDragCurrent = point
-            let flags = event.modifierFlags
-            if flags.contains(.shift) && flags.contains(.option) {
-                selectionCombineMode = .intersect
-            } else if flags.contains(.shift) {
-                selectionCombineMode = .add
-            } else if flags.contains(.option) {
-                selectionCombineMode = .subtract
-            } else {
-                selectionCombineMode = .replace
+            selectionCombineMode = CanvasView.combineMode(for: event.modifierFlags)
+            return
+        }
+        if activeTool == .lassoSelect {
+            // Starts a fresh free-form path (issue #11 round 2); the mask
+            // isn't built until the drag ends, in `mouseUp(with:)`. Skips
+            // the pixel-painting path entirely, same as the other selection
+            // tools above.
+            lassoVertices = [pixel]
+            lassoCombineMode = CanvasView.combineMode(for: event.modifierFlags)
+            needsDisplay = true
+            return
+        }
+        if activeTool == .polygonSelect {
+            // A click-based state machine, independent of the lasso's
+            // drag-based one (issue #11 round 2 — see `Tool.polygonSelect`'s
+            // doc comment): each click either closes the shape (clicking
+            // near the first vertex, once there are at least 3) or appends
+            // a new vertex. Skips the pixel-painting path entirely, same as
+            // every other selection tool above.
+            let point = convert(event.locationInWindow, from: nil)
+            if let firstPoint = polygonFirstPoint, polygonVertices.count >= 3,
+               hypot(point.x - firstPoint.x, point.y - firstPoint.y) <= Self.polygonCloseDistance {
+                closePolygon()
+                return
             }
+            if polygonVertices.isEmpty {
+                polygonFirstPoint = point
+                polygonCombineMode = CanvasView.combineMode(for: event.modifierFlags)
+            }
+            polygonVertices.append(pixel)
+            needsDisplay = true
             return
         }
         paint(at: pixel)
@@ -428,6 +657,20 @@ final class CanvasView: NSView {
         }
         if activeTool == .rectangleSelect || activeTool == .ellipseSelect {
             selectionDragCurrent = convert(event.locationInWindow, from: nil)
+            needsDisplay = true
+            return
+        }
+        if activeTool == .lassoSelect {
+            let pixel = pixelCoordinate(for: event)
+            // Thins out consecutive duplicate points (e.g. the pointer
+            // hasn't crossed into a new pixel since the last event) rather
+            // than growing the path on every single mouse-moved callback —
+            // enough de-duplication to keep the vertex list from ballooning
+            // on a slow drag without needing a real distance-based
+            // simplification algorithm.
+            if lassoVertices.last.map({ $0 != pixel }) ?? true {
+                lassoVertices.append(pixel)
+            }
             needsDisplay = true
             return
         }
@@ -488,28 +731,28 @@ final class CanvasView: NSView {
             // deliberately treats `nil` as "everything selected" for that
             // command's own semantics (see its doc comment) — the two
             // operations don't share one universal "what does nil mean"
-            // rule, they're each documented independently.
-            let base = selection ?? SelectionMask(width: layerStack.width, height: layerStack.height)
-            let combined: SelectionMask
-            switch selectionCombineMode ?? .replace {
-            case .replace:
-                combined = newMask
-            case .add:
-                combined = base.unioned(with: newMask)
-            case .subtract:
-                combined = base.subtracting(newMask)
-            case .intersect:
-                combined = base.intersected(with: newMask)
+            // rule, they're each documented independently. An empty combined
+            // result collapses back to `nil` rather than staying a real,
+            // all-`false` mask (issue #11, decision made ahead of
+            // implementation) — see `applyCombinedSelection`'s doc comment.
+            applyCombinedSelection(newMask, mode: selectionCombineMode)
+            return
+        }
+        if activeTool == .lassoSelect {
+            defer {
+                lassoVertices = []
+                lassoCombineMode = nil
+                needsDisplay = true
             }
-
-            // An empty mask would block all editing everywhere — an
-            // effectively broken state, functionally worse than no
-            // selection at all — so it's deliberately collapsed back to
-            // `nil` (unrestricted) instead of being kept as a real,
-            // all-`false` `SelectionMask` (issue #11, decision made ahead of
-            // implementation). This also makes "select all, then invert"
-            // equivalent to "deselect", matching Photoshop.
-            selection = combined.isEmpty ? nil : combined
+            // Fewer than 3 points can't enclose an area — rather than build
+            // a mask that `SelectionMask.polygon(...)` would return empty
+            // anyway (and then have `applyCombinedSelection` potentially
+            // wipe an existing `.replace`-mode selection for what was really
+            // just a stray click), an incomplete lasso path is simply
+            // discarded without touching `selection` at all.
+            guard lassoVertices.count >= 3 else { return }
+            let newMask = SelectionMask.polygon(vertices: lassoVertices, width: layerStack.width, height: layerStack.height)
+            applyCombinedSelection(newMask, mode: lassoCombineMode)
             return
         }
         guard activeTool == .magnifier else {
