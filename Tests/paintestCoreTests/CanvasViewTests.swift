@@ -2125,4 +2125,136 @@ final class CanvasViewTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Layer transform: free transform / distort (issue #9, round 3)
+
+    /// Replicates exactly what `CanvasView`'s private `sourcePixelDistorted`
+    /// does (build a `ProjectiveTransform` from `transform.corners`, invert
+    /// it, epsilon-truncate into a source pixel index) so this test file —
+    /// which can't call that `private` method directly — can still exercise
+    /// the identical math and compare it against the public
+    /// `CanvasView.sourcePixel(forDestination:transform:sourceWidth:
+    /// sourceHeight:)` entry point (round 1/2's rectangle-only formula) for
+    /// transforms that carry no distortion.
+    private func projectiveSourcePixel(forDestination pixel: (x: Int, y: Int), transform: LayerTransform, sourceWidth: Int, sourceHeight: Int) -> (x: Int, y: Int)? {
+        let corners = transform.corners
+        let projective = ProjectiveTransform(
+            topLeft: corners.topLeft,
+            topRight: corners.topRight,
+            bottomRight: corners.bottomRight,
+            bottomLeft: corners.bottomLeft
+        )
+        guard let (u, v) = projective.inverse(x: Double(pixel.x), y: Double(pixel.y)) else { return nil }
+        guard u >= 0, u < 1, v >= 0, v < 1 else { return nil }
+        let epsilon = 1e-9
+        return (Int(u * Double(sourceWidth) + epsilon), Int(v * Double(sourceHeight) + epsilon))
+    }
+
+    /// Numerical verification #1 (issue #9 round 3 plan): for every
+    /// distortion-free transform round 1/2 already has tests for (plain
+    /// identity, 2x-scaled, and rotated 37° — an arbitrary non-multiple-of-90
+    /// angle so no axis lands exactly on a boundary the way 90°/180° do),
+    /// the round-3 projective-transform-based inverse mapping must return
+    /// the exact same source pixel as round 1/2's existing rectangle-only
+    /// `CanvasView.sourcePixel`, at every destination pixel of an 8x8
+    /// canvas. This is the regression guarantee the issue calls for: the new
+    /// general-quadrilateral math has to reduce to the old math whenever the
+    /// quadrilateral is still just a (possibly rotated) rectangle.
+    func testProjectiveTransform_noDistortion_matchesPlainRectangleSourcePixel_forIdentityScaledAndRotatedTransforms() {
+        let identity = LayerTransform.identity(width: 8, height: 8)
+        var scaled = identity
+        scaled.width = 16
+        scaled.height = 16
+        var rotated = identity
+        rotated.rotation = 37 * .pi / 180
+
+        for (label, transform) in [("identity", identity), ("scaled2x", scaled), ("rotated37deg", rotated)] {
+            for y in 0..<8 {
+                for x in 0..<8 {
+                    let expected = CanvasView.sourcePixel(forDestination: (x, y), transform: transform, sourceWidth: 8, sourceHeight: 8)
+                    let actual = projectiveSourcePixel(forDestination: (x, y), transform: transform, sourceWidth: 8, sourceHeight: 8)
+                    XCTAssertEqual(actual?.x, expected?.x, "\(label) x=\(x) y=\(y)")
+                    XCTAssertEqual(actual?.y, expected?.y, "\(label) x=\(x) y=\(y)")
+                }
+            }
+        }
+    }
+
+    /// Numerical verification #2 (issue #9 round 3 plan): a concrete,
+    /// hand-derived distortion case. Starts from the identity transform of
+    /// an 8x8 canvas (corners at `(0,0)`/`(8,0)`/`(8,8)`/`(0,8)`) and pulls
+    /// only the bottom-right corner inward by `(-3, -2)`, landing it at
+    /// `(5, 6)` — a concave quadrilateral, not a parallelogram, so the
+    /// perspective terms (`g`/`h` in `ProjectiveTransform`) are genuinely
+    /// non-zero (unlike a parallelogram distortion, which a naive
+    /// implementation could get "right" by accident with a purely affine
+    /// map).
+    ///
+    /// The expected source pixels below were derived independently of the
+    /// implementation: by hand, solving `ProjectiveTransform`'s own 2x2
+    /// linear systems for this quadrilateral's `a..h` coefficients
+    /// (`a=40/3, b=0, c=0, d=0, e=16, f=0, g=2/3, h=1`), then evaluating
+    /// `inverse(x:y:)` at each destination pixel algebraically — not by
+    /// running this test's own code and reading back whatever it produced.
+    /// Covers a point near an undistorted corner (top-left), one near the
+    /// quadrilateral's center, and one near the distorted corner's side,
+    /// the last of which is also asserted to differ from what the identity
+    /// (no-distortion) mapping would have given at the same destination
+    /// pixel — proof the distortion actually changed the sampling, not just
+    /// that some source pixel came back.
+    func testSourcePixel_singleCornerPulledInward_matchesHandDerivedProjectiveMapping() {
+        var transform = LayerTransform.identity(width: 8, height: 8)
+        transform.distortBottomRight = CGVector(dx: -3, dy: -2)
+
+        // The distorted quadrilateral's corners land exactly where the hand
+        // derivation assumed — checked first so a failure here points
+        // straight at `LayerTransform.corners`' offset math rather than
+        // `ProjectiveTransform`.
+        let corners = transform.corners
+        XCTAssertEqual(corners.topLeft, CGPoint(x: 0, y: 0))
+        XCTAssertEqual(corners.topRight, CGPoint(x: 8, y: 0))
+        XCTAssertEqual(corners.bottomRight, CGPoint(x: 5, y: 6))
+        XCTAssertEqual(corners.bottomLeft, CGPoint(x: 0, y: 8))
+
+        func assertMaps(_ destination: (x: Int, y: Int), to expected: (x: Int, y: Int), line: UInt = #line) {
+            let actual = CanvasView.sourcePixel(forDestination: destination, transform: transform, sourceWidth: 8, sourceHeight: 8)
+            XCTAssertEqual(actual?.x, expected.x, "destination \(destination) x", line: line)
+            XCTAssertEqual(actual?.y, expected.y, "destination \(destination) y", line: line)
+        }
+
+        // Near the undistorted top-left corner.
+        assertMaps((1, 1), to: (0, 0))
+        // Near the quadrilateral's center (true perspective center, not the
+        // plain average of the 4 corners — see `ProjectiveTransform`'s doc
+        // comment on why this test exercises real perspective math).
+        assertMaps((4, 4), to: (4, 3))
+        // Near the side the distorted corner pulled inward.
+        assertMaps((6, 3), to: (7, 2))
+
+        // Proof the distortion changed the mapping: the identity (no
+        // distortion) transform would have sampled destination (6, 3) from
+        // source (6, 3) exactly (pixel index == destination index, no
+        // rotation/scale/distortion at all) — not (7, 2).
+        let identity = LayerTransform.identity(width: 8, height: 8)
+        let identitySample = CanvasView.sourcePixel(forDestination: (6, 3), transform: identity, sourceWidth: 8, sourceHeight: 8)
+        XCTAssertEqual(identitySample?.x, 6)
+        XCTAssertEqual(identitySample?.y, 3)
+    }
+
+    /// `LayerTransform.hasDistortion` is the switch `CanvasView.sourcePixel`
+    /// and the live-preview drawing use to pick between the rectangle-only
+    /// and projective-transform code paths — this locks in its truth table
+    /// directly, independent of any sampling behavior.
+    func testLayerTransform_hasDistortion_trueOnlyWhenSomeCornerOffsetIsNonZero() {
+        var transform = LayerTransform.identity(width: 8, height: 8)
+        XCTAssertFalse(transform.hasDistortion)
+
+        transform.distortTopLeft = CGVector(dx: 1, dy: 0)
+        XCTAssertTrue(transform.hasDistortion)
+        transform.distortTopLeft = .zero
+        XCTAssertFalse(transform.hasDistortion)
+
+        transform.distortBottomRight = CGVector(dx: 0, dy: -1)
+        XCTAssertTrue(transform.hasDistortion)
+    }
 }
