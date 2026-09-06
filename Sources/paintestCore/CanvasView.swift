@@ -190,6 +190,14 @@ final class CanvasView: NSView {
     /// layer's own contents — so the eyedropper picks up whatever color is
     /// visible on screen, including layers stacked above/below the active
     /// one (issue #14). Returns `nil` for a pixel outside the canvas.
+    ///
+    /// Because this reads back from `layerStack.compositeImage()` (an sRGB
+    /// `CGContext`) rather than the active layer's own bitmap, the returned
+    /// color is not guaranteed to be byte-identical to whatever `setPixel`
+    /// originally wrote — a real color-space conversion through the
+    /// composite is not a no-op for saturated primaries (see
+    /// `CanvasViewTests.byteRGB(of:)`'s doc comment, which measured ~38/255
+    /// of drift on the green channel for pure red).
     private func sampleColor(at pixel: (x: Int, y: Int)) -> NSColor? {
         guard pixel.x >= 0, pixel.x < layerStack.width, pixel.y >= 0, pixel.y < layerStack.height else { return nil }
         guard let image = layerStack.compositeImage() else { return nil }

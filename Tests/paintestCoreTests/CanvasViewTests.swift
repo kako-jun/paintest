@@ -603,6 +603,44 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(byteRGB(of: pickedColor)?.b, 0)
     }
 
+    func testMouseDown_withEyedropperActive_samplesSemitransparentPixelCorrectly() {
+        // `compositeImage()` composites into a `CGImageAlphaInfo.premultipliedLast`
+        // context (see `LayerStack.compositeImage()`), and `PixelCanvas`'s own
+        // bitmap is `.alphaNonpremultiplied` (see `PixelCanvas.makeBitmap`'s doc
+        // comment) — so a semitransparent pixel goes through a premultiply (on
+        // the way into the composite context) and an un-premultiply (`colorAt`
+        // reading the resulting `CGImage` back out) round trip that a fully
+        // opaque pixel (alpha 255) never exercises, since premultiplying by 1.0
+        // is a no-op. With only a single visible layer and the composite
+        // context starting out fully transparent (all-zero), source-over
+        // blending contributes nothing from the (empty) destination, so the
+        // math reduces to: premultiply(r, g, b, a) = (r*a/255, g*a/255, b*a/255,
+        // a), then un-premultiply divides back out by the same alpha. This is
+        // exactly the kind of premultiplied/non-premultiplied mismatch
+        // `PixelCanvas.makeBitmap`'s `.alphaNonpremultiplied` doc comment
+        // warns has bitten this codebase before — empirically confirmed here,
+        // though, the round trip comes back byte-exact for alpha 128 (no
+        // drift), unlike `byteRGB(of:)`'s documented ~38/255 color-space
+        // drift on the green channel.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let semitransparentRed = NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 128.0 / 255.0)
+        view.layerStack.activeLayer.canvas.setPixel(x: 2, y: 2, color: semitransparentRed)
+        view.activeTool = .eyedropper
+        var pickedColor: NSColor?
+        view.onColorPicked = { color, _ in pickedColor = color }
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let picked = byteRGB(of: pickedColor)
+        let pickedAlpha = pickedColor.map { UInt8(max(0, min(255, ($0.alphaComponent * 255).rounded()))) }
+        XCTAssertEqual(picked?.r, 255, "red channel must survive the premultiply/un-premultiply round trip")
+        XCTAssertEqual(picked?.g, 0)
+        XCTAssertEqual(picked?.b, 0)
+        XCTAssertEqual(pickedAlpha, 128, "alpha itself must survive the round trip (un-premultiplying must not also divide down the alpha channel, nor leave it at the premultiplied source's own alpha unchanged by coincidence)")
+    }
+
     func testMouseDown_withEyedropperActive_atTopLeftCorner_firesOnColorPicked() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
