@@ -164,4 +164,64 @@ final class SelectionMaskTests: XCTestCase {
         let edges = mask.boundaryEdges()
         XCTAssertEqual(edges.count, 6)
     }
+
+    // MARK: - magicWand (round 3 minimal sanity coverage; full observation-
+    // point coverage — tolerance boundary values, disconnected same-color
+    // islands, non-square canvases, etc. — is a follow-up test-writing
+    // pass's job, same as this file's round-1/round-2 disclaimers above.)
+
+    private func solidColorGrid(width: Int, height: Int, color: (r: UInt8, g: UInt8, b: UInt8, a: UInt8), except: [(x: Int, y: Int, color: (r: UInt8, g: UInt8, b: UInt8, a: UInt8))] = []) -> (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+        { x, y in
+            guard x >= 0, x < width, y >= 0, y < height else { return nil }
+            if let overridden = except.first(where: { $0.x == x && $0.y == y })?.color {
+                return overridden
+            }
+            return color
+        }
+    }
+
+    func testMagicWand_startOutOfColor_isEmpty_notACrash() {
+        let colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? = { _, _ in nil }
+        let mask = SelectionMask.magicWand(startX: 0, startY: 0, colorAt: colorAt, tolerance: 32, width: 4, height: 4)
+        XCTAssertTrue(mask.isEmpty)
+    }
+
+    func testMagicWand_solidColorCanvas_selectsEverything() {
+        let colorAt = solidColorGrid(width: 4, height: 4, color: (r: 10, g: 20, b: 30, a: 255))
+        let mask = SelectionMask.magicWand(startX: 0, startY: 0, colorAt: colorAt, tolerance: 0, width: 4, height: 4)
+        for y in 0..<4 {
+            for x in 0..<4 {
+                XCTAssertTrue(mask.contains(x: x, y: y), "(\(x), \(y)) should be selected on a solid-color canvas")
+            }
+        }
+    }
+
+    func testMagicWand_withinTolerance_isIncluded_outsideTolerance_isExcluded() {
+        // A 3x1 row: start pixel red, middle pixel slightly off (within
+        // tolerance), last pixel far off (outside tolerance).
+        let colorAt = solidColorGrid(
+            width: 3, height: 1,
+            color: (r: 100, g: 100, b: 100, a: 255),
+            except: [(x: 2, y: 0, color: (r: 250, g: 250, b: 250, a: 255))]
+        )
+        let mask = SelectionMask.magicWand(startX: 0, startY: 0, colorAt: colorAt, tolerance: 20, width: 3, height: 1)
+        XCTAssertTrue(mask.contains(x: 0, y: 0))
+        XCTAssertTrue(mask.contains(x: 1, y: 0))
+        XCTAssertFalse(mask.contains(x: 2, y: 0), "a far-off color beyond tolerance must not be selected")
+    }
+
+    func testMagicWand_doesNotFloodAcrossDiagonalGap() {
+        // Two same-color pixels touching only diagonally (a checkerboard),
+        // with the other two corners a different color — 4-connectivity must
+        // not let the fill jump the diagonal gap.
+        let colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? = { x, y in
+            let isCheckerA = (x + y) % 2 == 0
+            return isCheckerA ? (r: 0, g: 0, b: 0, a: 255) : (r: 255, g: 255, b: 255, a: 255)
+        }
+        let mask = SelectionMask.magicWand(startX: 0, startY: 0, colorAt: colorAt, tolerance: 0, width: 2, height: 2)
+        XCTAssertTrue(mask.contains(x: 0, y: 0))
+        XCTAssertFalse(mask.contains(x: 1, y: 0), "diagonal neighbor of a different color must not be selected")
+        XCTAssertFalse(mask.contains(x: 0, y: 1), "diagonal neighbor of a different color must not be selected")
+        XCTAssertFalse(mask.contains(x: 1, y: 1), "the far diagonal same-color pixel must not be reached through a diagonal-only path")
+    }
 }

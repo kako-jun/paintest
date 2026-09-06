@@ -38,9 +38,9 @@ final class ToolboxViewTests: XCTestCase {
         _ = makeView()
     }
 
-    func testButtonCount_equals18() {
+    func testButtonCount_equals19() {
         let view = makeView()
-        XCTAssertEqual(allButtons(in: view).count, 18)
+        XCTAssertEqual(allButtons(in: view).count, 19)
     }
 
     func testExactlyOneButton_isPressedByDefault() {
@@ -59,12 +59,12 @@ final class ToolboxViewTests: XCTestCase {
     // rectangle/ellipse/lasso/polygon select tools are wired to real
     // behavior (issues #5, #10, #14, #13, #11); every other button stays a
     // purely visual placeholder with no target/action, same as before.
-    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択"]
+    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド"]
 
     func testOnlyPencilEraserPenEyedropperMagnifierAndSelectTools_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 9)
+        XCTAssertEqual(wired.count, 10)
         for button in wired {
             XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier/select tools must be wired to onToolSelected")
             XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier/select tools must be wired to onToolSelected")
