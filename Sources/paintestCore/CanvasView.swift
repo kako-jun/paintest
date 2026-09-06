@@ -137,14 +137,17 @@ final class CanvasView: NSView {
     var magicWandTolerance: Int = 32
 
     /// Which handle of `activeTransform`'s rectangle a transform drag grabbed
-    /// (issue #9, round 1) — `.move` for a drag started inside the rectangle
-    /// (not on a handle), `.corner`/`.edge` for the 8 resize handles. `nil`
-    /// while no transform drag is in progress (including whenever
-    /// `activeTransform` itself is `nil`).
+    /// (issue #9) — `.move` for a drag started inside the rectangle (not on
+    /// a handle), `.corner`/`.edge` for the 8 resize handles (round 1), and
+    /// `.rotate` (round 2) for the ring just outside a corner — Photoshop's
+    /// convention for "rotate the whole rectangle around its center" rather
+    /// than "resize from this corner". `nil` while no transform drag is in
+    /// progress (including whenever `activeTransform` itself is `nil`).
     private enum TransformHandle: Equatable {
         case move
         case corner(TransformCorner)
         case edge(TransformEdge)
+        case rotate
     }
 
     private enum TransformCorner: CaseIterable {
@@ -198,6 +201,14 @@ final class CanvasView: NSView {
     /// `polygonCloseDistance`'s existing "small constant view-space
     /// tolerance" pattern.
     private static let transformHandleHitRadius: CGFloat = 6
+
+    /// A click lands on the rotate handle (issue #9, round 2) when it's
+    /// farther from a corner than `transformHandleHitRadius` (which still
+    /// wins, for the scale handle) but no farther than this — an annulus
+    /// just outside each corner's resize hitbox, matching Photoshop's
+    /// convention of a corner-adjacent ring for rotation rather than a
+    /// separate handle glyph.
+    private static let transformRotateHandleOuterRadius: CGFloat = 14
 
     /// The transform rectangle never shrinks below this many canvas pixels
     /// on either axis, regardless of how far a resize handle is dragged —
@@ -307,7 +318,7 @@ final class CanvasView: NSView {
         return fitting.max() ?? levels.first ?? 1
     }
 
-    // MARK: - Layer transform (issue #9, round 1: move + scale only)
+    // MARK: - Layer transform (issue #9, round 1: move + scale; round 2: rotate)
 
     /// Enters transform mode for the active layer ("自由変形", Cmd+T — see
     /// `AppDelegate.beginLayerTransform()`). A no-op if already in transform
@@ -378,15 +389,30 @@ final class CanvasView: NSView {
     /// destination pixel should stay untouched (transparent, since
     /// `rasterizeTransform` clears the destination first).
     ///
-    /// Round 1 only ever calls this with `transform.rotation == 0`, so this
-    /// is a plain axis-aligned inverse mapping — a general `corners`-based
-    /// (rotation-aware) version is round 2's job.
+    /// Round 1 only ever called this with `transform.rotation == 0`. Round 2
+    /// generalizes the inverse mapping to any angle: `pixel` is first
+    /// rotated by `-rotation` around the rectangle's own center (the inverse
+    /// of the rotation `LayerTransform.corners` applies when placing the
+    /// rectangle), recovering the pre-rotation local offset, and everything
+    /// from there on is exactly round 1's axis-aligned math applied to that
+    /// local offset instead of to `pixel` directly — so a `rotation == 0`
+    /// transform still takes the identical code path (and produces identical
+    /// results) it always did.
     static func sourcePixel(forDestination pixel: (x: Int, y: Int), transform: LayerTransform, sourceWidth: Int, sourceHeight: Int) -> (x: Int, y: Int)? {
         guard transform.width > 0, transform.height > 0 else { return nil }
-        let left = transform.centerX - transform.width / 2
-        let top = transform.centerY - transform.height / 2
-        let u = (Double(pixel.x) - left) / transform.width
-        let v = (Double(pixel.y) - top) / transform.height
+        let dx = Double(pixel.x) - transform.centerX
+        let dy = Double(pixel.y) - transform.centerY
+        let cosR = cos(transform.rotation)
+        let sinR = sin(transform.rotation)
+        // Inverse rotation (rotate by `-rotation`): `cos(-θ) == cos(θ)` and
+        // `sin(-θ) == -sin(θ)`, applied to the standard 2D rotation matrix
+        // `LayerTransform.corners` uses in the forward direction.
+        let localX = dx * cosR + dy * sinR
+        let localY = -dx * sinR + dy * cosR
+        let halfWidth = transform.width / 2
+        let halfHeight = transform.height / 2
+        let u = (localX + halfWidth) / transform.width
+        let v = (localY + halfHeight) / transform.height
         guard u >= 0, u < 1, v >= 0, v < 1 else { return nil }
         // A tiny epsilon guards against floating-point rounding pushing an
         // exact-boundary `u`/`v` (most notably the identity transform, where
@@ -451,10 +477,12 @@ final class CanvasView: NSView {
 
     /// Hit-tests a view-space click/drag-start point against `transform`'s
     /// handles and interior, at the current `zoomScale` — used by `mouseDown`
-    /// while in transform mode. Corners and edge midpoints win over the
-    /// interior (checked first) within `transformHandleHitRadius` view
-    /// points; a point inside the rectangle but not on any handle is a
-    /// `.move`; a point outside the rectangle entirely is `nil` (no drag).
+    /// while in transform mode. Corners and edge midpoints win over
+    /// everything else (checked first) within `transformHandleHitRadius`
+    /// view points; a click landing in the ring just outside a corner
+    /// (`transformRotateHandleOuterRadius`) is `.rotate` (round 2); a point
+    /// inside the rectangle but not on any handle or ring is a `.move`; a
+    /// point outside the rectangle entirely is `nil` (no drag).
     private func hitTestTransformHandle(at point: NSPoint, transform: LayerTransform) -> TransformHandle? {
         let scale = CGFloat(zoomScale)
         let (corners, edges) = CanvasView.transformHandlePoints(for: transform, scale: scale)
@@ -468,16 +496,32 @@ final class CanvasView: NSView {
                 return .edge(edge)
             }
         }
-        // Round 1's rectangle is never rotated, so an axis-aligned `NSRect`
-        // is an exact interior test (round 2, once rotation can be nonzero,
-        // will need a real point-in-rotated-rectangle test here instead).
-        let rect = NSRect(
-            x: (transform.centerX - transform.width / 2) * Double(scale),
-            y: (transform.centerY - transform.height / 2) * Double(scale),
-            width: transform.width * Double(scale),
-            height: transform.height * Double(scale)
-        )
-        return rect.contains(point) ? .move : nil
+        for corner in TransformCorner.allCases {
+            if let handlePoint = corners[corner] {
+                let distance = hypot(point.x - handlePoint.x, point.y - handlePoint.y)
+                if distance > Self.transformHandleHitRadius && distance <= Self.transformRotateHandleOuterRadius {
+                    return .rotate
+                }
+            }
+        }
+        // A point-in-rotated-rectangle test: transforms `point` into the
+        // rectangle's own (unrotated) local frame around its center — via
+        // the same inverse-rotation math as `sourcePixel(forDestination:
+        // transform:sourceWidth:sourceHeight:)` — then checks it against the
+        // axis-aligned half-extents there. Round 1's rectangle was never
+        // rotated, so a plain axis-aligned `NSRect.contains` sufficed then;
+        // this reduces to exactly that check when `rotation == 0`, and
+        // handles any angle now that round 2 lets `rotation` be nonzero.
+        let centerView = CGPoint(x: transform.centerX * Double(scale), y: transform.centerY * Double(scale))
+        let cosR = cos(transform.rotation)
+        let sinR = sin(transform.rotation)
+        let dx = Double(point.x) - centerView.x
+        let dy = Double(point.y) - centerView.y
+        let localX = dx * cosR + dy * sinR
+        let localY = -dx * sinR + dy * cosR
+        let halfWidth = transform.width / 2 * Double(scale)
+        let halfHeight = transform.height / 2 * Double(scale)
+        return (abs(localX) <= halfWidth && abs(localY) <= halfHeight) ? .move : nil
     }
 
     /// One axis of a resize drag: given the anchor (fixed, opposite handle)
@@ -585,19 +629,33 @@ final class CanvasView: NSView {
         )
         context.draw(image, in: destRect)
 
-        // Layer transform live preview + handles (issue #9, round 1: move
-        // and scale only — rotation stays 0, so this is a plain, unrotated
-        // rectangle draw). `transformOriginalCanvas` is what actually gets
-        // drawn (the layer's pixels as they were when the transform began),
-        // repositioned/resized to `activeTransform`'s current rectangle —
-        // together with the base composite's exclusion above, this reads as
-        // "the layer, moved" rather than "the layer, plus a ghost copy of
-        // it".
+        // Layer transform live preview + handles (issue #9; round 1: move
+        // and scale; round 2: rotate too, so this rectangle is no longer
+        // necessarily axis-aligned). `transformOriginalCanvas` is what
+        // actually gets drawn (the layer's pixels as they were when the
+        // transform began), repositioned/resized/rotated to
+        // `activeTransform`'s current rectangle — together with the base
+        // composite's exclusion above, this reads as "the layer, moved" (or
+        // rotated) rather than "the layer, plus a ghost copy of it".
         if let activeTransform, let originalCanvas = transformOriginalCanvas, let previewImage = originalCanvas.cgImage {
             let scale = CGFloat(zoomScale)
-            let transformRect = CGRect(
-                x: (activeTransform.centerX - activeTransform.width / 2) * Double(scale),
-                y: (activeTransform.centerY - activeTransform.height / 2) * Double(scale),
+
+            // Draws the (unrotated) preview image into a rect centered on
+            // the origin, inside a context translated to the rectangle's
+            // view-space center and rotated by `activeTransform.rotation` —
+            // rather than computing the rotated destination rect by hand.
+            // `CanvasView` is already flipped (y grows downward, same as
+            // `LayerTransform.corners`' own convention), so `rotate(by:)`
+            // here turns the image the same direction `corners` turns the
+            // rectangle. Scoped with save/restore so this transform doesn't
+            // leak into the bounding-box/handle drawing right after, which
+            // works in plain view-space coordinates instead.
+            context.saveGState()
+            context.translateBy(x: activeTransform.centerX * Double(scale), y: activeTransform.centerY * Double(scale))
+            context.rotate(by: activeTransform.rotation)
+            let localRect = CGRect(
+                x: -activeTransform.width / 2 * Double(scale),
+                y: -activeTransform.height / 2 * Double(scale),
                 width: activeTransform.width * Double(scale),
                 height: activeTransform.height * Double(scale)
             )
@@ -607,23 +665,41 @@ final class CanvasView: NSView {
             // result `commitLayerTransform()` will actually produce.
             context.interpolationQuality = .none
             context.setShouldAntialias(false)
-            context.draw(previewImage, in: transformRect)
+            context.draw(previewImage, in: localRect)
+            context.restoreGState()
 
-            // Bounding box: a *solid* stroke, unlike every dashed
+            // Bounding box: a *solid* stroke through the (possibly rotated)
+            // 4 corners directly — `activeTransform.corners` already
+            // accounts for rotation (round 1 implemented that rotation math
+            // even though round 1 itself never set rotation away from 0) —
+            // rather than stroking an axis-aligned `CGRect`, which would be
+            // wrong the moment `rotation != 0`. Solid, unlike every dashed
             // selection/rubber-band overlay elsewhere in this method, so a
             // transform-in-progress reads as visually distinct from a
             // selection.
+            let (corners, edges) = CanvasView.transformHandlePoints(for: activeTransform, scale: scale)
             context.setShouldAntialias(true)
             context.setStrokeColor(NSColor.systemBlue.cgColor)
             context.setLineWidth(1)
             context.setLineDash(phase: 0, lengths: [])
-            context.stroke(transformRect.insetBy(dx: 0.5, dy: 0.5))
+            if let topLeft = corners[.topLeft], let topRight = corners[.topRight],
+               let bottomRight = corners[.bottomRight], let bottomLeft = corners[.bottomLeft] {
+                context.beginPath()
+                context.move(to: topLeft)
+                context.addLine(to: topRight)
+                context.addLine(to: bottomRight)
+                context.addLine(to: bottomLeft)
+                context.closePath()
+                context.strokePath()
+            }
 
             // 8 resize handles (4 corners + 4 edge midpoints): small filled
             // squares, matching `hitTestTransformHandle`'s own handle
             // positions exactly (same `transformHandlePoints` helper) so
-            // what's drawn is always where a click would actually register.
-            let (corners, edges) = CanvasView.transformHandlePoints(for: activeTransform, scale: scale)
+            // what's drawn is always where a click would actually register
+            // — including the rotate ring just outside each corner, which
+            // draws no handle glyph of its own (matching Photoshop, where
+            // the rotate hitbox is likewise invisible).
             let handleSize: CGFloat = 6
             for point in Array(corners.values) + Array(edges.values) {
                 let handleRect = CGRect(
@@ -1122,6 +1198,31 @@ final class CanvasView: NSView {
                 activeTransform = CanvasView.resizeByCorner(corner, start: startTransform, dx: dx, dy: dy, keepAspect: event.modifierFlags.contains(.shift))
             case .edge(let edge):
                 activeTransform = CanvasView.resizeByEdge(edge, start: startTransform, dx: dx, dy: dy)
+            case .rotate:
+                // Angle of the mouse relative to the rectangle's own center,
+                // in view space (canvas pixel space scaled by `zoomScale` —
+                // no extra flip needed since `CanvasView` is already
+                // flipped, so this uses the same y-grows-downward
+                // convention `LayerTransform.corners`' rotation math does).
+                // Like the resize handles above, this recomputes from
+                // `startTransform`'s own rotation plus the *total* angle
+                // moved since the drag began, rather than accumulating a
+                // delta every `mouseDragged` call, to avoid drift.
+                let centerXView = startTransform.centerX * Double(scale)
+                let centerYView = startTransform.centerY * Double(scale)
+                let startAngle = atan2(Double(startPoint.y) - centerYView, Double(startPoint.x) - centerXView)
+                let currentAngle = atan2(Double(point.y) - centerYView, Double(point.x) - centerXView)
+                var newRotation = startTransform.rotation + (currentAngle - startAngle)
+                if event.modifierFlags.contains(.shift) {
+                    // Snaps to 15-degree increments (Photoshop's own
+                    // rotate-handle convention under Shift).
+                    let degrees = newRotation * 180 / .pi
+                    let snappedDegrees = (degrees / 15).rounded() * 15
+                    newRotation = snappedDegrees * .pi / 180
+                }
+                var transform = startTransform
+                transform.rotation = newRotation
+                activeTransform = transform
             }
             needsDisplay = true
             return
