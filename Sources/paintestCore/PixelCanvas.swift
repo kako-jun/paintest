@@ -83,8 +83,14 @@ final class PixelCanvas {
     }
 
     /// Sets a single pixel. Coordinates are in bitmap space: (0,0) is top-left.
-    func setPixel(x: Int, y: Int, color: NSColor) {
+    ///
+    /// `mask` restricts the write to a selection (issue #11): when non-nil
+    /// and the pixel falls outside it, the call is a no-op. Defaults to
+    /// `nil` (no restriction) so every pre-existing call site — and every
+    /// pre-existing test — keeps working unmodified.
+    func setPixel(x: Int, y: Int, color: NSColor, mask: SelectionMask? = nil) {
         guard x >= 0, x < width, y >= 0, y < height else { return }
+        guard mask == nil || mask!.contains(x: x, y: y) else { return }
         guard let data = bitmap.bitmapData else { return }
         let (r, g, b, a) = components(of: color)
         let bytesPerRow = bitmap.bytesPerRow
@@ -98,7 +104,12 @@ final class PixelCanvas {
 
     /// Draws a 1px line between two pixel coordinates using Bresenham's
     /// algorithm, writing every intermediate pixel directly (no interpolation).
-    func drawLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int), color: NSColor) {
+    ///
+    /// `mask` is forwarded straight to each visited pixel's `setPixel` call
+    /// (issue #11), so a pixel the line passes through is simply skipped
+    /// when it falls outside the selection — the line's shape (which
+    /// pixels it visits) is unaffected, only which of those get written.
+    func drawLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int), color: NSColor, mask: SelectionMask? = nil) {
         var x0 = p0.x
         var y0 = p0.y
         let x1 = p1.x
@@ -111,7 +122,7 @@ final class PixelCanvas {
         var err = dx + dy
 
         while true {
-            setPixel(x: x0, y: y0, color: color)
+            setPixel(x: x0, y: y0, color: color, mask: mask)
             if x0 == x1 && y0 == y1 { break }
             let e2 = 2 * err
             if e2 >= dy {
@@ -179,7 +190,7 @@ final class PixelCanvas {
     /// empirically (not assumed) by
     /// `PixelCanvasTests.testDrawAntialiasedDot_atOrigin_paintsTopLeftCorner_notBottomLeft`,
     /// which fails without this flip and passes with it.
-    private func drawAntialiased(_ draw: (CGContext) -> Void) {
+    private func drawAntialiased(mask: SelectionMask?, _ draw: (CGContext) -> Void) {
         guard let overlay = makePremultipliedOverlay(),
               let overlayData = overlay.bitmapData,
               let context = NSGraphicsContext(bitmapImageRep: overlay)?.cgContext,
@@ -202,6 +213,13 @@ final class PixelCanvas {
                 let srcOffset = overlayRowStart + x * overlayBpp
                 let srcAlphaByte = overlayData[srcOffset + 3]
                 guard srcAlphaByte > 0 else { continue }
+                // issue #11: skip pixels outside the selection, same as
+                // `setPixel`'s guard — this is the final write-back point
+                // for the alpha-composited result, so the mask check has to
+                // live here rather than in `drawFillEllipse`/`strokePath`
+                // above (those draw into the scratch overlay, not `bitmap`
+                // itself).
+                guard mask == nil || mask!.contains(x: x, y: y) else { continue }
 
                 let srcAlpha = Double(srcAlphaByte) / 255.0
                 // Un-premultiply: the overlay stores each channel as
@@ -236,8 +254,8 @@ final class PixelCanvas {
     /// Paints a filled, anti-aliased circle centered on `point`, in
     /// `setPixel`'s top-left-origin pixel-space coordinates. Used by the pen
     /// tool for a single click (no drag).
-    func drawAntialiasedDot(at point: (x: Int, y: Int), color: NSColor, diameter: CGFloat) {
-        drawAntialiased { context in
+    func drawAntialiasedDot(at point: (x: Int, y: Int), color: NSColor, diameter: CGFloat, mask: SelectionMask? = nil) {
+        drawAntialiased(mask: mask) { context in
             context.setFillColor(color.cgColor)
             let radius = diameter / 2
             let rect = CGRect(
@@ -253,8 +271,8 @@ final class PixelCanvas {
     /// Strokes an anti-aliased, round-capped/joined line between two points,
     /// in `setPixel`'s top-left-origin pixel-space coordinates. Used by the
     /// pen tool while dragging.
-    func drawAntialiasedLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int), color: NSColor, lineWidth: CGFloat) {
-        drawAntialiased { context in
+    func drawAntialiasedLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int), color: NSColor, lineWidth: CGFloat, mask: SelectionMask? = nil) {
+        drawAntialiased(mask: mask) { context in
             context.setLineCap(.round)
             context.setLineJoin(.round)
             context.setLineWidth(lineWidth)

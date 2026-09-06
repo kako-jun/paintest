@@ -133,4 +133,65 @@ final class OptionBarViewTests: XCTestCase {
 
         XCTAssertTrue(selectedLevels.isEmpty, "firing the old, now-detached popup's action after clear() must not reach the stale onSelect closure")
     }
+
+    // MARK: - showMagicWandOptions(currentTolerance:onToleranceChanged:) / clear() (issue #11, round 3)
+    //
+    // Same "previously zero coverage" situation as `showZoomPresets` above:
+    // this bar's second-ever control, added once the magic wand tool needed
+    // a tolerance slider.
+
+    private func toleranceSlider(in view: OptionBarView) -> NSSlider? {
+        view.subviews.compactMap { $0 as? NSSlider }.first
+    }
+
+    private func toleranceValueLabel(in view: OptionBarView) -> NSTextField? {
+        // Two `NSTextField`s are added ("許容誤差" label, then the numeric
+        // readout) — the value readout is added last.
+        view.subviews.compactMap { $0 as? NSTextField }.last
+    }
+
+    func testShowMagicWandOptions_sliderInitialValueMatchesCurrentTolerance() {
+        let view = makeView()
+
+        view.showMagicWandOptions(currentTolerance: 47) { _ in }
+
+        guard let slider = toleranceSlider(in: view) else {
+            XCTFail("showMagicWandOptions should add an NSSlider")
+            return
+        }
+        XCTAssertEqual(slider.doubleValue, 47, accuracy: 0.001)
+    }
+
+    func testShowMagicWandOptions_changingSlider_firesOnToleranceChangedWithIntValue_andUpdatesTheValueLabel() {
+        let view = makeView()
+        var receivedValues: [Int] = []
+        view.showMagicWandOptions(currentTolerance: 32) { receivedValues.append($0) }
+
+        guard let slider = toleranceSlider(in: view) else {
+            XCTFail("showMagicWandOptions should add an NSSlider")
+            return
+        }
+        slider.doubleValue = 128
+        _ = slider.sendAction(slider.action, to: slider.target)
+
+        XCTAssertEqual(receivedValues, [128], "onToleranceChanged must receive the Int tolerance the user dragged to, not the slider's own Double")
+        XCTAssertEqual(toleranceValueLabel(in: view)?.stringValue, "128", "the numeric readout must stay in sync with the slider")
+    }
+
+    func testClear_afterShowMagicWandOptions_removesSliderAndDetachesOldCallback() {
+        let view = makeView()
+        var receivedValues: [Int] = []
+        view.showMagicWandOptions(currentTolerance: 32) { receivedValues.append($0) }
+        guard let slider = toleranceSlider(in: view) else {
+            XCTFail("showMagicWandOptions should add an NSSlider")
+            return
+        }
+
+        view.clear()
+
+        XCTAssertTrue(view.subviews.isEmpty, "clear() must remove the slider, label, and value readout, same as it does for the zoom popup")
+        slider.doubleValue = 200
+        _ = slider.sendAction(slider.action, to: slider.target)
+        XCTAssertTrue(receivedValues.isEmpty, "firing the old, now-detached slider's action after clear() must not reach the stale onToleranceChanged closure")
+    }
 }
