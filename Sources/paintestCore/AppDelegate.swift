@@ -149,6 +149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // next time some other action happened to call
             // `documentTabBarView.reload()`.
             self?.documentTabBarView.reload()
+            // Only fires on an actual pixel edit (pencil/pen/bucket/etc.),
+            // never merely from switching tools or tabs — the correct
+            // "dirty" signal for issue #4's unsaved-changes tracking.
+            self?.documentManager.activeDocument.isDirty = true
         }
 
         scrollView = NSScrollView()
@@ -346,6 +350,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layerPanelView = LayerPanelView(layerStack: canvasView.layerStack)
         layerPanelView.onChange = { [weak self] in
             self?.canvasView.needsDisplay = true
+            // Layer add/remove/duplicate/reorder/opacity changes are
+            // content edits too, same as a pencil stroke (issue #4).
+            self?.documentManager.activeDocument.isDirty = true
         }
         layerPanelView.translatesAutoresizingMaskIntoConstraints = false
         layerPanelView.wantsLayer = true
