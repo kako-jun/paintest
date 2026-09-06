@@ -254,9 +254,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // color palette + status bar impression, replacing #1's NSToolbar).
 
     private func makeRootView() -> NSView {
-        let root = NSView()
+        let root = DropTargetView()
         root.wantsLayer = true
         root.layer?.backgroundColor = Self.chromeColor.cgColor
+        // Dropping an image file anywhere on the window opens it in a new
+        // tab (issue #4), the same as "開く…" — each dropped URL goes
+        // through the same `openDocument(from:)` used by the panel, so
+        // multiple files dropped at once each get their own tab.
+        root.onFilesDropped = { [weak self] urls in
+            urls.forEach { self?.openDocument(from: $0) }
+        }
 
         // Photoshop's options bar (issue #7): spans the full window width,
         // above everything else — the document tab strip, toolbox, canvas,
@@ -717,6 +724,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
+        openDocument(from: url)
+    }
+
+    /// Loads `url` into a new `Document` and opens it in a new tab. Shared
+    /// by `openCanvas()` (panel-driven "開く…") and drag-and-drop (issue
+    /// #4) so the `.paintestdoc`-vs-PNG branch and its error handling live
+    /// in exactly one place.
+    private func openDocument(from url: URL) {
         if url.pathExtension.lowercased() == "paintestdoc" {
             guard let layerStack = PaintestDocument.read(from: url) else {
                 presentError("ドキュメントの読み込みに失敗しました。")
