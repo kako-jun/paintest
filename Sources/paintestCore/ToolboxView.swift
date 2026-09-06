@@ -1,14 +1,14 @@
 import AppKit
 
 /// Photoshop's left-hand toolbox: a single vertical column of tool icons
-/// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, and pen
-/// are wired to real behavior (issues #5, #10) — clicking any of them fires
-/// `onToolSelected` and exclusively toggles that button's pressed state
-/// against the others' — so every other button here stays a purely visual
-/// placeholder with no target/action, same as before. The pencil cell
-/// renders pressed (`state == .on`) by default so the column still
-/// communicates "this is the active tool" the way the reference screenshots
-/// do.
+/// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, and
+/// the eyedropper are wired to real behavior (issues #5, #10, #14) —
+/// clicking any of them fires `onToolSelected` and exclusively toggles that
+/// button's pressed state against the others' — so every other button here
+/// stays a purely visual placeholder with no target/action, same as before.
+/// The pencil cell renders pressed (`state == .on`) by default so the
+/// column still communicates "this is the active tool" the way the
+/// reference screenshots do.
 ///
 /// A single column of 16 icons runs taller than the window at typical
 /// sizes, so (like `DocumentTabBarView`) the column is wrapped in a
@@ -19,9 +19,9 @@ final class ToolboxView: NSView {
         let symbol: String
         let label: String
         // Non-nil only for the buttons wired up so far — pencil/eraser
-        // (issue #5) and pen (issue #10); every other descriptor stays
-        // `nil` and its button gets no target/action, matching the
-        // previous all-placeholder behavior.
+        // (issue #5), pen (issue #10), and the eyedropper (issue #14);
+        // every other descriptor stays `nil` and its button gets no
+        // target/action, matching the previous all-placeholder behavior.
         let tool: Tool?
     }
 
@@ -32,7 +32,7 @@ final class ToolboxView: NSView {
         ToolDescriptor(symbol: "rectangle.dashed", label: "選択", tool: nil),
         ToolDescriptor(symbol: "eraser", label: "消しゴム", tool: .eraser),
         ToolDescriptor(symbol: "drop.fill", label: "塗りつぶし", tool: nil),
-        ToolDescriptor(symbol: "eyedropper", label: "スポイト", tool: nil),
+        ToolDescriptor(symbol: "eyedropper", label: "スポイト", tool: .eyedropper),
         ToolDescriptor(symbol: "magnifyingglass", label: "拡大鏡", tool: nil),
         ToolDescriptor(symbol: "pencil", label: "鉛筆", tool: .pencil),
         ToolDescriptor(symbol: "paintbrush.fill", label: "ペン", tool: .pen),
@@ -51,9 +51,9 @@ final class ToolboxView: NSView {
     // the app at launch.
     private static let pencilIndex = tools.firstIndex { $0.label == "鉛筆" } ?? 0
 
-    /// Fired when a wired tool button (pencil, eraser, pen) is clicked
-    /// (issues #5, #10). `AppDelegate` forwards this straight to
-    /// `CanvasView.activeTool`.
+    /// Fired when a wired tool button (pencil, eraser, pen, eyedropper) is
+    /// clicked (issues #5, #10, #14). `AppDelegate` forwards this straight
+    /// to `CanvasView.activeTool`.
     var onToolSelected: ((Tool) -> Void)?
 
     /// Every wired tool's button, keyed by its `Tool` case, so exclusive

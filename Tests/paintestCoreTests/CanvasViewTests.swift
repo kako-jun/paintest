@@ -260,11 +260,11 @@ final class CanvasViewTests: XCTestCase {
         return NSPoint(x: x, y: y)
     }
 
-    private func mouseDownEvent(at windowPoint: NSPoint, in window: NSWindow) -> NSEvent {
+    private func mouseDownEvent(at windowPoint: NSPoint, in window: NSWindow, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
         NSEvent.mouseEvent(
             with: .leftMouseDown,
             location: windowPoint,
-            modifierFlags: [],
+            modifierFlags: modifierFlags,
             timestamp: 0,
             windowNumber: window.windowNumber,
             context: nil,
@@ -498,5 +498,225 @@ final class CanvasViewTests: XCTestCase {
             }
         }
         XCTAssertTrue(foundPartialCoverage, "an antialiased stroke's round end caps should show partial coverage — drawLine's hard 1px edge never does this")
+    }
+
+    // MARK: - Eyedropper tool (issue #14)
+    //
+    // The eyedropper is a "one-shot" tool (see `Tool.eyedropper`'s doc
+    // comment): `mouseDown` samples the composite and fires
+    // `onColorPicked`, `mouseDragged` is a deliberate no-op, and neither
+    // ever reaches `paint(at:)`/`paintLine(from:to:)` or notifies
+    // `onLayerContentChanged` — sampling a color is not an edit.
+
+    /// Rounds an `NSColor` to byte-exact RGB, reading its components
+    /// directly with no `usingColorSpace(_:)` conversion. `sampleColor(at:)`
+    /// reads the picked color straight off an `NSBitmapImageRep`, and that
+    /// color already comes back in an RGB-model color space with the exact
+    /// same component values it was painted with (confirmed empirically:
+    /// painting `NSColor(deviceRed: 1, green: 0, blue: 0)` and reading it
+    /// straight back gives `(1, 0, 0)`). Explicitly converting to `.sRGB`
+    /// or `.deviceRGB` first — as you would to compare two colors of
+    /// *unknown* space — actually introduces drift here, because the
+    /// picked color's own space ("Generic RGB") differs from both and a
+    /// real gamut conversion isn't a no-op for saturated primaries like
+    /// red (empirically off by ~38/255 on the green channel).
+    private func byteRGB(of color: NSColor?) -> (r: UInt8, g: UInt8, b: UInt8)? {
+        guard let color else { return nil }
+        let r = UInt8(max(0, min(255, (color.redComponent * 255).rounded())))
+        let g = UInt8(max(0, min(255, (color.greenComponent * 255).rounded())))
+        let b = UInt8(max(0, min(255, (color.blueComponent * 255).rounded())))
+        return (r, g, b)
+    }
+
+    private let eyedropperKnownColor = NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1) // pure red
+
+    func testMouseDown_withEyedropperActive_firesOnColorPickedWithPixelColor() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.setPixel(x: 2, y: 2, color: eyedropperKnownColor)
+        view.activeTool = .eyedropper
+        var pickedColors: [(color: NSColor, isSecondary: Bool)] = []
+        view.onColorPicked = { pickedColors.append(($0, $1)) }
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(pickedColors.count, 1, "onColorPicked should fire exactly once")
+        XCTAssertEqual(byteRGB(of: pickedColors.first?.color)?.r, 255)
+        XCTAssertEqual(byteRGB(of: pickedColors.first?.color)?.g, 0)
+        XCTAssertEqual(byteRGB(of: pickedColors.first?.color)?.b, 0)
+        XCTAssertEqual(pickedColors.first?.isSecondary, false, "a plain click (no Option) must report the foreground slot")
+    }
+
+    func testMouseDown_withEyedropperActive_optionHeld_firesOnColorPickedWithIsSecondaryTrue() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.setPixel(x: 2, y: 2, color: eyedropperKnownColor)
+        view.activeTool = .eyedropper
+        var isSecondary: Bool?
+        view.onColorPicked = { _, secondary in isSecondary = secondary }
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!, modifierFlags: [.option]))
+
+        XCTAssertEqual(isSecondary, true, "Option-click must report the background slot")
+    }
+
+    func testMouseDown_withEyedropperActive_doesNotPaintOrNotifyLayerContentChanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .eyedropper
+        view.foregroundColor = .black
+        var notifiedCount = 0
+        view.onLayerContentChanged = { notifiedCount += 1 }
+        let before = view.layerStack.activeLayer.canvas.rawPixel(x: 2, y: 2)
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let after = view.layerStack.activeLayer.canvas.rawPixel(x: 2, y: 2)
+        XCTAssertEqual(before?.r, after?.r, "the eyedropper must never write a pixel")
+        XCTAssertEqual(before?.g, after?.g)
+        XCTAssertEqual(before?.b, after?.b)
+        XCTAssertEqual(before?.a, after?.a)
+        XCTAssertEqual(notifiedCount, 0, "sampling a color is not an edit and must not notify onLayerContentChanged")
+    }
+
+    func testMouseDown_withEyedropperActive_samplesCompositeAcrossLayers() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        // Bottom layer (index 0) carries the known color; the active
+        // (top) layer added below stays fully transparent at that pixel.
+        // If the eyedropper read the active layer alone instead of the
+        // composite, it would pick up transparent/black here instead.
+        view.layerStack.layers[0].canvas.setPixel(x: 2, y: 2, color: eyedropperKnownColor)
+        view.layerStack.addLayer() // index 1, becomes active; transparent
+        view.activeTool = .eyedropper
+        var pickedColor: NSColor?
+        view.onColorPicked = { color, _ in pickedColor = color }
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(byteRGB(of: pickedColor)?.r, 255, "the eyedropper must sample the visible composite, not just the active layer's own contents")
+        XCTAssertEqual(byteRGB(of: pickedColor)?.g, 0)
+        XCTAssertEqual(byteRGB(of: pickedColor)?.b, 0)
+    }
+
+    func testMouseDown_withEyedropperActive_samplesSemitransparentPixelCorrectly() {
+        // `compositeImage()` composites into a `CGImageAlphaInfo.premultipliedLast`
+        // context (see `LayerStack.compositeImage()`), and `PixelCanvas`'s own
+        // bitmap is `.alphaNonpremultiplied` (see `PixelCanvas.makeBitmap`'s doc
+        // comment) — so a semitransparent pixel goes through a premultiply (on
+        // the way into the composite context) and an un-premultiply (`colorAt`
+        // reading the resulting `CGImage` back out) round trip that a fully
+        // opaque pixel (alpha 255) never exercises, since premultiplying by 1.0
+        // is a no-op. With only a single visible layer and the composite
+        // context starting out fully transparent (all-zero), source-over
+        // blending contributes nothing from the (empty) destination, so the
+        // math reduces to: premultiply(r, g, b, a) = (r*a/255, g*a/255, b*a/255,
+        // a), then un-premultiply divides back out by the same alpha. This is
+        // exactly the kind of premultiplied/non-premultiplied mismatch
+        // `PixelCanvas.makeBitmap`'s `.alphaNonpremultiplied` doc comment
+        // warns has bitten this codebase before — empirically confirmed here,
+        // though, the round trip comes back byte-exact for alpha 128 (no
+        // drift), unlike `byteRGB(of:)`'s documented ~38/255 color-space
+        // drift on the green channel.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let semitransparentRed = NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 128.0 / 255.0)
+        view.layerStack.activeLayer.canvas.setPixel(x: 2, y: 2, color: semitransparentRed)
+        view.activeTool = .eyedropper
+        var pickedColor: NSColor?
+        view.onColorPicked = { color, _ in pickedColor = color }
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        let picked = byteRGB(of: pickedColor)
+        let pickedAlpha = pickedColor.map { UInt8(max(0, min(255, ($0.alphaComponent * 255).rounded()))) }
+        XCTAssertEqual(picked?.r, 255, "red channel must survive the premultiply/un-premultiply round trip")
+        XCTAssertEqual(picked?.g, 0)
+        XCTAssertEqual(picked?.b, 0)
+        XCTAssertEqual(pickedAlpha, 128, "alpha itself must survive the round trip (un-premultiplying must not also divide down the alpha channel, nor leave it at the premultiplied source's own alpha unchanged by coincidence)")
+    }
+
+    func testMouseDown_withEyedropperActive_atTopLeftCorner_firesOnColorPicked() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .eyedropper
+        var firedCount = 0
+        view.onColorPicked = { _, _ in firedCount += 1 }
+
+        let targetPoint = windowPoint(forPixelCol: 0, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(firedCount, 1, "the top-left corner pixel (0, 0) is in bounds and must fire")
+    }
+
+    func testMouseDown_withEyedropperActive_atBottomRightCorner_firesOnColorPicked() {
+        let zoomScale = 4
+        let width = 8
+        let height = 8
+        let view = makeViewInWindow(width: width, height: height, zoomScale: zoomScale)
+        view.activeTool = .eyedropper
+        var firedCount = 0
+        view.onColorPicked = { _, _ in firedCount += 1 }
+
+        let targetPoint = windowPoint(forPixelCol: width - 1, row: height - 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(firedCount, 1, "the bottom-right corner pixel (width-1, height-1) is in bounds and must fire")
+    }
+
+    func testMouseDown_withEyedropperActive_atNegativeCoordinate_doesNotFireOnColorPicked() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .eyedropper
+        var firedCount = 0
+        view.onColorPicked = { _, _ in firedCount += 1 }
+
+        let targetPoint = windowPoint(forPixelCol: -1, row: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(firedCount, 0, "a click resolving to pixel (-1, -1) is out of bounds and must not fire")
+    }
+
+    func testMouseDown_withEyedropperActive_atWidthHeightCoordinate_doesNotFireOnColorPicked() {
+        let zoomScale = 4
+        let width = 8
+        let height = 8
+        let view = makeViewInWindow(width: width, height: height, zoomScale: zoomScale)
+        view.activeTool = .eyedropper
+        var firedCount = 0
+        view.onColorPicked = { _, _ in firedCount += 1 }
+
+        let targetPoint = windowPoint(forPixelCol: width, row: height, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(firedCount, 0, "a click resolving to pixel (width, height) is one past the last valid index and must not fire")
+    }
+
+    func testMouseDragged_withEyedropperActive_isNoOp_doesNotFireOnColorPickedAgainOrPaint() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.setPixel(x: 2, y: 2, color: eyedropperKnownColor)
+        view.activeTool = .eyedropper
+        var firedCount = 0
+        view.onColorPicked = { _, _ in firedCount += 1 }
+        let startPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: startPoint, in: view.window!))
+        XCTAssertEqual(firedCount, 1, "precondition: mouseDown already fired once")
+        let dragTargetBefore = view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 2)
+
+        let dragPoint = windowPoint(forPixelCol: 4, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: view.window!))
+
+        XCTAssertEqual(firedCount, 1, "dragging with the eyedropper active must not fire onColorPicked again")
+        let dragTargetAfter = view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 2)
+        XCTAssertEqual(dragTargetBefore?.r, dragTargetAfter?.r, "dragging with the eyedropper active must not paint")
+        XCTAssertEqual(dragTargetBefore?.g, dragTargetAfter?.g)
+        XCTAssertEqual(dragTargetBefore?.b, dragTargetAfter?.b)
+        XCTAssertEqual(dragTargetBefore?.a, dragTargetAfter?.a)
     }
 }

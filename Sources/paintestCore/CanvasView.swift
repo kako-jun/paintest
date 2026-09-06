@@ -27,6 +27,15 @@ final class CanvasView: NSView {
     /// response to their own panel's buttons (issue #8 review S4). Follows
     /// the same callback pattern as `onZoomChanged`.
     var onLayerContentChanged: (() -> Void)?
+    /// Fired when the eyedropper tool samples a pixel (issue #14):
+    /// `AppDelegate` forwards the picked color straight into `setColor`, the
+    /// same entry point the color palette and color picker dialog use, so
+    /// foreground/background, the current-color indicator, and recent
+    /// colors all update together. `isSecondary` mirrors the color model's
+    /// existing foreground/background split (issue #5) — `true` when the
+    /// pixel should become the background color (Option-click) rather than
+    /// the foreground color.
+    var onColorPicked: ((NSColor, _ isSecondary: Bool) -> Void)?
 
     static let zoomLevels = [1, 2, 4, 8, 16, 32]
     static let defaultZoomScale = 4
@@ -153,6 +162,11 @@ final class CanvasView: NSView {
             layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor)
         case .pen:
             layerStack.activeLayer.canvas.drawAntialiasedDot(at: pixel, color: paintColor, diameter: Self.penLineWidth)
+        case .eyedropper:
+            // The eyedropper never reaches here: `mouseDown`/`mouseDragged`
+            // branch to `sampleColor(at:)` before calling `paint(at:)`
+            // (issue #14). Kept only to satisfy this switch's exhaustiveness.
+            return
         }
     }
 
@@ -164,11 +178,42 @@ final class CanvasView: NSView {
             layerStack.activeLayer.canvas.drawLine(from: p0, to: p1, color: paintColor)
         case .pen:
             layerStack.activeLayer.canvas.drawAntialiasedLine(from: p0, to: p1, color: paintColor, lineWidth: Self.penLineWidth)
+        case .eyedropper:
+            // Same as `paint(at:)` above: the eyedropper never drags into a
+            // stroke (issue #14), this exists only for exhaustiveness.
+            return
         }
+    }
+
+    /// Reads the color at a pixel out of the currently displayed
+    /// composite — what the user actually sees, not just the active
+    /// layer's own contents — so the eyedropper picks up whatever color is
+    /// visible on screen, including layers stacked above/below the active
+    /// one (issue #14). Returns `nil` for a pixel outside the canvas.
+    ///
+    /// Because this reads back from `layerStack.compositeImage()` (an sRGB
+    /// `CGContext`) rather than the active layer's own bitmap, the returned
+    /// color is not guaranteed to be byte-identical to whatever `setPixel`
+    /// originally wrote — a real color-space conversion through the
+    /// composite is not a no-op for saturated primaries (see
+    /// `CanvasViewTests.byteRGB(of:)`'s doc comment, which measured ~38/255
+    /// of drift on the green channel for pure red).
+    private func sampleColor(at pixel: (x: Int, y: Int)) -> NSColor? {
+        guard pixel.x >= 0, pixel.x < layerStack.width, pixel.y >= 0, pixel.y < layerStack.height else { return nil }
+        guard let image = layerStack.compositeImage() else { return nil }
+        let rep = NSBitmapImageRep(cgImage: image)
+        return rep.colorAt(x: pixel.x, y: pixel.y)
     }
 
     override func mouseDown(with event: NSEvent) {
         let pixel = pixelCoordinate(for: event)
+        if activeTool == .eyedropper {
+            if let pixelColor = sampleColor(at: pixel) {
+                let isSecondary = event.modifierFlags.contains(.option)
+                onColorPicked?(pixelColor, isSecondary)
+            }
+            return
+        }
         paint(at: pixel)
         lastPixel = pixel
         needsDisplay = true
@@ -176,6 +221,11 @@ final class CanvasView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if activeTool == .eyedropper {
+            // Click-only sampling (issue #14): continuous sampling while
+            // dragging is out of scope for this issue.
+            return
+        }
         let pixel = pixelCoordinate(for: event)
         if let last = lastPixel {
             paintLine(from: last, to: pixel)
