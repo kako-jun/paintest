@@ -8,13 +8,12 @@ import AppKit
 ///
 /// Round 1 of 3 built masks from rectangle and ellipse marquees
 /// (`rectangle(...)`/`ellipse(...)`); round 2 adds the lasso/polygon tools'
-/// free-form path via `polygon(...)`. All three shape constructors combine
-/// through the same `unioned`/`subtracting`/`intersected` methods and trace
-/// through the same `boundaryEdges()` — deliberately shape-agnostic (see its
-/// own doc comment) so it needed no changes for `polygon(...)` to reuse it.
-/// Magic-wand selection (round 3) is expected to build a `SelectionMask`
-/// some other way (e.g. flood-filling) but reuse everything else here
-/// unchanged too.
+/// free-form path via `polygon(...)`; round 3 adds the magic wand's
+/// flood-filled region via `magicWand(...)`. All four shape constructors
+/// combine through the same `unioned`/`subtracting`/`intersected` methods
+/// and trace through the same `boundaryEdges()` — deliberately shape-agnostic
+/// (see its own doc comment) so none of rounds 2/3 needed any changes here to
+/// reuse it.
 final class SelectionMask {
     let width: Int
     let height: Int
@@ -152,6 +151,79 @@ final class SelectionMask {
                 if inside {
                     mask.setSelected(true, x: x, y: y)
                 }
+            }
+        }
+        return mask
+    }
+
+    /// A flood-filled selection starting at `(startX, startY)` (issue #11,
+    /// round 3 of 3: the magic wand). Grows outward through 4-connected
+    /// neighbors (up/down/left/right only — no diagonals, unlike a typical
+    /// paint-bucket's optional 8-connected mode, which is explicitly out of
+    /// scope for this issue) so long as each candidate pixel's color is
+    /// within `tolerance` of the *start* pixel's color — not its immediate
+    /// neighbor's, matching how Photoshop's (non-"contiguous variance")
+    /// magic wand samples a single reference color for the whole selection
+    /// rather than letting small step-by-step drifts chain across a gradient.
+    ///
+    /// Color difference is the sum of the absolute per-channel differences
+    /// across R, G, and B (a simple Manhattan/L1 distance — cheaper than a
+    /// true Euclidean distance and plenty precise for a boolean "close
+    /// enough" cutoff; alpha is deliberately excluded so a fully-opaque and
+    /// a half-transparent pixel of the same RGB still count as the same
+    /// color). `tolerance` is compared directly against that sum, so its
+    /// useful range is roughly `0...(255 * 3)` — `0` matches only exact color
+    /// equality with the start pixel.
+    ///
+    /// `colorAt` is a plain closure rather than a `PixelCanvas`/`LayerStack`
+    /// parameter so this stays a pure, canvas-agnostic function like
+    /// `rectangle`/`ellipse`/`polygon` above — easy to unit test without
+    /// constructing a real canvas. It returns `nil` for any coordinate that
+    /// has no color (e.g. out of bounds), which this method also uses as the
+    /// flood-fill's own bounds check instead of comparing against
+    /// `width`/`height` directly — one less place the two could disagree.
+    ///
+    /// If the start pixel itself has no color (`colorAt(startX, startY) ==
+    /// nil`), this returns an empty mask rather than crashing or guessing a
+    /// color to match against.
+    static func magicWand(
+        startX: Int, startY: Int,
+        colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)?,
+        tolerance: Int,
+        width: Int, height: Int
+    ) -> SelectionMask {
+        let mask = SelectionMask(width: width, height: height)
+        guard let startColor = colorAt(startX, startY) else { return mask }
+
+        func colorDistance(_ a: (r: UInt8, g: UInt8, b: UInt8, a: UInt8), _ b: (r: UInt8, g: UInt8, b: UInt8, a: UInt8)) -> Int {
+            abs(Int(a.r) - Int(b.r)) + abs(Int(a.g) - Int(b.g)) + abs(Int(a.b) - Int(b.b))
+        }
+
+        var visited = Array(repeating: false, count: width * height)
+        func markVisited(x: Int, y: Int) {
+            guard x >= 0, x < width, y >= 0, y < height else { return }
+            visited[y * width + x] = true
+        }
+        func isVisited(x: Int, y: Int) -> Bool {
+            guard x >= 0, x < width, y >= 0, y < height else { return true }
+            return visited[y * width + x]
+        }
+
+        // Stack-based (not recursive) flood fill so a large contiguous
+        // region — e.g. an entire solid-color background on a big canvas —
+        // can't overflow the call stack the way a naive recursive
+        // implementation could.
+        var stack: [(Int, Int)] = [(startX, startY)]
+        markVisited(x: startX, y: startY)
+        while let (x, y) = stack.popLast() {
+            guard let color = colorAt(x, y), colorDistance(color, startColor) <= tolerance else { continue }
+            mask.setSelected(true, x: x, y: y)
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let nx = x + dx
+                let ny = y + dy
+                guard !isVisited(x: nx, y: ny) else { continue }
+                markVisited(x: nx, y: ny)
+                stack.append((nx, ny))
             }
         }
         return mask
