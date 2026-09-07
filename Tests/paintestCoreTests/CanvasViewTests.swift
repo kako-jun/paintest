@@ -348,7 +348,7 @@ final class CanvasViewTests: XCTestCase {
         // switch, after any auto-commit has already fired and recorded.
         var displayedDocument = docA
         view.onEditCompleted = { label in
-            displayedDocument.history.record(displayedDocument.layerStack, label: label)
+            displayedDocument.history.record(displayedDocument.layerStack, selection: view.selection, label: label)
         }
 
         view.beginLayerTransform()
@@ -384,10 +384,10 @@ final class CanvasViewTests: XCTestCase {
         guard let restored = docA.history.undo() else {
             return XCTFail("docA should have the \"描画\" checkpoint left to undo back to")
         }
-        docA.layerStack = restored
-        view.replaceLayerStack(restored)
+        docA.layerStack = restored.layerStack
+        view.replaceLayerStack(restored.layerStack)
 
-        let restoredCanvas = restored.activeLayer.canvas
+        let restoredCanvas = restored.layerStack.activeLayer.canvas
         for y in 0..<8 {
             for x in 0..<8 {
                 let actual = restoredCanvas.rawPixel(x: x, y: y)
@@ -395,6 +395,44 @@ final class CanvasViewTests: XCTestCase {
                 XCTAssertEqual(actual?.g, beforeA[y][x].g, "docA x=\(x) y=\(y) green after undo")
                 XCTAssertEqual(actual?.b, beforeA[y][x].b, "docA x=\(x) y=\(y) blue after undo")
                 XCTAssertEqual(actual?.a, beforeA[y][x].a, "docA x=\(x) y=\(y) alpha after undo")
+            }
+        }
+    }
+
+    // MARK: - Selection restored through canvasView.selection on undo
+    // (issue #19 self-review should-3)
+    //
+    // Mirrors `AppDelegate.applyHistorySnapshot(_:)`'s own selection
+    // hand-off (`canvasView.selection = snapshot.selection`) — recording two
+    // successive selection checkpoints and undoing back to the first must
+    // restore `canvasView.selection`'s actual content, not just the
+    // (unchanged, since selecting never paints anything) `layerStack`.
+
+    func testHistorySnapshot_selection_isRecordedAndRestoredThroughCanvasViewSelectionOnUndo() {
+        let width = 8, height = 8
+        let document = Document(layerStack: LayerStack(width: width, height: height, background: .white))
+        let view = CanvasView(layerStack: document.layerStack)
+
+        let selectionA = SelectionMask.rectangle(x0: 0, y0: 0, x1: 2, y1: 2, width: width, height: height)
+        view.selection = selectionA
+        document.history.record(document.layerStack, selection: view.selection, label: "選択範囲")
+
+        let selectionB = SelectionMask.rectangle(x0: 4, y0: 4, x1: 6, y1: 6, width: width, height: height)
+        view.selection = selectionB
+        document.history.record(document.layerStack, selection: view.selection, label: "選択範囲")
+
+        guard let restored = document.history.undo() else {
+            return XCTFail("expected undo() to return the selectionA checkpoint")
+        }
+        // Mirrors `AppDelegate.applyHistorySnapshot(_:)`'s hand-off.
+        view.selection = restored.selection
+
+        guard let currentSelection = view.selection else {
+            return XCTFail("canvasView.selection must be restored to selectionA's content, not nil")
+        }
+        for y in 0..<height {
+            for x in 0..<width {
+                XCTAssertEqual(currentSelection.contains(x: x, y: y), selectionA.contains(x: x, y: y), "x=\(x) y=\(y)")
             }
         }
     }

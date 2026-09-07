@@ -57,6 +57,18 @@ final class SelectionMask {
         cells[i] = selected
     }
 
+    // MARK: - Duplication
+
+    /// Returns an independent deep copy of this mask (issue #19 self-review
+    /// should-3). `SelectionMask` is a reference type with a mutating
+    /// `setSelected(_:x:y:)` method, so `HistoryManager` copies in/out the
+    /// same way it already does for `LayerStack` — see that type's own
+    /// `copy()` doc comment — preventing a later live selection edit from
+    /// reaching back into a stored history entry, or vice versa.
+    func copy() -> SelectionMask {
+        SelectionMask(width: width, height: height, cells: cells)
+    }
+
     // MARK: - Shape construction
 
     /// A filled rectangle selection between two pixel corners (inclusive of

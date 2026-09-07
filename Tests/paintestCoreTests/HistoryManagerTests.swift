@@ -53,10 +53,10 @@ final class HistoryManagerTests: XCTestCase {
             XCTFail("expected undo() to return entry 0")
             return
         }
-        XCTAssertEqual(blackPixel(of: restored), 255, "undo() should have restored the white entry")
+        XCTAssertEqual(blackPixel(of: restored.layerStack), 255, "undo() should have restored the white entry")
 
         // Mutate the *returned* stack as if it were adopted as the new live state.
-        restored.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
+        restored.layerStack.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
 
         XCTAssertEqual(blackPixel(of: history.entries[0].layerStack), 255, "editing the stack undo() handed back must not corrupt the stored entry 0")
     }
@@ -72,10 +72,10 @@ final class HistoryManagerTests: XCTestCase {
             XCTFail("expected redo() to return entry 1")
             return
         }
-        XCTAssertEqual(blackPixel(of: restored), 0, "redo() should have restored the black entry")
+        XCTAssertEqual(blackPixel(of: restored.layerStack), 0, "redo() should have restored the black entry")
 
         // Mutate the *returned* stack as if it were adopted as the new live state.
-        restored.layers[0].canvas.setPixel(x: 0, y: 0, color: NSColor.white)
+        restored.layerStack.layers[0].canvas.setPixel(x: 0, y: 0, color: NSColor.white)
 
         XCTAssertEqual(blackPixel(of: history.entries[1].layerStack), 0, "editing the stack redo() handed back must not corrupt the stored entry 1")
     }
@@ -128,7 +128,7 @@ final class HistoryManagerTests: XCTestCase {
             XCTFail("expected jump(to: 0) to return entry 0")
             return
         }
-        jumped.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
+        jumped.layerStack.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
 
         XCTAssertEqual(blackPixel(of: history.entries[0].layerStack), 255, "mutating the jump destination's returned copy must not corrupt that stored entry")
         XCTAssertEqual(blackPixel(of: history.entries[1].layerStack), 0, "...or any other stored entry")
@@ -172,8 +172,8 @@ final class HistoryManagerTests: XCTestCase {
             XCTFail("expected undo() to return entry 0")
             return
         }
-        restored.addLayer()
-        restored.removeLayer(at: 0)
+        restored.layerStack.addLayer()
+        restored.layerStack.removeLayer(at: 0)
 
         XCTAssertEqual(history.entries[0].layerStack.layers.count, 2, "adding/removing layers on the stack undo() handed back must not reach the stored entry's own layers array")
     }
@@ -186,9 +186,9 @@ final class HistoryManagerTests: XCTestCase {
         stack.layers[0].canvas.setPixel(x: 0, y: 0, color: .black)
         history.record(stack, label: "黒") // entry 1: black
 
-        XCTAssertEqual(blackPixel(of: history.undo()!), 255, "undo() -> entry 0 (white)")
-        XCTAssertEqual(blackPixel(of: history.redo()!), 0, "redo() -> entry 1 (black)")
-        XCTAssertEqual(blackPixel(of: history.undo()!), 255, "undo() again -> entry 0 (white)")
+        XCTAssertEqual(blackPixel(of: history.undo()!.layerStack), 255, "undo() -> entry 0 (white)")
+        XCTAssertEqual(blackPixel(of: history.redo()!.layerStack), 0, "redo() -> entry 1 (black)")
+        XCTAssertEqual(blackPixel(of: history.undo()!.layerStack), 255, "undo() again -> entry 0 (white)")
     }
 
     func testJump_toCurrentIndex_succeedsWithNoSideEffectOnCurrentIndex() {
@@ -322,6 +322,68 @@ final class HistoryManagerTests: XCTestCase {
 
         XCTAssertEqual(history.entries.map { $0.label }, ["初期状態", "A"])
         XCTAssertEqual(history.currentIndex, 1)
+    }
+
+    // MARK: - Selection recorded and restored alongside the layerStack
+    // (issue #19 self-review should-3)
+    //
+    // Before this fix, `HistoryEntry`/`HistorySnapshot` only carried
+    // `layerStack`, so a selection-only edit (e.g. "選択範囲", which never
+    // changes a single pixel) recorded a snapshot byte-identical to the
+    // previous one — undoing it visibly did nothing, since the selection
+    // itself was never part of what got restored. `record(_:selection:
+    // label:)`/`undo()`/`redo()`/`jump(to:)` now carry the selection through
+    // too, making that history entry actually meaningful.
+
+    func testRecordAndUndo_selection_isCarriedAlongsideTheLayerStackAndRestoredCorrectly() {
+        let width = 8, height = 8
+        let stack = LayerStack(width: width, height: height, background: .white)
+        let history = HistoryManager(initialLayerStack: stack) // entry 0: no selection
+
+        let selectionA = SelectionMask.rectangle(x0: 0, y0: 0, x1: 2, y1: 2, width: width, height: height)
+        history.record(stack, selection: selectionA, label: "選択範囲") // entry 1: selectionA
+
+        let selectionB = SelectionMask.rectangle(x0: 4, y0: 4, x1: 6, y1: 6, width: width, height: height)
+        history.record(stack, selection: selectionB, label: "選択範囲") // entry 2: selectionB
+
+        // Currently at entry 2 ("selectionB"); undo() steps back to entry 1
+        // ("selectionA") and should hand that selection back too.
+        guard let undone = history.undo() else {
+            return XCTFail("expected undo() to return entry 1 (selectionA)")
+        }
+        guard let restoredSelection = undone.selection else {
+            return XCTFail("undo() must hand back the selection recorded alongside entry 1, not nil")
+        }
+
+        for y in 0..<height {
+            for x in 0..<width {
+                XCTAssertEqual(restoredSelection.contains(x: x, y: y), selectionA.contains(x: x, y: y), "x=\(x) y=\(y)")
+            }
+        }
+        // ...and mutating the mask undo() handed back must not corrupt the
+        // stored entry — the same copy-out contract `layerStack` already
+        // has (see the "Copy-out" section above).
+        restoredSelection.setSelected(true, x: width - 1, y: height - 1)
+        XCTAssertFalse(history.entries[1].selection!.contains(x: width - 1, y: height - 1), "mutating the returned selection must not reach the stored entry's own selection")
+    }
+
+    func testRecord_withNoSelectionArgument_defaultsToNilAndDoesNotAffectExistingCallSites() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let history = HistoryManager(initialLayerStack: stack)
+
+        history.record(stack, label: "選択なしの編集") // no `selection:` argument
+
+        XCTAssertNil(history.entries[1].selection)
+
+        guard let undone = history.undo() else {
+            return XCTFail("expected undo() to return entry 0")
+        }
+        XCTAssertNil(undone.selection, "entry 0 was never given a selection either")
+
+        guard let redone = history.redo() else {
+            return XCTFail("expected redo() to return entry 1")
+        }
+        XCTAssertNil(redone.selection, "entry 1's selection must still be nil, not some stale leftover")
     }
 
     func testDecisionTable_multipleJumpsBackAndForth_neverMutatesTheEntriesArrayItself() {

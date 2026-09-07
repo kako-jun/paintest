@@ -22,20 +22,20 @@ final class DocumentTests: XCTestCase {
     // MARK: - Undo/redo/jump must leave the document dirty (issue #19
     // self-review must-2)
     //
-    // `AppDelegate.applyRestoredLayerStack(_:)` — used by `undo()`/`redo()`/
+    // `AppDelegate.applyHistorySnapshot(_:)` — used by `undo()`/`redo()`/
     // the history panel's `onJumpToIndex` — sets `isDirty = true` right
-    // where it adopts a restored `LayerStack`, the same place every other
-    // content-changing path (`onLayerContentChanged`, `layerPanelView.
+    // where it adopts a restored `HistorySnapshot`, the same place every
+    // other content-changing path (`onLayerContentChanged`, `layerPanelView.
     // onChange`) already does. Before this fix it didn't, so an undo/redo/
     // jump that left the document's content different from what was last
     // saved silently skipped issue #4's unsaved-changes prompt on
     // tab-close/quit. `AppDelegate`'s wiring itself has no test per this
     // suite's convention (see `LayerPanelViewTests.swift`'s comment on the
     // same point), so these pin the contract down at the `Document` +
-    // `HistoryManager` level: adopting a restored `LayerStack` the same way
-    // `applyRestoredLayerStack(_:)` does must leave `isDirty` set.
+    // `HistoryManager` level: adopting a restored snapshot the same way
+    // `applyHistorySnapshot(_:)` does must leave `isDirty` set.
 
-    func testApplyingAnUndoneLayerStack_marksTheDocumentDirty() {
+    func testApplyingAnUndoneSnapshot_marksTheDocumentDirty() {
         let document = Document(layerStack: LayerStack(width: 2, height: 2, background: .white))
         document.history.record(document.layerStack, label: "編集")
         document.isDirty = false // e.g. a save happened right after that edit
@@ -43,13 +43,14 @@ final class DocumentTests: XCTestCase {
         guard let restored = document.history.undo() else {
             return XCTFail("expected undo() to return the initial entry")
         }
-        document.layerStack = restored
-        document.isDirty = true // mirrors `AppDelegate.applyRestoredLayerStack(_:)`
+        document.layerStack = restored.layerStack
+        document.selection = restored.selection
+        document.isDirty = true // mirrors `AppDelegate.applyHistorySnapshot(_:)`
 
         XCTAssertTrue(document.isDirty, "undoing must leave the document dirty even though its content no longer matches the last save")
     }
 
-    func testApplyingARedoneLayerStack_marksTheDocumentDirty() {
+    func testApplyingARedoneSnapshot_marksTheDocumentDirty() {
         let document = Document(layerStack: LayerStack(width: 2, height: 2, background: .white))
         document.history.record(document.layerStack, label: "編集")
         _ = document.history.undo()
@@ -58,13 +59,14 @@ final class DocumentTests: XCTestCase {
         guard let restored = document.history.redo() else {
             return XCTFail("expected redo() to return the edited entry")
         }
-        document.layerStack = restored
-        document.isDirty = true // mirrors `AppDelegate.applyRestoredLayerStack(_:)`
+        document.layerStack = restored.layerStack
+        document.selection = restored.selection
+        document.isDirty = true // mirrors `AppDelegate.applyHistorySnapshot(_:)`
 
         XCTAssertTrue(document.isDirty, "redoing must leave the document dirty even though its content no longer matches the last save")
     }
 
-    func testApplyingAJumpedToLayerStack_marksTheDocumentDirty() {
+    func testApplyingAJumpedToSnapshot_marksTheDocumentDirty() {
         let document = Document(layerStack: LayerStack(width: 2, height: 2, background: .white))
         document.history.record(document.layerStack, label: "編集A")
         document.history.record(document.layerStack, label: "編集B")
@@ -73,8 +75,9 @@ final class DocumentTests: XCTestCase {
         guard let restored = document.history.jump(to: 0) else {
             return XCTFail("expected jump(to: 0) to return the initial entry")
         }
-        document.layerStack = restored
-        document.isDirty = true // mirrors `AppDelegate.applyRestoredLayerStack(_:)`
+        document.layerStack = restored.layerStack
+        document.selection = restored.selection
+        document.isDirty = true // mirrors `AppDelegate.applyHistorySnapshot(_:)`
 
         XCTAssertTrue(document.isDirty, "jumping to a different history entry must leave the document dirty even though its content no longer matches the last save")
     }

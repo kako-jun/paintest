@@ -9,10 +9,38 @@ struct HistoryEntry {
     /// was recorded — never the live instance itself. See `HistoryManager`'s
     /// own doc comment for why this matters.
     let layerStack: LayerStack
+    /// The selection that was active at the moment this entry was recorded,
+    /// if any (issue #19 self-review should-3) — always a `.copy()`, same
+    /// copy-in reasoning as `layerStack` above, since `SelectionMask` is
+    /// also a reference type with a mutating `setSelected(_:x:y:)` method.
+    /// Without this, undoing/redoing/jumping to a selection-only edit (e.g.
+    /// "選択範囲") would restore the *pixels* (unchanged, since selecting
+    /// doesn't paint anything) but leave whatever selection happens to be
+    /// live on screen untouched — making that history entry a no-op in
+    /// practice. Defaults to `nil` so existing call sites/tests that only
+    /// care about `layerStack` don't need updating.
+    let selection: SelectionMask?
     /// Shown by the (round 2) history panel row for this entry — e.g.
     /// "鉛筆", "選択範囲", "変形", "レイヤー操作". Round 1 records and keeps
     /// this but has no UI that reads it yet.
     let label: String
+
+    init(layerStack: LayerStack, selection: SelectionMask? = nil, label: String) {
+        self.layerStack = layerStack
+        self.selection = selection
+        self.label = label
+    }
+}
+
+/// What `undo()`/`redo()`/`jump(to:)` hand back to the caller (issue #19
+/// self-review should-3): both halves of a recorded checkpoint — not just
+/// `layerStack` — so restoring history also restores whichever selection was
+/// active at that point. Both fields are always fresh `.copy()`s, the same
+/// copy-out contract `HistoryManager`'s own doc comment describes for
+/// `layerStack` alone.
+struct HistorySnapshot {
+    let layerStack: LayerStack
+    let selection: SelectionMask?
 }
 
 /// Owns one document's undo/redo history as a linear list of full
@@ -58,7 +86,10 @@ final class HistoryManager {
     /// Records a newly completed edit. `layerStack` must be the *live*
     /// stack after the edit finished — this deep-copies it via
     /// `LayerStack.copy()` before storing it, so later live edits can never
-    /// reach back into the stored entry.
+    /// reach back into the stored entry. `selection` is the selection that
+    /// was live at the same moment (issue #19 self-review should-3),
+    /// likewise deep-copied via `SelectionMask.copy()`; defaults to `nil`
+    /// for call sites that don't track a selection.
     ///
     /// Any entries after `currentIndex` (i.e. states a previous `undo()`
     /// stepped back past, that were never redone) are discarded first —
@@ -69,12 +100,12 @@ final class HistoryManager {
     /// to make room, and `currentIndex` is shifted down by one to keep
     /// pointing at the same (now shifted) entry — the newly recorded entry
     /// is always left at the end, at `currentIndex`.
-    func record(_ layerStack: LayerStack, label: String) {
+    func record(_ layerStack: LayerStack, selection: SelectionMask? = nil, label: String) {
         let firstDiscarded = currentIndex + 1
         if firstDiscarded < entries.count {
             entries.removeSubrange(firstDiscarded...)
         }
-        entries.append(HistoryEntry(layerStack: layerStack.copy(), label: label))
+        entries.append(HistoryEntry(layerStack: layerStack.copy(), selection: selection?.copy(), label: label))
         currentIndex = entries.count - 1
         if entries.count > capacity {
             entries.removeFirst()
@@ -83,33 +114,37 @@ final class HistoryManager {
     }
 
     /// Steps back one entry and returns a deep copy of it, or `nil` if
-    /// already at the oldest entry (`!canUndo`). The returned `LayerStack`
-    /// is always a fresh `.copy()` — the caller is meant to adopt it as the
-    /// new live stack, and editing it further must never reach back into
-    /// the stored entry.
-    func undo() -> LayerStack? {
+    /// already at the oldest entry (`!canUndo`). Both fields of the
+    /// returned `HistorySnapshot` are always fresh `.copy()`s — the caller
+    /// is meant to adopt them as the new live state, and editing either
+    /// further must never reach back into the stored entry.
+    func undo() -> HistorySnapshot? {
         guard canUndo else { return nil }
         currentIndex -= 1
-        return entries[currentIndex].layerStack.copy()
+        return snapshot(at: currentIndex)
     }
 
     /// Steps forward one entry and returns a deep copy of it, or `nil` if
     /// already at the newest entry (`!canRedo`). Same copy-out contract as
     /// `undo()`.
-    func redo() -> LayerStack? {
+    func redo() -> HistorySnapshot? {
         guard canRedo else { return nil }
         currentIndex += 1
-        return entries[currentIndex].layerStack.copy()
+        return snapshot(at: currentIndex)
     }
 
     /// Jumps straight to an arbitrary entry (issue #19 round 2: clicking a
     /// row in the history panel) instead of stepping one at a time like
     /// `undo()`/`redo()`. Returns `nil` for an out-of-range `index` without
-    /// touching `currentIndex`. Same copy-out contract as `undo()`/`redo()`
-    /// — the returned `LayerStack` is always a fresh `.copy()`.
-    func jump(to index: Int) -> LayerStack? {
+    /// touching `currentIndex`. Same copy-out contract as `undo()`/`redo()`.
+    func jump(to index: Int) -> HistorySnapshot? {
         guard entries.indices.contains(index) else { return nil }
         currentIndex = index
-        return entries[index].layerStack.copy()
+        return snapshot(at: index)
+    }
+
+    private func snapshot(at index: Int) -> HistorySnapshot {
+        let entry = entries[index]
+        return HistorySnapshot(layerStack: entry.layerStack.copy(), selection: entry.selection?.copy())
     }
 }

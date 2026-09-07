@@ -448,14 +448,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // in-progress layer transform first (same reasoning as `undo()`/
         // `redo()` above: the transform was never itself recorded as a
         // history entry), then adopt the jumped-to snapshot via the same
-        // `applyRestoredLayerStack(_:)` every other history-restoring path
+        // `applyHistorySnapshot(_:)` every other history-restoring path
         // uses, then refresh this panel so its highlight follows the new
         // `currentIndex`.
         historyPanelView.onJumpToIndex = { [weak self] index in
             guard let self else { return }
             if self.canvasView.isTransforming { self.canvasView.cancelLayerTransform() }
             guard let restored = self.documentManager.activeDocument.history.jump(to: index) else { return }
-            self.applyRestoredLayerStack(restored)
+            self.applyHistorySnapshot(restored)
             self.refreshHistoryPanel()
         }
         historyPanelView.translatesAutoresizingMaskIntoConstraints = false
@@ -735,10 +735,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: - History / Undo / Redo (issue #19)
 
-    /// Records the currently displayed document's `layerStack` as a new
-    /// history checkpoint. Called from `canvasView.onEditCompleted` (pencil/
-    /// eraser/pen strokes, selection confirms, layer transform commit) and
-    /// from `layerPanelView.onChange` (layer add/remove/reorder/opacity/
+    /// Records the currently displayed document's `layerStack` (plus its
+    /// live `selection`, issue #19 self-review should-3) as a new history
+    /// checkpoint. Called from `canvasView.onEditCompleted` (pencil/eraser/
+    /// pen strokes, selection confirms, layer transform commit) and from
+    /// `layerPanelView.onChange` (layer add/remove/reorder/opacity/
     /// visibility) — every place this app currently considers a "content
     /// edit" for `isDirty` tracking also gets a history checkpoint here.
     ///
@@ -761,11 +762,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// document it actually belongs to (leaving that document permanently
     /// un-undoable for this edit) and corrupt the unrelated incoming
     /// document's history with a bogus entry, silently discarding any of
-    /// its own redo-able future (`HistoryManager.record(_:label:)` drops
-    /// everything after `currentIndex`).
+    /// its own redo-able future (`HistoryManager.record(_:selection:label:)`
+    /// drops everything after `currentIndex`).
     private func recordHistoryCheckpoint(label: String) {
         guard let document = displayedDocument else { return }
-        document.history.record(document.layerStack, label: label)
+        document.history.record(document.layerStack, selection: canvasView.selection, label: label)
         refreshHistoryPanel()
     }
 
@@ -788,7 +789,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func undo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         guard let restored = documentManager.activeDocument.history.undo() else { return }
-        applyRestoredLayerStack(restored)
+        applyHistorySnapshot(restored)
         refreshHistoryPanel()
     }
 
@@ -797,17 +798,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func redo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         guard let restored = documentManager.activeDocument.history.redo() else { return }
-        applyRestoredLayerStack(restored)
+        applyHistorySnapshot(restored)
         refreshHistoryPanel()
     }
 
-    /// Adopts `layerStack` (already a fresh deep copy handed back by
-    /// `HistoryManager.undo()`/`redo()`) as the active document's live
-    /// state, and rewires every view that holds a reference to the old
-    /// `LayerStack` — same set of updates `activateActiveDocument()` does
-    /// when swapping in a different document's stack, minus the
-    /// zoom/selection/window-title bookkeeping that only applies when the
-    /// *document* changes, not just its content.
+    /// Adopts `snapshot` (already a fresh deep copy handed back by
+    /// `HistoryManager.undo()`/`redo()`/`jump(to:)`) as the active
+    /// document's live state — both its `layerStack` and its `selection`
+    /// (issue #19 self-review should-3) — and rewires every view that holds
+    /// a reference to the old `LayerStack`/selection — same set of updates
+    /// `activateActiveDocument()` does when swapping in a different
+    /// document's stack, minus the zoom/window-title bookkeeping that only
+    /// applies when the *document* changes, not just its content.
     ///
     /// Marks the document dirty (issue #19 self-review must-2): every other
     /// content-changing path (`onLayerContentChanged`, `layerPanelView.
@@ -816,11 +818,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// skip it, so an undo/redo/jump that left the document different from
     /// what's on disk silently skipped issue #4's unsaved-changes prompt on
     /// tab-close/quit.
-    private func applyRestoredLayerStack(_ layerStack: LayerStack) {
-        documentManager.activeDocument.layerStack = layerStack
-        documentManager.activeDocument.isDirty = true
-        canvasView.replaceLayerStack(layerStack)
-        layerPanelView.replaceLayerStack(layerStack)
+    private func applyHistorySnapshot(_ snapshot: HistorySnapshot) {
+        let document = documentManager.activeDocument
+        document.layerStack = snapshot.layerStack
+        document.selection = snapshot.selection
+        document.isDirty = true
+        canvasView.replaceLayerStack(snapshot.layerStack)
+        canvasView.selection = snapshot.selection
+        layerPanelView.replaceLayerStack(snapshot.layerStack)
         documentTabBarView.reload()
         canvasView.needsDisplay = true
     }
