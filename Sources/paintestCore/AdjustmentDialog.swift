@@ -645,8 +645,19 @@ final class ToneCurveGraphView: NSView {
 
         // Clicking empty graph space adds a new control point there (issue
         // #12) — Photoshop's own curve editor behavior: no separate "add
-        // point" gesture is needed.
-        let newPoint = graphCoordinate(from: location)
+        // point" gesture is needed. The new point's `input` is guarded by
+        // `clampedInputForNewPoint` (PR #35 self-review should-1) the same
+        // way `mouseDragged` below guards an existing point's `input` via
+        // `clampedInput` — without it, a click landing on the same `input`
+        // as an existing point (easiest to trigger right past `(255, 255)`'s
+        // hit radius) could silently duplicate that `input`, which used to
+        // corrupt the curve's actual white point. `nil` means neither side
+        // of the click had any room at all, so the click is simply ignored.
+        let proposed = graphCoordinate(from: location)
+        guard let clampedInput = ImageAdjustments.ToneCurve.clampedInputForNewPoint(proposedInput: proposed.input, in: curve.points) else {
+            return
+        }
+        let newPoint = ImageAdjustments.ToneCurvePoint(clampedInput, proposed.output)
         var points = curve.points
         points.append(newPoint)
         points.sort { $0.input < $1.input }

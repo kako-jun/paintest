@@ -231,7 +231,8 @@ enum ImageAdjustments {
         /// defensively — but a caller that lets two points share the same
         /// `input` will get whichever one `lut()`'s stable sort happens to
         /// place first for that column; `ToneCurveGraphView`'s own drag
-        /// clamping (see `clampedInput`) is what actually prevents that from
+        /// clamping (see `clampedInput`) and new-point clamping (see
+        /// `clampedInputForNewPoint`) are what actually prevent that from
         /// happening during normal editing.
         var points: [ToneCurvePoint]
 
@@ -335,10 +336,70 @@ enum ImageAdjustments {
         /// already adjacent bytes apart).
         static func clampedInput(forPointAt index: Int, proposedInput: Int, in points: [ToneCurvePoint]) -> Int {
             guard points.indices.contains(index) else { return proposedInput }
-            let minInput = index > 0 ? points[index - 1].input + 1 : 0
-            let maxInput = index < points.count - 1 ? points[index + 1].input - 1 : 255
-            guard minInput <= maxInput else { return points[index].input }
-            return max(minInput, min(maxInput, proposedInput))
+            let bounds = neighborBounds(
+                left: index > 0 ? points[index - 1] : nil,
+                right: index < points.count - 1 ? points[index + 1] : nil
+            )
+            guard bounds.min <= bounds.max else { return points[index].input }
+            return max(bounds.min, min(bounds.max, proposedInput))
+        }
+
+        /// The `input` range a point may occupy given its immediate left/right
+        /// neighbors (each pushed at least 1 byte away) — the one piece of
+        /// arithmetic `clampedInput` (an existing point being dragged) and
+        /// `clampedInputForNewPoint` (a not-yet-inserted point) both need, so
+        /// a future change to the "neighbor ± 1" rule only has to happen once.
+        private static func neighborBounds(left: ToneCurvePoint?, right: ToneCurvePoint?) -> (min: Int, max: Int) {
+            (left.map { $0.input + 1 } ?? 0, right.map { $0.input - 1 } ?? 255)
+        }
+
+        /// Clamps the `input` a brand-new control point would need in order
+        /// to be added to `points` without landing on the same `input` as an
+        /// existing point (issue #12, PR #35 self-review should-1).
+        ///
+        /// `ToneCurveGraphView.mouseDown` used to append a click's raw
+        /// `input` straight into `points` with no clamping at all. Two points
+        /// sharing an `input` breaks `lut()`'s "strictly increasing by
+        /// input" assumption (see `points`'s own doc comment) — and did so
+        /// asymmetrically: clicking exactly at `input == 0` was harmless
+        /// (the *original* `(0, 0)` survived as `sorted.first` purely because
+        /// `Array.sort` is stable and the new point was appended, hence
+        /// sorted, after it), while clicking at `input == 255` silently
+        /// replaced the intended white point — `sorted.last` became the new,
+        /// wrong point instead — because the exact same stable-sort tie
+        /// resolution put the new point *after* the existing `(255, 255)`
+        /// too, but "after" is now the very end of the array, not a safely
+        /// interior position.
+        ///
+        /// This tries inserting the new point right after the correct sorted
+        /// position first (mirroring `clampedInput`'s own neighbor-based
+        /// math, just against a gap rather than an existing slot), then right
+        /// before it if "after" left no room — trying both directions is what
+        /// makes a collision at the curve's low end and one at its high end
+        /// resolve by the exact same rule instead of one of them surviving
+        /// only by accident of array position. Returns `nil` only when
+        /// neither direction has room at all (e.g. every neighboring byte is
+        /// already occupied by another point) — the caller is expected to
+        /// simply not add a point rather than force one onto an existing
+        /// `input`.
+        static func clampedInputForNewPoint(proposedInput: Int, in points: [ToneCurvePoint]) -> Int? {
+            let sorted = points.sorted { $0.input < $1.input }
+
+            func attempt(insertingAfterCount count: Int) -> Int? {
+                let bounds = neighborBounds(
+                    left: count > 0 ? sorted[count - 1] : nil,
+                    right: count < sorted.count ? sorted[count] : nil
+                )
+                guard bounds.min <= bounds.max else { return nil }
+                return max(bounds.min, min(bounds.max, proposedInput))
+            }
+
+            let afterCount = sorted.filter { $0.input <= proposedInput }.count
+            if let clamped = attempt(insertingAfterCount: afterCount) {
+                return clamped
+            }
+            let beforeCount = sorted.filter { $0.input < proposedInput }.count
+            return attempt(insertingAfterCount: beforeCount)
         }
     }
 
