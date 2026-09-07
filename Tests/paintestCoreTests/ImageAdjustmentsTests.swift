@@ -527,6 +527,11 @@ final class ImageAdjustmentsTests: XCTestCase {
         let result = transform(128, 128, 128, 255)
         XCTAssertEqual(result.0, 130, "must equal red.lut()[master.lut()[128]]")
         XCTAssertNotEqual(result.0, 120, "must not equal the reversed-order master.lut()[red.lut()[128]]")
+        XCTAssertEqual(result.3, 255, "alpha must pass through ToneCurveSettings.makeTransform() unchanged regardless of master/channel composition")
+
+        // A second alpha value too, so this isn't merely pinning "255 in,
+        // 255 out" as a coincidence of both being the input's own value.
+        XCTAssertEqual(transform(128, 128, 128, 128).3, 128, "alpha must pass through unchanged for a non-255 value too")
     }
 
     func testLevelsSettings_compositionOrder_isChannelLUTOfMasterLUT_notReversed() {
@@ -542,6 +547,11 @@ final class ImageAdjustmentsTests: XCTestCase {
         let result = transform(128, 128, 128, 255)
         XCTAssertEqual(result.0, 130, "must equal red.lut()[master.lut()[128]]")
         XCTAssertNotEqual(result.0, 120, "must not equal the reversed-order master.lut()[red.lut()[128]]")
+        XCTAssertEqual(result.3, 255, "alpha must pass through LevelsSettings.makeTransform() unchanged regardless of master/channel composition")
+
+        // A second alpha value too, so this isn't merely pinning "255 in,
+        // 255 out" as a coincidence of both being the input's own value.
+        XCTAssertEqual(transform(128, 128, 128, 128).3, 128, "alpha must pass through unchanged for a non-255 value too")
     }
 
     func testToneCurveSettings_greenBlueUntouched_whenOnlyRedAndMasterSet() {
