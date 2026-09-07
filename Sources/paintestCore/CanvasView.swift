@@ -54,8 +54,8 @@ final class CanvasView: NSView {
     /// confirm, a magic wand click, and a layer transform's
     /// `commitLayerTransform()`. Never fired for in-progress drag states
     /// (only once per gesture, at the end) or for a click that changed
-    /// nothing. `AppDelegate` forwards `label` straight into
-    /// `Document.history.record(_:label:)`.
+    /// nothing. `AppDelegate` forwards `label` (plus the current selection)
+    /// into `HistoryManager.record(_:selection:label:)`.
     var onEditCompleted: ((String) -> Void)?
 
     /// The active selection, if any — `nil` means "no restriction", i.e. the
