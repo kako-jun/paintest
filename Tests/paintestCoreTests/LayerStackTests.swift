@@ -519,8 +519,8 @@ final class LayerStackTests: XCTestCase {
 
     func testCompositeImage_excludeNil_cacheHitVsCacheMiss_produceIdenticalResult() {
         // 3 layers, opacity/visibility mixed, active layer itself hidden —
-        // exercises compositeActiveLayer's "active layer invisible" path on
-        // top of a non-trivial (partially opaque) cached background.
+        // exercises the "active layer is invisible" case on top of a
+        // non-trivial (partially opaque) cached background.
         let stack = LayerStack(width: 2, height: 2, background: .white) // L0: white
         stack.addLayer() // L1
         stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
