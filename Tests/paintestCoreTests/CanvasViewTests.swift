@@ -299,6 +299,106 @@ final class CanvasViewTests: XCTestCase {
         }
     }
 
+    // MARK: - History checkpoint recorded onto the correct document during
+    // a tab-switch auto-commit (issue #19 self-review must-1)
+    //
+    // `AppDelegate.activateActiveDocument()`'s transform auto-commit above
+    // fires `CanvasView.onEditCompleted` synchronously from inside
+    // `commitLayerTransform()`. In the real app, that happens AFTER
+    // `documentManager.activeDocumentIndex` has already advanced to the
+    // incoming document — `DocumentTabBarView`/`closeDocument(at:)` update
+    // the index before invoking `onSelect`/`onClose`, which is what calls
+    // `activateActiveDocument()` — but BEFORE `AppDelegate.displayedDocument`
+    // is reassigned (that happens only at the very end of
+    // `activateActiveDocument()`, once every other hand-off is done). The
+    // fixed `recordHistoryCheckpoint(label:)` records onto `displayedDocument`
+    // for exactly this reason. `AppDelegate` itself can't be unit tested
+    // directly (see `activate(_:previouslyDisplayed:on:)`'s own doc comment
+    // above), so this test reproduces that same interleaving directly
+    // against `Document` + `CanvasView`, extending the `activate(...)`
+    // helper's protocol with the fixed `onEditCompleted` -> history routing.
+
+    func testHistoryCheckpoint_transformAutoCommitDuringTabSwitch_recordsOntoTheOriginatingDocument_leavesTheOtherDocumentsHistoryUntouched() {
+        let zoomScale = 4
+        let docA = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "b")
+        let canvasA = docA.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                canvasA.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.2, alpha: 1))
+            }
+        }
+        var beforeA: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { beforeA.append((0..<8).map { canvasA.rawPixel(x: $0, y: y)! }) }
+        // Mirrors a real document's usage: the gradient above was already a
+        // completed, recorded edit (like a pencil stroke going through
+        // `onEditCompleted`) before the transform in question ever began —
+        // otherwise `docA.history` would have no pre-transform checkpoint to
+        // undo back to.
+        docA.history.record(docA.layerStack, label: "描画")
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(docA.layerStack)
+        let window = view.window!
+
+        // Mirrors the FIXED `AppDelegate.recordHistoryCheckpoint(label:)`:
+        // always records onto whichever document is still actually
+        // *displayed* right now, tracked here the same way `AppDelegate.
+        // displayedDocument` is — reassigned only at the very end of a tab
+        // switch, after any auto-commit has already fired and recorded.
+        var displayedDocument = docA
+        view.onEditCompleted = { label in
+            displayedDocument.history.record(displayedDocument.layerStack, label: label)
+        }
+
+        view.beginLayerTransform()
+        let down = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 5, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        XCTAssertTrue(view.isTransforming, "precondition: still mid-transform, not yet confirmed")
+
+        let docBEntryLabelsBefore = docB.history.entries.map(\.label)
+        let docBIndexBefore = docB.history.currentIndex
+
+        // Switch tabs to "b" WITHOUT ever pressing Return — `activate(...)`
+        // auto-commits the transform (firing `onEditCompleted` above, which
+        // still routes to `docA` via `displayedDocument`) BEFORE
+        // `displayedDocument` is reassigned to `docB` immediately after,
+        // exactly mirroring `AppDelegate.activateActiveDocument()`'s own
+        // ordering.
+        activate(docB, previouslyDisplayed: docA, on: view)
+        displayedDocument = docB
+
+        XCTAssertEqual(docA.history.entries.map(\.label), ["初期状態", "描画", "変形"], "the auto-committed transform must land in docA's own history, not docB's")
+        XCTAssertEqual(docB.history.entries.map(\.label), docBEntryLabelsBefore, "docB's history must be completely untouched by a transform that belongs to docA")
+        XCTAssertEqual(docB.history.currentIndex, docBIndexBefore, "docB's currentIndex must be completely untouched too")
+
+        // Switch back to "a" and undo: must revert to the pre-transform
+        // (gradient) pixels, proving the checkpoint really is undoable from
+        // docA's own tab — the whole point of must-1's fix.
+        activate(docA, previouslyDisplayed: docB, on: view)
+        displayedDocument = docA
+
+        guard let restored = docA.history.undo() else {
+            return XCTFail("docA should have the \"描画\" checkpoint left to undo back to")
+        }
+        docA.layerStack = restored
+        view.replaceLayerStack(restored)
+
+        let restoredCanvas = restored.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = restoredCanvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, beforeA[y][x].r, "docA x=\(x) y=\(y) red after undo")
+                XCTAssertEqual(actual?.g, beforeA[y][x].g, "docA x=\(x) y=\(y) green after undo")
+                XCTAssertEqual(actual?.b, beforeA[y][x].b, "docA x=\(x) y=\(y) blue after undo")
+                XCTAssertEqual(actual?.a, beforeA[y][x].a, "docA x=\(x) y=\(y) alpha after undo")
+            }
+        }
+    }
+
     // MARK: - onZoomChanged callback
 
     func testOnZoomChanged_firesOnceWithNewScale_onZoomIn() {

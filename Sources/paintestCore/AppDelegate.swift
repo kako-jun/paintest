@@ -741,8 +741,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// from `layerPanelView.onChange` (layer add/remove/reorder/opacity/
     /// visibility) — every place this app currently considers a "content
     /// edit" for `isDirty` tracking also gets a history checkpoint here.
+    ///
+    /// Deliberately targets `displayedDocument`, **not**
+    /// `documentManager.activeDocument` (issue #19 self-review must-1): both
+    /// call sites above can fire *during* a tab switch — `canvasView.
+    /// onEditCompleted` from the auto-commit in `activateActiveDocument()`
+    /// below, `layerPanelView.onChange` from its own `willChangeActiveLayer`
+    /// auto-commit — at which point `documentManager.activeDocumentIndex`
+    /// has already advanced to the *incoming* document (`DocumentTabBarView`
+    /// updates it before invoking `onSelect`/`onClose`), while
+    /// `canvasView.layerStack` — and hence the edit actually being recorded
+    /// — still belongs to the *outgoing* one. `displayedDocument` is exactly
+    /// "whichever document `canvasView` is still showing right now" (see its
+    /// own doc comment, already relied on for the same reason by zoom/
+    /// selection hand-off) and is only reassigned at the very end of
+    /// `activateActiveDocument()`, after any such auto-commit has already
+    /// run — so it always names the correct target here. Using
+    /// `activeDocument` instead would both fail to record the edit onto the
+    /// document it actually belongs to (leaving that document permanently
+    /// un-undoable for this edit) and corrupt the unrelated incoming
+    /// document's history with a bogus entry, silently discarding any of
+    /// its own redo-able future (`HistoryManager.record(_:label:)` drops
+    /// everything after `currentIndex`).
     private func recordHistoryCheckpoint(label: String) {
-        let document = documentManager.activeDocument
+        guard let document = displayedDocument else { return }
         document.history.record(document.layerStack, label: label)
         refreshHistoryPanel()
     }
@@ -786,8 +808,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// when swapping in a different document's stack, minus the
     /// zoom/selection/window-title bookkeeping that only applies when the
     /// *document* changes, not just its content.
+    ///
+    /// Marks the document dirty (issue #19 self-review must-2): every other
+    /// content-changing path (`onLayerContentChanged`, `layerPanelView.
+    /// onChange`) sets `isDirty = true` in the same place it applies the
+    /// change, but this one — used by undo/redo/history-panel-jump — used to
+    /// skip it, so an undo/redo/jump that left the document different from
+    /// what's on disk silently skipped issue #4's unsaved-changes prompt on
+    /// tab-close/quit.
     private func applyRestoredLayerStack(_ layerStack: LayerStack) {
         documentManager.activeDocument.layerStack = layerStack
+        documentManager.activeDocument.isDirty = true
         canvasView.replaceLayerStack(layerStack)
         layerPanelView.replaceLayerStack(layerStack)
         documentTabBarView.reload()
