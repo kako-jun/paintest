@@ -28,6 +28,17 @@ enum ImageAdjustments {
     /// value rather than merely left alone, so repeated calls (one per live
     /// preview tick) always converge on the exact same result regardless of
     /// what `destination` happened to hold from a previous tick.
+    ///
+    /// Deliberately does *not* forward `mask` to `PixelCanvas.setPixel`'s own
+    /// `mask:` parameter (considered, and passed on, in PR #35 self-review
+    /// nit-1): that parameter *skips* the write for an unselected pixel
+    /// instead of writing `source`'s value back — which happens to produce
+    /// an identical result for every call site today (each one always
+    /// re-applies from the same fixed `source`/`mask` pair onto a
+    /// `destination` that only this function ever writes), but would make
+    /// that convergence depend on the caller's usage pattern holding rather
+    /// than being guaranteed by this function on its own, as documented
+    /// above.
     static func apply(
         transform: (UInt8, UInt8, UInt8, UInt8) -> (UInt8, UInt8, UInt8, UInt8),
         from source: PixelCanvas,
