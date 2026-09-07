@@ -532,6 +532,71 @@ final class ImageAdjustmentsTests: XCTestCase {
         XCTAssertEqual(ImageAdjustments.ToneCurve.clampedInput(forPointAt: -1, proposedInput: 456, in: points), 456)
     }
 
+    // MARK: - ToneCurve.clampedInputForNewPoint(proposedInput:in:) (issue #12,
+    // PR #35 self-review should-1: a brand-new point must never be allowed to
+    // land on the same `input` as an existing one)
+
+    func testClampedInputForNewPoint_clickNearWhitePoint_clampsTo254_doesNotStealWhitePoint() {
+        // Only (0, 0) and (255, 255) exist. Inserting-after attempt: with
+        // both points' input <= 255, "insert after count 2" puts the new
+        // point after (255, 255), which has no right neighbor, so
+        // min (255 + 1 = 256) > max (255) — no room, first attempt fails.
+        // Inserting-before attempt: "insert after count 1" puts it between
+        // (0, 0) and (255, 255), giving min 1, max 254 — room exists, and
+        // 255 clamps down to that ceiling, 254. The original white point at
+        // 255 survives untouched (this is the exact bug PR #35 fixed).
+        let points = [ImageAdjustments.ToneCurvePoint(0, 0), ImageAdjustments.ToneCurvePoint(255, 255)]
+        let clamped = ImageAdjustments.ToneCurve.clampedInputForNewPoint(proposedInput: 255, in: points)
+        XCTAssertEqual(clamped, 254, "a click at 255 must not overwrite the existing white point; it should clamp to the nearest free input, 254")
+    }
+
+    func testClampedInputForNewPoint_clickNearBlackPoint_clampsTo1_symmetricWithWhitePointCase() {
+        // Same two points. Inserting-after attempt: with only (0, 0) having
+        // input <= 0, "insert after count 1" puts the new point between
+        // (0, 0) and (255, 255), giving min 1, max 254 — room exists on the
+        // very first attempt, and 0 clamps up to that floor, 1. Checking
+        // this alongside the white-point case above confirms the low end and
+        // high end are handled by the same symmetric rule, not by an
+        // accident of array position.
+        let points = [ImageAdjustments.ToneCurvePoint(0, 0), ImageAdjustments.ToneCurvePoint(255, 255)]
+        let clamped = ImageAdjustments.ToneCurve.clampedInputForNewPoint(proposedInput: 0, in: points)
+        XCTAssertEqual(clamped, 1, "a click at 0 must not overwrite the existing black point; it should clamp to the nearest free input, 1")
+    }
+
+    func testClampedInputForNewPoint_noGapAnywhere_returnsNil_clickIgnored() {
+        // Three adjacent points (4, 4), (5, 5), (6, 6) leave zero room
+        // anywhere between them. Inserting-after attempt: after count 2
+        // (both 4 and 5 are <= 5) sits between (5, 5) and (6, 6), giving
+        // min 6, max 5 — no room. Inserting-before attempt: after count 1
+        // (only 4 is < 5) sits between (4, 4) and (5, 5), giving min 5,
+        // max 4 — no room either. Both attempts fail, so the click on the
+        // middle point must be ignored rather than forced onto an existing
+        // input.
+        let points = [
+            ImageAdjustments.ToneCurvePoint(4, 4),
+            ImageAdjustments.ToneCurvePoint(5, 5),
+            ImageAdjustments.ToneCurvePoint(6, 6)
+        ]
+        let clamped = ImageAdjustments.ToneCurve.clampedInputForNewPoint(proposedInput: 5, in: points)
+        XCTAssertNil(clamped, "no room exists on either side of the clicked input; the click must be ignored (nil), not forced onto an existing point")
+    }
+
+    func testClampedInputForNewPoint_clickExactlyOnExistingPoint_shiftsToNextAvailableInput() {
+        // (100, 50) already exists, flanked by (0, 0) and (255, 255).
+        // Inserting-after attempt: both 0 and 100 are <= 100, so "insert
+        // after count 2" sits between (100, 50) and (255, 255), giving
+        // min 101, max 254 — room exists on the first attempt, and the
+        // proposed 100 clamps up to that floor, 101, shifting the new point
+        // one slot to the right of the one it collided with.
+        let points = [
+            ImageAdjustments.ToneCurvePoint(0, 0),
+            ImageAdjustments.ToneCurvePoint(100, 50),
+            ImageAdjustments.ToneCurvePoint(255, 255)
+        ]
+        let clamped = ImageAdjustments.ToneCurve.clampedInputForNewPoint(proposedInput: 100, in: points)
+        XCTAssertEqual(clamped, 101, "clicking exactly on an existing point's input must shift to the nearest free neighboring input, 101")
+    }
+
     // MARK: - ToneCurveSettings / LevelsSettings composition order
 
     func testToneCurveSettings_compositionOrder_isChannelLUTOfMasterLUT_notReversed() {
