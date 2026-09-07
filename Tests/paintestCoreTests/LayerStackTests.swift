@@ -350,6 +350,11 @@ final class LayerStackTests: XCTestCase {
         // What this test locks in is that half opacity produces neither
         // pure white nor pure black — i.e. that setOpacity/setAlpha is
         // actually taking effect on the draw, not being ignored.
+        // (Unlike the `rawRGBA`-based tests in this file, this one reads
+        // the pixel through `colorAt` + `usingColorSpace(.deviceRGB)`,
+        // which applies its own ColorSync conversion on top of the above —
+        // another reason a wide tolerance is used here instead of an exact
+        // comparison.)
         XCTAssertNotNil(red)
         XCTAssertGreaterThan(red ?? 1, 0.05, "should not be pure black")
         XCTAssertLessThan(red ?? 0, 0.95, "should not be pure white")
