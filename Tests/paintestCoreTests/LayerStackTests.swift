@@ -426,6 +426,102 @@ final class LayerStackTests: XCTestCase {
         XCTAssertEqual(afterPixel.g, 0)
     }
 
+    /// should-4/5 (PR #36 self-review): every other `compositeImage()` test
+    /// above either (a) keeps the active layer topmost while only
+    /// reordering two *inactive* layers, or (b) excludes the active layer
+    /// entirely — none of them call the plain, non-excluding
+    /// `compositeImage()` on a stack where a visible layer sits *below*
+    /// the active layer AND a visible layer sits *above* it at the same
+    /// time, which is exactly the `below → activeLayer → above` shape
+    /// `backgroundCompositeCache` and `composite(below:activeLayer:above:)`
+    /// exist to handle (see their doc comments). And the cache-hit-vs-miss
+    /// tests below this one can't stand in for that: both paths call the
+    /// same `composite(below:activeLayer:above:)`, so a wrong blend
+    /// formula there would make cache hit and miss agree with each other
+    /// while still being wrong. This test instead checks the result
+    /// against a value derived independently, straight from the source-over
+    /// alpha formula, not from any other call to this module's own code.
+    func testCompositeImage_activeLayerSandwichedBetweenVisibleLayers_producesCorrectBlend() {
+        // L0 (below, non-active):  opaque red   (255, 0, 0, 255)
+        // L1 (ACTIVE, middle):     opaque green (0, 255, 0, 255) canvas,
+        //                          layer opacity 0.75 — translucent via
+        //                          the *layer's* opacity.
+        // L2 (above, non-active):  opaque-alpha-wise canvas draw, but the
+        //                          fill color's own alpha is 0.25, i.e.
+        //                          translucent via the *canvas pixel's own
+        //                          alpha* instead — a different mechanism
+        //                          than L1's, so the sandwich exercises
+        //                          both at once. `PixelCanvas.components(of:)`
+        //                          rounds 0.25 * 255 = 63.75 to 64
+        //                          (`.rounded()` is round-half-away-from-
+        //                          zero, and 63.75 isn't even a tie), so
+        //                          L2's canvas alpha byte is exactly 64,
+        //                          not some other rounding of 0.25 — every
+        //                          number below is derived from that 64.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.layers[0].canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // L0
+        stack.addLayer() // L1, active for now
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        stack.setOpacity(0.75, at: 1)
+        stack.addLayer() // L2, active for now (topmost)
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 0.25))
+        stack.activeLayerIndex = 1 // re-designate L1 as active: L0 is now below it, L2 above it
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+
+        // Hand-derived expected value, plain source-over compositing
+        // applied bottom-to-top, destination starting fully transparent:
+        //
+        // Draw L0 (opaque) onto empty: the destination contributes nothing
+        // at alpha 0, so the result is just L0's own color exactly:
+        //   (255, 0, 0, 255)
+        //
+        // Draw L1 over that at its own opacity (0.75), i.e. effective
+        // source alpha 0.75 over an opaque (alpha 1) destination:
+        //   outA = 0.75 + 1*(1 - 0.75)              = 1
+        //   outR = 0*0.75 + 255*1*(1 - 0.75)        = 63.75
+        //   outG = 255*0.75 + 0*1*(1 - 0.75)        = 191.25
+        //   outB = 0
+        // 63.75/191.25 must still be rounded to an 8-bit byte somewhere in
+        // this pipeline, and this environment has no Swift toolchain to
+        // confirm whether that rounds-to-nearest or truncates — the two
+        // conventions agree on 191 (`.25` rounds/floors to the same
+        // integer) but disagree on 63.75 (63 vs 64). Call that byte R_mid
+        // ∈ {63, 64}; G_mid = 191 either way.
+        //
+        // Draw L2 over that (canvas alpha 64/255, layer opacity 1.0, so
+        // effective source alpha is exactly 64/255) over the now-opaque
+        // destination:
+        //   outA = 64/255 + 1*(1 - 64/255)          = 1
+        //   outR = 0*(64/255) + R_mid*(1 - 64/255)  = R_mid * 191/255
+        //        = 64*191/255 ≈ 47.94   or   63*191/255 ≈ 47.18
+        //   outG = 0*(64/255) + 191*(191/255)       = 36481/255 ≈ 143.06
+        //   outB = 255*(64/255) + 0*(1 - 64/255)    = 64  (exact — no
+        //          fractional part to round, so this channel is pinned
+        //          regardless of the R_mid ambiguity above)
+        //   outA = 255 (exact — both blend steps land on outA = 1 exactly,
+        //          with no fractional component to round at all)
+        //
+        // So R lands at 47 or 48 depending on the unresolved rounding
+        // convention above (±0.6 around the 47.5 midpoint covers both,
+        // and nothing else); G is pinned to 143 either way. A small ±2
+        // margin is kept on R/G/B (but not A, which is never touched by
+        // color management) as a hedge against the deviceRGB-vs-sRGB
+        // color-space conversion this pipeline also performs (`Layer`'s
+        // canvas is `.deviceRGB`, the compositing context is named
+        // `sRGB`) that this environment cannot verify either way — a
+        // margin still far tighter than the tens-of-units gap a genuinely
+        // wrong blend (wrong stacking order, ignored opacity, ignored
+        // alpha) would produce.
+        XCTAssertEqual(pixel.a, 255, "an opaque bottom layer keeps the whole sandwich opaque")
+        XCTAssertEqual(Double(pixel.r), 47.5, accuracy: 2.1, "expected ~47-48 (below*above blend of the L0/L1 midtone)")
+        XCTAssertEqual(Double(pixel.g), 143, accuracy: 2, "expected ~143 (L1's green surviving both blends)")
+        XCTAssertEqual(Double(pixel.b), 64, accuracy: 2, "expected exactly 64 (L2's own blue is this sandwich's only source of blue)")
+    }
+
     // MARK: - copy() (issue #19: HistoryManager's copy-in/copy-out contract
     // depends entirely on this being a true deep copy)
 
