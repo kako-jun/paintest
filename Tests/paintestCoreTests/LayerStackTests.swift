@@ -487,4 +487,336 @@ final class LayerStackTests: XCTestCase {
         XCTAssertEqual(duplicate.layers[2].canvas.rawPixel(x: 0, y: 0)?.b, 255, "another untouched layer (blue) of the same copy must be unaffected")
         XCTAssertEqual(stack.layers[1].canvas.rawPixel(x: 0, y: 0)?.g, 255, "the original stack's corresponding layer (green) must be unaffected")
     }
+
+    // MARK: - compositeImage backgroundCompositeCache (issue #17)
+
+    /// Compares two composited images pixel-by-pixel (all four RGBA bytes
+    /// at every coordinate), not just a couple of sampled points — used by
+    /// tests that need to prove two `compositeImage()` results are the
+    /// SAME image byte-for-byte (e.g. a cache-hit render vs. a cache-miss
+    /// render of the identical state), where checking only one or two
+    /// pixels could miss a discrepancy elsewhere in the buffer.
+    private func assertCompositesEqual(_ a: CGImage, _ b: CGImage, width: Int, height: Int, file: StaticString = #filePath, line: UInt = #line) {
+        guard let dataA = a.dataProvider?.data, let ptrA = CFDataGetBytePtr(dataA),
+              let dataB = b.dataProvider?.data, let ptrB = CFDataGetBytePtr(dataB) else {
+            XCTFail("could not read raw image data from one of the two composites", file: file, line: line)
+            return
+        }
+        let bppA = a.bitsPerPixel / 8
+        let bppB = b.bitsPerPixel / 8
+        let rowA = a.bytesPerRow
+        let rowB = b.bytesPerRow
+        for y in 0..<height {
+            for x in 0..<width {
+                let offsetA = y * rowA + x * bppA
+                let offsetB = y * rowB + x * bppB
+                for channel in 0..<4 {
+                    XCTAssertEqual(ptrA[offsetA + channel], ptrB[offsetB + channel], "pixel (\(x), \(y)) channel \(channel) differs between the two composites", file: file, line: line)
+                }
+            }
+        }
+    }
+
+    func testCompositeImage_excludeNil_cacheHitVsCacheMiss_produceIdenticalResult() {
+        // 3 layers, opacity/visibility mixed, active layer itself hidden —
+        // exercises compositeActiveLayer's "active layer invisible" path on
+        // top of a non-trivial (partially opaque) cached background.
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0: white
+        stack.addLayer() // L1
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        stack.setOpacity(0.4, at: 1)
+        stack.addLayer() // L2: active
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+        stack.setVisibility(false, at: 2)
+
+        guard let firstCall = stack.compositeImage() else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        guard let secondCall = stack.compositeImage() else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        assertCompositesEqual(firstCall, secondCall, width: 2, height: 2)
+    }
+
+    func testCompositeImage_excludeActiveLayerIndex_matchesManualExclusionOfActiveLayer() {
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0
+        stack.addLayer() // L1
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        stack.addLayer() // L2: active, topmost
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+        stack.activeLayerIndex = 1 // make the middle (green) layer active instead
+
+        guard let excludedResult = stack.compositeImage(excludingLayerAtIndex: stack.activeLayerIndex) else {
+            XCTFail("compositeImage(excludingLayerAtIndex:) returned nil")
+            return
+        }
+
+        stack.setVisibility(false, at: 1) // manually hide what was the active layer
+        guard let manualResult = stack.compositeImage() else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+
+        assertCompositesEqual(excludedResult, manualResult, width: 2, height: 2)
+    }
+
+    func testCompositeImage_excludeOtherIndex_matchesManualExclusionOfThatLayer() {
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0
+        stack.addLayer() // L1
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        stack.setOpacity(0.5, at: 1)
+        stack.addLayer() // L2: active, topmost
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+        // activeLayerIndex == 2; exclude index 0, which is neither the
+        // active layer nor nil — the cache must not be touched at all.
+
+        guard let excludedResult = stack.compositeImage(excludingLayerAtIndex: 0) else {
+            XCTFail("compositeImage(excludingLayerAtIndex:) returned nil")
+            return
+        }
+
+        stack.setVisibility(false, at: 0)
+        guard let manualResult = stack.compositeImage() else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+
+        assertCompositesEqual(excludedResult, manualResult, width: 2, height: 2)
+    }
+
+    func testCompositeImage_repeatedCallsWithNoStateChange_areIdempotent() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        stack.setOpacity(0.5, at: 1)
+
+        guard let first = stack.compositeImage(),
+              let second = stack.compositeImage(),
+              let third = stack.compositeImage() else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+
+        assertCompositesEqual(first, second, width: 2, height: 2)
+        assertCompositesEqual(second, third, width: 2, height: 2)
+    }
+
+    func testCompositeImage_afterSetVisibility_reflectsChangeImmediately() {
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0: bottom, non-active
+        stack.addLayer() // L1: top, active
+        stack.activeLayer.canvas.fill(with: .black)
+        stack.setOpacity(0.5, at: 1)
+        _ = stack.compositeImage() // primes backgroundCompositeCache with the (still-visible) bottom layer
+
+        stack.setVisibility(false, at: 0) // hide the non-active bottom layer
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertLessThan(pixel.a, 250, "the cache must be invalidated: with the bottom layer now hidden, the half-opaque top layer alone can no longer be fully opaque")
+    }
+
+    func testCompositeImage_afterSetOpacity_reflectsChangeImmediately() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.layers[0].canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // L0: opaque red, non-active
+        stack.addLayer() // L1: active, transparent by default — lets L0 show through untouched
+        _ = stack.compositeImage() // primes backgroundCompositeCache with L0 at full opacity
+
+        stack.setOpacity(0.3, at: 0) // change the (non-active) bottom layer's opacity
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertLessThan(pixel.a, 250, "the cache must be invalidated: the bottom layer's own reduced opacity must show up immediately")
+    }
+
+    func testCompositeImage_afterAddLayer_reflectsNewLayer() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        _ = stack.compositeImage() // primes the cache with just the base layer
+
+        let added = stack.addLayer()
+        added.canvas.fill(with: .black)
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 0, "the newly added (and now active) layer's fill must show in the composite")
+    }
+
+    func testCompositeImage_afterRemoveLayer_excludesRemovedLayer() {
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0
+        let toRemove = stack.addLayer() // L1
+        toRemove.canvas.fill(with: .black)
+        stack.addLayer() // L2: active, transparent, topmost
+        _ = stack.compositeImage() // primes the cache
+
+        stack.removeLayer(at: 1) // remove the (now non-active) black layer
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 255, "the removed layer's black fill must no longer appear in the composite")
+    }
+
+    func testCompositeImage_afterDuplicateLayer_includesDuplicate() {
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0
+        _ = stack.compositeImage() // primes the cache
+
+        guard let duplicate = stack.duplicateLayer(at: 0) else {
+            XCTFail("duplicateLayer returned nil")
+            return
+        }
+        duplicate.canvas.setPixel(x: 0, y: 0, color: .black)
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 0, "the duplicated (and now active) layer's edited pixel must show in the composite")
+    }
+
+    func testCompositeImage_afterMoveLayer_reflectsNewStackingOrder() {
+        // Both reordered layers are non-active — the active layer (L2,
+        // transparent) stays topmost throughout, so this specifically
+        // exercises moveLayer's own explicit `backgroundCompositeCache =
+        // nil`, not activeLayerIndex's didSet (which this move never
+        // triggers, since the active layer is tracked by object identity
+        // and never itself moves here).
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.layers[0].canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // L0: red
+        stack.addLayer() // L1
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // L1: green
+        stack.addLayer() // L2: active, transparent, topmost — never covers anything below it
+        _ = stack.compositeImage() // primes the cache: green (L1) currently on top of red (L0)
+
+        stack.moveLayer(from: 0, to: 1) // reorder the two non-active layers: red now on top of green
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 255, "red must now be on top after moveLayer reordered the two background layers")
+        XCTAssertEqual(pixel.g, 0)
+    }
+
+    func testCompositeImage_afterDirectActiveLayerIndexAssignment_reflectsNewActiveLayer() {
+        // Mirrors LayerPanelView.selectLayer(at:)'s call pattern: a direct
+        // property assignment (`stack.activeLayerIndex = ...`), never a
+        // method call — proving activeLayerIndex's didSet (not just the
+        // explicit `backgroundCompositeCache = nil` calls sprinkled through
+        // the other mutating methods) is what invalidates the cache here.
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0
+        stack.addLayer() // L1: active, transparent by default
+
+        stack.activeLayerIndex = 0 // direct assignment, back to L0
+        _ = stack.compositeImage(excludingLayerAtIndex: 0) // primes the cache with "everything except L0" == L1, still blank/transparent
+
+        stack.activeLayerIndex = 1 // direct assignment, forward to L1 — must invalidate the cache
+        stack.activeLayer.canvas.fill(with: .black) // edits L1's canvas directly, bypassing every LayerStack method
+
+        stack.activeLayerIndex = 0 // direct assignment, back to L0 — same excludedIndex as the priming call above
+
+        guard let composite = stack.compositeImage(excludingLayerAtIndex: 0),
+              let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage(excludingLayerAtIndex:) returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.a, 255, "excluding L0 must show L1's black fill fully opaque — a stale cache from before L1 was edited would still be blank/transparent (alpha 0)")
+        XCTAssertEqual(pixel.r, 0)
+    }
+
+    func testCompositeImage_reassignActiveLayerIndexToSameValue_stillProducesCorrectResult() {
+        // activeLayerIndex's didSet fires even when Swift reassigns the
+        // exact same value it already held — proving that firing actually
+        // invalidates the cache (rather than a hypothetical `oldValue !=
+        // newValue` guard skipping it) requires an out-of-band background
+        // edit that bypasses every LayerStack method's own explicit
+        // invalidation, since only the reassignment itself is left to
+        // notice the change.
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0: non-active after addLayer
+        stack.addLayer() // L1: active, transparent
+
+        _ = stack.compositeImage() // primes the cache with L0 (white) as the background
+
+        stack.layers[0].canvas.fill(with: .black) // edits the non-active L0 directly, bypassing setVisibility/setOpacity/etc.
+
+        stack.activeLayerIndex = stack.activeLayerIndex // reassignment to the SAME value
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 0, "the same-value reassignment's didSet must still invalidate the cache, so L0's direct edit is picked up")
+    }
+
+    func testLayerStack_freshlyConstructed_firstCompositeImageCallSucceedsWithoutPriorInvalidation() {
+        // `didSet` on a stored property is not invoked for the initial
+        // value assigned inside `init` — so the very first compositeImage()
+        // call, for either initializer, must still succeed correctly with
+        // no prior invalidation trigger ever having run.
+        let simple = LayerStack(width: 2, height: 2, background: .white)
+        guard let simpleComposite = simple.compositeImage(), let simplePixel = rawRGBA(of: simpleComposite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil for the width:height:background: initializer")
+            return
+        }
+        XCTAssertEqual(simplePixel.r, 255)
+        XCTAssertEqual(simplePixel.a, 255)
+
+        let layers = [Layer(canvas: PixelCanvas(width: 2, height: 2, background: .black), name: "A")]
+        let loaded = LayerStack(width: 2, height: 2, layers: layers, activeLayerIndex: 0)
+        guard let loadedComposite = loaded.compositeImage(), let loadedPixel = rawRGBA(of: loadedComposite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil for the width:height:layers:activeLayerIndex: initializer")
+            return
+        }
+        XCTAssertEqual(loadedPixel.r, 0)
+        XCTAssertEqual(loadedPixel.a, 255)
+    }
+
+    func testCompositeImage_excludedIndexOutOfRange_fallsBackToFullRecompositeWithoutCrash() {
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0
+        stack.addLayer() // L1: active
+        stack.activeLayer.canvas.fill(with: .black)
+
+        guard let negativeResult = stack.compositeImage(excludingLayerAtIndex: -1),
+              let negativePixel = rawRGBA(of: negativeResult, x: 0, y: 0) else {
+            XCTFail("compositeImage(excludingLayerAtIndex: -1) returned nil")
+            return
+        }
+        XCTAssertEqual(negativePixel.r, 0, "an out-of-range excludedIndex must exclude nothing — the full composite (black on top) is still shown")
+
+        guard let outOfBoundsResult = stack.compositeImage(excludingLayerAtIndex: stack.layers.count),
+              let outOfBoundsPixel = rawRGBA(of: outOfBoundsResult, x: 0, y: 0) else {
+            XCTFail("compositeImage(excludingLayerAtIndex: layers.count) returned nil")
+            return
+        }
+        XCTAssertEqual(outOfBoundsPixel.r, 0)
+    }
+
+    func testCompositeImage_excludeOtherIndex_doesNotMutateExistingCache() {
+        let stack = LayerStack(width: 2, height: 2, background: .white) // L0: non-active
+        stack.addLayer() // L1: active
+        stack.activeLayer.canvas.fill(with: .black)
+
+        _ = stack.compositeImage() // builds backgroundCompositeCache excluding the active layer (L1)
+
+        guard let beforeInterleave = stack.compositeImage(excludingLayerAtIndex: stack.activeLayerIndex) else {
+            XCTFail("compositeImage(excludingLayerAtIndex:) returned nil")
+            return
+        }
+
+        _ = stack.compositeImage(excludingLayerAtIndex: 0) // excludes the OTHER (non-active) layer — must not touch or rebuild the cache
+
+        guard let afterInterleave = stack.compositeImage(excludingLayerAtIndex: stack.activeLayerIndex) else {
+            XCTFail("compositeImage(excludingLayerAtIndex:) returned nil")
+            return
+        }
+
+        assertCompositesEqual(beforeInterleave, afterInterleave, width: 2, height: 2)
+    }
 }
