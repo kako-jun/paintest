@@ -299,6 +299,144 @@ final class CanvasViewTests: XCTestCase {
         }
     }
 
+    // MARK: - History checkpoint recorded onto the correct document during
+    // a tab-switch auto-commit (issue #19 self-review must-1)
+    //
+    // `AppDelegate.activateActiveDocument()`'s transform auto-commit above
+    // fires `CanvasView.onEditCompleted` synchronously from inside
+    // `commitLayerTransform()`. In the real app, that happens AFTER
+    // `documentManager.activeDocumentIndex` has already advanced to the
+    // incoming document — `DocumentTabBarView`/`closeDocument(at:)` update
+    // the index before invoking `onSelect`/`onClose`, which is what calls
+    // `activateActiveDocument()` — but BEFORE `AppDelegate.displayedDocument`
+    // is reassigned (that happens only at the very end of
+    // `activateActiveDocument()`, once every other hand-off is done). The
+    // fixed `recordHistoryCheckpoint(label:)` records onto `displayedDocument`
+    // for exactly this reason. `AppDelegate` itself can't be unit tested
+    // directly (see `activate(_:previouslyDisplayed:on:)`'s own doc comment
+    // above), so this test reproduces that same interleaving directly
+    // against `Document` + `CanvasView`, extending the `activate(...)`
+    // helper's protocol with the fixed `onEditCompleted` -> history routing.
+
+    func testHistoryCheckpoint_transformAutoCommitDuringTabSwitch_recordsOntoTheOriginatingDocument_leavesTheOtherDocumentsHistoryUntouched() {
+        let zoomScale = 4
+        let docA = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 8, height: 8), displayName: "b")
+        let canvasA = docA.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                canvasA.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 7, green: Double(y) / 7, blue: 0.2, alpha: 1))
+            }
+        }
+        var beforeA: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<8 { beforeA.append((0..<8).map { canvasA.rawPixel(x: $0, y: y)! }) }
+        // Mirrors a real document's usage: the gradient above was already a
+        // completed, recorded edit (like a pencil stroke going through
+        // `onEditCompleted`) before the transform in question ever began —
+        // otherwise `docA.history` would have no pre-transform checkpoint to
+        // undo back to.
+        docA.history.record(docA.layerStack, label: "描画")
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(docA.layerStack)
+        let window = view.window!
+
+        // Mirrors the FIXED `AppDelegate.recordHistoryCheckpoint(label:)`:
+        // always records onto whichever document is still actually
+        // *displayed* right now, tracked here the same way `AppDelegate.
+        // displayedDocument` is — reassigned only at the very end of a tab
+        // switch, after any auto-commit has already fired and recorded.
+        var displayedDocument = docA
+        view.onEditCompleted = { label in
+            displayedDocument.history.record(displayedDocument.layerStack, selection: view.selection, label: label)
+        }
+
+        view.beginLayerTransform()
+        let down = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let drag = transformWindowPoint(canvasX: 5, canvasY: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: down, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: drag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: drag, in: window))
+        XCTAssertTrue(view.isTransforming, "precondition: still mid-transform, not yet confirmed")
+
+        let docBEntryLabelsBefore = docB.history.entries.map(\.label)
+        let docBIndexBefore = docB.history.currentIndex
+
+        // Switch tabs to "b" WITHOUT ever pressing Return — `activate(...)`
+        // auto-commits the transform (firing `onEditCompleted` above, which
+        // still routes to `docA` via `displayedDocument`) BEFORE
+        // `displayedDocument` is reassigned to `docB` immediately after,
+        // exactly mirroring `AppDelegate.activateActiveDocument()`'s own
+        // ordering.
+        activate(docB, previouslyDisplayed: docA, on: view)
+        displayedDocument = docB
+
+        XCTAssertEqual(docA.history.entries.map(\.label), ["初期状態", "描画", "変形"], "the auto-committed transform must land in docA's own history, not docB's")
+        XCTAssertEqual(docB.history.entries.map(\.label), docBEntryLabelsBefore, "docB's history must be completely untouched by a transform that belongs to docA")
+        XCTAssertEqual(docB.history.currentIndex, docBIndexBefore, "docB's currentIndex must be completely untouched too")
+
+        // Switch back to "a" and undo: must revert to the pre-transform
+        // (gradient) pixels, proving the checkpoint really is undoable from
+        // docA's own tab — the whole point of must-1's fix.
+        activate(docA, previouslyDisplayed: docB, on: view)
+        displayedDocument = docA
+
+        guard let restored = docA.history.undo() else {
+            return XCTFail("docA should have the \"描画\" checkpoint left to undo back to")
+        }
+        docA.layerStack = restored.layerStack
+        view.replaceLayerStack(restored.layerStack)
+
+        let restoredCanvas = restored.layerStack.activeLayer.canvas
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let actual = restoredCanvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, beforeA[y][x].r, "docA x=\(x) y=\(y) red after undo")
+                XCTAssertEqual(actual?.g, beforeA[y][x].g, "docA x=\(x) y=\(y) green after undo")
+                XCTAssertEqual(actual?.b, beforeA[y][x].b, "docA x=\(x) y=\(y) blue after undo")
+                XCTAssertEqual(actual?.a, beforeA[y][x].a, "docA x=\(x) y=\(y) alpha after undo")
+            }
+        }
+    }
+
+    // MARK: - Selection restored through canvasView.selection on undo
+    // (issue #19 self-review should-3)
+    //
+    // Mirrors `AppDelegate.applyHistorySnapshot(_:)`'s own selection
+    // hand-off (`canvasView.selection = snapshot.selection`) — recording two
+    // successive selection checkpoints and undoing back to the first must
+    // restore `canvasView.selection`'s actual content, not just the
+    // (unchanged, since selecting never paints anything) `layerStack`.
+
+    func testHistorySnapshot_selection_isRecordedAndRestoredThroughCanvasViewSelectionOnUndo() {
+        let width = 8, height = 8
+        let document = Document(layerStack: LayerStack(width: width, height: height, background: .white))
+        let view = CanvasView(layerStack: document.layerStack)
+
+        let selectionA = SelectionMask.rectangle(x0: 0, y0: 0, x1: 2, y1: 2, width: width, height: height)
+        view.selection = selectionA
+        document.history.record(document.layerStack, selection: view.selection, label: "選択範囲")
+
+        let selectionB = SelectionMask.rectangle(x0: 4, y0: 4, x1: 6, y1: 6, width: width, height: height)
+        view.selection = selectionB
+        document.history.record(document.layerStack, selection: view.selection, label: "選択範囲")
+
+        guard let restored = document.history.undo() else {
+            return XCTFail("expected undo() to return the selectionA checkpoint")
+        }
+        // Mirrors `AppDelegate.applyHistorySnapshot(_:)`'s hand-off.
+        view.selection = restored.selection
+
+        guard let currentSelection = view.selection else {
+            return XCTFail("canvasView.selection must be restored to selectionA's content, not nil")
+        }
+        for y in 0..<height {
+            for x in 0..<width {
+                XCTAssertEqual(currentSelection.contains(x: x, y: y), selectionA.contains(x: x, y: y), "x=\(x) y=\(y)")
+            }
+        }
+    }
+
     // MARK: - onZoomChanged callback
 
     func testOnZoomChanged_firesOnceWithNewScale_onZoomIn() {
@@ -3494,5 +3632,216 @@ final class CanvasViewTests: XCTestCase {
 
         view.mouseUp(with: mouseUpEvent(at: distortDrag, in: window, modifierFlags: [.option]))
         view.cancelLayerTransform()
+    }
+
+    // MARK: - onEditCompleted (issue #19): fires exactly once per completed edit gesture
+
+    // MARK: 1 gesture -> 1 fire (test list 31-35)
+
+    func testOnEditCompleted_pencilStroke_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pencil
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 2, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertEqual(labels, ["鉛筆"])
+    }
+
+    func testOnEditCompleted_rectangleSelect_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    func testOnEditCompleted_lassoSelect_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    func testOnEditCompleted_polygonSelect_multipleClicksThenReturn_firesExactlyOnceAtClose_notOnInterimClicks() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        XCTAssertTrue(labels.isEmpty, "the 3 vertex-placing clicks must not fire onEditCompleted on their own")
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: close
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    func testOnEditCompleted_layerTransform_beginMultipleDragsThenCommit_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.beginLayerTransform()
+        let downPoint = transformWindowPoint(canvasX: 4, canvasY: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let midPoint = transformWindowPoint(canvasX: 6, canvasY: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let dragPoint = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: downPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: midPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window))
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+        view.commitLayerTransform()
+
+        XCTAssertEqual(labels, ["変形"])
+    }
+
+    // MARK: Doesn't fire when nothing changed / for non-editing tools (test list 36-38, 40, 42)
+
+    func testOnEditCompleted_pencil_mouseUpWithNothingPaintedDuringTheGesture_doesNotFire() {
+        // No preceding mouseDown/mouseDragged at all — `paintedDuringGesture`
+        // stays at its default `false`, the same "nothing was actually
+        // painted" state a mouseDown that never reached the paint fallback
+        // would leave behind. Mirrors this file's existing
+        // `testMouseUp_magnifierWithoutAPriorMouseDown_...` precedent for
+        // exercising a bare `mouseUp` call.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pencil
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(labels.isEmpty, "mouseUp with nothing painted during the gesture must not fire onEditCompleted")
+    }
+
+    func testOnEditCompleted_eyedropperMouseDown_doesNotFire() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .eyedropper
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(labels.isEmpty)
+    }
+
+    func testOnEditCompleted_magnifierClickAndDrag_neverFires() {
+        let view = makeMagnifierViewInWindow()
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        // A plain click.
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 10, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 13, y: 16), in: window)) // distance == 3, still a click
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 13, y: 16), in: window))
+        // A drag.
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 2, y: 16), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: NSPoint(x: 11, y: 16), in: window)) // distance == 9, a drag
+        view.mouseUp(with: mouseUpEvent(at: NSPoint(x: 11, y: 16), in: window))
+
+        XCTAssertTrue(labels.isEmpty, "the magnifier tool never edits content, so it must never fire onEditCompleted")
+    }
+
+    func testOnEditCompleted_lassoSelect_fewerThanThreeVertices_doesNotFire() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .lassoSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window)) // 1 vertex only
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+
+        XCTAssertTrue(labels.isEmpty, "fewer than 3 vertices can't enclose an area and must not fire onEditCompleted")
+    }
+
+    func testOnEditCompleted_commitLayerTransformWithoutBeginningOne_doesNotFire() {
+        let view = makeView()
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.commitLayerTransform() // activeTransform is nil: guarded no-op
+
+        XCTAssertTrue(labels.isEmpty)
+    }
+
+    // MARK: Fires when expected (test list 41), and a documented current-behavior lock-in (test list 39)
+
+    func testOnEditCompleted_magicWandSelect_singleClick_firesExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertEqual(labels, ["選択範囲"])
+    }
+
+    /// Locks in the CURRENT implementation as a deliberate spec, not an
+    /// oversight: `mouseUp`'s rectangle/ellipse-select branch calls
+    /// `onEditCompleted?("選択範囲")` unconditionally after
+    /// `applyCombinedSelection`, with no guard on the dragged rectangle's
+    /// size — even a zero-size drag (mouseDown/mouseUp at the exact same
+    /// point, which resolves to an empty mask that collapses `selection`
+    /// back to `nil`) still fires it. If a future change makes this guard
+    /// against no-op drags, this test will catch that change so it's made
+    /// on purpose rather than as a silent side effect.
+    func testOnEditCompleted_rectangleSelect_zeroSizeDrag_stillFires_currentBehaviorLockedIn() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window)) // no mouseDragged at all: zero-size drag
+
+        XCTAssertEqual(labels, ["選択範囲"], "current implementation fires onEditCompleted even for a zero-size drag — see this test's doc comment")
     }
 }

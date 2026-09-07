@@ -28,6 +28,13 @@ final class Document {
     /// brand-new document or one just loaded from disk hasn't diverged from
     /// what's on disk (or from "nothing", for a new document) yet.
     var isDirty: Bool = false
+    /// This document's undo/redo history (issue #19). Same treatment as
+    /// `selection` above: transient UI state, not document content, so it
+    /// is deliberately **not** persisted by `.paintestdoc` save/load — a
+    /// freshly opened document always starts with a single "初期状態" entry,
+    /// never the history of whatever editing session originally produced
+    /// the saved file.
+    var history: HistoryManager
 
     // `zoomScale`'s default reaches into `CanvasView` (a view-layer type) for
     // its initial value, so this model type isn't fully independent of the
@@ -39,5 +46,6 @@ final class Document {
         self.displayName = displayName
         self.fileURL = fileURL
         self.zoomScale = zoomScale
+        self.history = HistoryManager(initialLayerStack: layerStack)
     }
 }

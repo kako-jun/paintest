@@ -16,7 +16,7 @@ public func runPaintestApp() {
     app.run()
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var window: NSWindow!
     private var canvasView: CanvasView!
     private var scrollView: NSScrollView!
@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var colorPaletteView: ColorPaletteView!
     private var currentColorIndicator: CurrentColorIndicatorView!
     private var layerPanelView: LayerPanelView!
+    private var historyPanelView: HistoryPanelView!
     private var optionBarView: OptionBarView!
     private var documentTabBarView: DocumentTabBarView!
     private var documentManager: DocumentManager!
@@ -153,6 +154,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // never merely from switching tools or tabs — the correct
             // "dirty" signal for issue #4's unsaved-changes tracking.
             self?.documentManager.activeDocument.isDirty = true
+        }
+        // Records an undo/redo checkpoint at the end of every completed
+        // editing gesture (issue #19) — see `CanvasView.onEditCompleted`'s
+        // own doc comment for exactly which gestures fire this.
+        canvasView.onEditCompleted = { [weak self] label in
+            self?.recordHistoryCheckpoint(label: label)
         }
 
         scrollView = NSScrollView()
@@ -391,6 +398,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Layer add/remove/duplicate/reorder/opacity/visibility changes
             // are content edits too, same as a pencil stroke (issue #4).
             self?.documentManager.activeDocument.isDirty = true
+            // Same content-edit treatment for undo/redo (issue #19). Round 1
+            // uses one generic "レイヤー操作" label for every kind of layer
+            // panel change rather than distinguishing add/remove/reorder/
+            // opacity/visibility — finer-grained labels are round 2's call.
+            self?.recordHistoryCheckpoint(label: "レイヤー操作")
         }
         // Selecting a different layer row is not a content edit (issue #4
         // self-review must): redraw so the canvas reflects the new active
@@ -427,8 +439,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let propertyPanelView = PlaceholderPanelView(title: "プロパティ")
         propertyPanelView.translatesAutoresizingMaskIntoConstraints = false
 
-        let historyPanelView = PlaceholderPanelView(title: "ヒストリー")
+        historyPanelView = HistoryPanelView(
+            entries: documentManager.activeDocument.history.entries,
+            currentIndex: documentManager.activeDocument.history.currentIndex
+        )
+        // Jumping from the panel needs the exact same pre/post treatment as
+        // Cmd+Z/Cmd+Shift+Z (issue #19 round 2): cancel — not commit — an
+        // in-progress layer transform first (same reasoning as `undo()`/
+        // `redo()` above: the transform was never itself recorded as a
+        // history entry), then adopt the jumped-to snapshot via the same
+        // `applyHistorySnapshot(_:)` every other history-restoring path
+        // uses, then refresh this panel so its highlight follows the new
+        // `currentIndex`.
+        historyPanelView.onJumpToIndex = { [weak self] index in
+            guard let self else { return }
+            if self.canvasView.isTransforming { self.canvasView.cancelLayerTransform() }
+            guard let restored = self.documentManager.activeDocument.history.jump(to: index) else { return }
+            self.applyHistorySnapshot(restored)
+            self.refreshHistoryPanel()
+        }
         historyPanelView.translatesAutoresizingMaskIntoConstraints = false
+        historyPanelView.wantsLayer = true
+        historyPanelView.layer?.backgroundColor = Self.chromeColor.cgColor
 
         group.addSubview(layerPanelView)
         group.addSubview(topDivider)
@@ -567,7 +599,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (issue #11) — two same-labeled-in-spirit items on two different
         // menus looked like a bug, so the dead placeholder is dropped and
         // 選択範囲's own item is the single real entry point.
-        mainMenu.addItem(makeMenuItem(title: "編集", placeholders: ["元に戻す", "切り取り", "コピー", "貼り付け"]))
+        // "元に戻す"/"やり直す" are wired to real undo/redo (issue #19);
+        // 切り取り/コピー/貼り付け stay decorative placeholders, out of this
+        // issue's scope. "やり直す"'s keyEquivalent is uppercase "Z" so Cmd+Z
+        // maps to 元に戻す and Shift+Cmd+Z maps to やり直す — `NSMenu` derives
+        // the Shift modifier automatically from an uppercase keyEquivalent
+        // letter, the same convention macOS apps use for this exact pairing.
+        let editMenuItem = makeMenuItem(title: "編集", items: [
+            ("元に戻す", #selector(undo), "z"),
+            ("やり直す", #selector(redo), "Z")
+        ], placeholders: ["切り取り", "コピー", "貼り付け"])
+        mainMenu.addItem(editMenuItem)
 
         mainMenu.addItem(makeMenuItem(title: "表示", items: [
             ("拡大", #selector(zoomIn), "+"),
@@ -661,6 +703,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layerPanelView.replaceLayerStack(document.layerStack)
         documentTabBarView.reload()
         updateWindowTitle(for: document)
+        // The newly active document has its own independent `HistoryManager`
+        // (issue #19 round 2): without this, switching tabs would leave the
+        // panel showing the previous document's history list/highlight.
+        refreshHistoryPanel()
 
         // No separate options-bar refresh needed here: `setZoomScale(_:)`
         // above synchronously fires `onZoomChanged`, which already calls
@@ -669,6 +715,119 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can't change in between.
 
         displayedDocument = document
+    }
+
+    // MARK: - NSMenuItemValidation (issue #19)
+
+    /// Grays out "元に戻す"/"やり直す" when there's nothing left to undo/redo
+    /// in the active document's history; every other menu item stays
+    /// enabled, unchanged from before this conformance was added.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(undo):
+            return documentManager?.activeDocument.history.canUndo ?? false
+        case #selector(redo):
+            return documentManager?.activeDocument.history.canRedo ?? false
+        default:
+            return true
+        }
+    }
+
+    // MARK: - History / Undo / Redo (issue #19)
+
+    /// Records the currently displayed document's `layerStack` (plus its
+    /// live `selection`, issue #19 self-review should-3) as a new history
+    /// checkpoint. Called from `canvasView.onEditCompleted` (pencil/eraser/
+    /// pen strokes, selection confirms, layer transform commit) and from
+    /// `layerPanelView.onChange` (layer add/remove/reorder/opacity/
+    /// visibility) — every place this app currently considers a "content
+    /// edit" for `isDirty` tracking also gets a history checkpoint here.
+    ///
+    /// Deliberately targets `displayedDocument`, **not**
+    /// `documentManager.activeDocument` (issue #19 self-review must-1): both
+    /// call sites above can fire *during* a tab switch — `canvasView.
+    /// onEditCompleted` from the auto-commit in `activateActiveDocument()`
+    /// below, `layerPanelView.onChange` from its own `willChangeActiveLayer`
+    /// auto-commit — at which point `documentManager.activeDocumentIndex`
+    /// has already advanced to the *incoming* document (`DocumentTabBarView`
+    /// updates it before invoking `onSelect`/`onClose`), while
+    /// `canvasView.layerStack` — and hence the edit actually being recorded
+    /// — still belongs to the *outgoing* one. `displayedDocument` is exactly
+    /// "whichever document `canvasView` is still showing right now" (see its
+    /// own doc comment, already relied on for the same reason by zoom/
+    /// selection hand-off) and is only reassigned at the very end of
+    /// `activateActiveDocument()`, after any such auto-commit has already
+    /// run — so it always names the correct target here. Using
+    /// `activeDocument` instead would both fail to record the edit onto the
+    /// document it actually belongs to (leaving that document permanently
+    /// un-undoable for this edit) and corrupt the unrelated incoming
+    /// document's history with a bogus entry, silently discarding any of
+    /// its own redo-able future (`HistoryManager.record(_:selection:label:)`
+    /// drops everything after `currentIndex`).
+    private func recordHistoryCheckpoint(label: String) {
+        guard let document = displayedDocument else { return }
+        document.history.record(document.layerStack, selection: canvasView.selection, label: label)
+        refreshHistoryPanel()
+    }
+
+    /// Redraws the history panel from the active document's current
+    /// `HistoryManager` state. Called after every operation that can move
+    /// or extend the history — recording a checkpoint (above), `undo()`/
+    /// `redo()`, a jump from the panel itself, and switching to a different
+    /// document's tab in `activateActiveDocument()` — so the panel never
+    /// shows a stale list or a stale current-position highlight.
+    private func refreshHistoryPanel() {
+        let history = documentManager.activeDocument.history
+        historyPanelView.reload(entries: history.entries, currentIndex: history.currentIndex)
+    }
+
+    /// "元に戻す" (Cmd+Z). An in-progress layer transform is cancelled first
+    /// (not committed) — Photoshop's own convention: undoing while
+    /// free-transforming abandons the in-progress adjustment rather than
+    /// baking it in first, since the transform itself was never recorded as
+    /// its own history entry until `commitLayerTransform()` runs.
+    @objc private func undo() {
+        if canvasView.isTransforming { canvasView.cancelLayerTransform() }
+        guard let restored = documentManager.activeDocument.history.undo() else { return }
+        applyHistorySnapshot(restored)
+        refreshHistoryPanel()
+    }
+
+    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform handling as
+    /// `undo()` above.
+    @objc private func redo() {
+        if canvasView.isTransforming { canvasView.cancelLayerTransform() }
+        guard let restored = documentManager.activeDocument.history.redo() else { return }
+        applyHistorySnapshot(restored)
+        refreshHistoryPanel()
+    }
+
+    /// Adopts `snapshot` (already a fresh deep copy handed back by
+    /// `HistoryManager.undo()`/`redo()`/`jump(to:)`) as the active
+    /// document's live state — both its `layerStack` and its `selection`
+    /// (issue #19 self-review should-3) — and rewires every view that holds
+    /// a reference to the old `LayerStack`/selection — same set of updates
+    /// `activateActiveDocument()` does when swapping in a different
+    /// document's stack, minus the zoom/window-title bookkeeping that only
+    /// applies when the *document* changes, not just its content.
+    ///
+    /// Marks the document dirty (issue #19 self-review must-2): every other
+    /// content-changing path (`onLayerContentChanged`, `layerPanelView.
+    /// onChange`) sets `isDirty = true` in the same place it applies the
+    /// change, but this one — used by undo/redo/history-panel-jump — used to
+    /// skip it, so an undo/redo/jump that left the document different from
+    /// what's on disk silently skipped issue #4's unsaved-changes prompt on
+    /// tab-close/quit.
+    private func applyHistorySnapshot(_ snapshot: HistorySnapshot) {
+        let document = documentManager.activeDocument
+        document.layerStack = snapshot.layerStack
+        document.selection = snapshot.selection
+        document.isDirty = true
+        canvasView.replaceLayerStack(snapshot.layerStack)
+        canvasView.selection = snapshot.selection
+        layerPanelView.replaceLayerStack(snapshot.layerStack)
+        documentTabBarView.reload()
+        canvasView.needsDisplay = true
     }
 
     // MARK: - Selection menu (issue #11)
