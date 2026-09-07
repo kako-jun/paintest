@@ -365,6 +365,28 @@ final class ImageAdjustmentsTests: XCTestCase {
         XCTAssertEqual(result.b, 255)
     }
 
+    func testHueSaturation_makeTransform_matchesApplyDirectly() {
+        // Every Hue/Saturation test above only ever calls `apply(r:g:b:)`
+        // directly — `makeTransform()` itself (the tuple-in/tuple-out
+        // closure `AdjustmentDialog`/`ImageAdjustments.apply` actually call)
+        // never gets invoked anywhere in this file (self-review nit-2, PR
+        // #35). Pins that the closure it returns produces the exact same RGB
+        // `apply` does, plus alpha passed through unchanged.
+        var settings = ImageAdjustments.HueSaturationSettings.identity
+        settings.hue = 120
+        settings.saturation = -50
+        settings.lightness = 30
+
+        let transform = settings.makeTransform()
+        let result = transform(200, 80, 40, 111)
+        let expected = settings.apply(r: 200, g: 80, b: 40)
+
+        XCTAssertEqual(result.0, expected.r)
+        XCTAssertEqual(result.1, expected.g)
+        XCTAssertEqual(result.2, expected.b)
+        XCTAssertEqual(result.3, 111, "alpha must pass through makeTransform() unchanged")
+    }
+
     // MARK: - ToneCurve.lut()
 
     func testToneCurve_zeroPoints_fallsBackToIdentity() {
