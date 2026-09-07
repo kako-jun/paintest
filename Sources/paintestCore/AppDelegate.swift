@@ -620,7 +620,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // here (issue #7): Photoshop has no top-level Colors menu, so its
         // one placeholder item joins Image's placeholders instead of
         // staying a separate top-level menu.
-        mainMenu.addItem(makeMenuItem(title: "イメージ", placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…", "色の編集…"]))
+        // The four real color-adjustment dialogs (issue #12) are added as
+        // flat items directly under "イメージ", ahead of the still-decorative
+        // placeholders below — the issue's own plan calls for adding them
+        // "「イメージ」相当のメニュー項目として", not a nested "色調補正"
+        // submenu the way real Photoshop groups them.
+        mainMenu.addItem(makeMenuItem(title: "イメージ", items: [
+            ("トーンカーブ…", #selector(showToneCurveDialog), ""),
+            ("明るさ・コントラスト…", #selector(showBrightnessContrastDialog), ""),
+            ("色相・彩度…", #selector(showHueSaturationDialog), ""),
+            ("レベル補正…", #selector(showLevelsDialog), "")
+        ], placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…", "色の編集…"]))
         mainMenu.addItem(makeMenuItem(title: "レイヤー", items: [
             ("自由変形", #selector(beginLayerTransform), "t")
         ], placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
@@ -1124,6 +1134,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// via separate menu items).
     @objc private func beginLayerTransform() {
         canvasView.beginLayerTransform()
+    }
+
+    // MARK: - Image adjustments (issue #12)
+
+    @objc private func showToneCurveDialog() {
+        presentAdjustment(label: "トーンカーブ") { canvas, mask, onPreview in
+            AdjustmentDialog.showToneCurve(target: canvas, mask: mask, onPreview: onPreview)
+        }
+    }
+
+    @objc private func showBrightnessContrastDialog() {
+        presentAdjustment(label: "明るさ・コントラスト") { canvas, mask, onPreview in
+            AdjustmentDialog.showBrightnessContrast(target: canvas, mask: mask, onPreview: onPreview)
+        }
+    }
+
+    @objc private func showHueSaturationDialog() {
+        presentAdjustment(label: "色相・彩度") { canvas, mask, onPreview in
+            AdjustmentDialog.showHueSaturation(target: canvas, mask: mask, onPreview: onPreview)
+        }
+    }
+
+    @objc private func showLevelsDialog() {
+        presentAdjustment(label: "レベル補正") { canvas, mask, onPreview in
+            AdjustmentDialog.showLevels(target: canvas, mask: mask, onPreview: onPreview)
+        }
+    }
+
+    /// Guards every "イメージ" adjustment dialog against issue #9's own known
+    /// footgun (see `activateActiveDocument()`'s identical handling of the
+    /// same hazard, for tab/document switches instead of this menu): an
+    /// adjustment dialog reads and writes `layerStack.activeLayer.canvas`
+    /// directly, but while a layer transform is in progress that real canvas
+    /// still holds the *pre-transform* pixels — the live preview only exists
+    /// in `CanvasView`'s own `transformOriginalCanvas` scratch buffer until
+    /// `commitLayerTransform()` runs. Editing the real canvas now would be
+    /// silently discarded the moment the transform is later confirmed, since
+    /// `commitLayerTransform()` overwrites the whole canvas from that scratch
+    /// buffer. Auto-confirming first (the same call `activateActiveDocument()`
+    /// already makes) avoids that trap.
+    private func commitAnyInProgressTransform() {
+        if canvasView.isTransforming {
+            canvasView.commitLayerTransform()
+        }
+    }
+
+    /// Shared plumbing for all four "イメージ" adjustment dialogs above:
+    /// commits any in-progress layer transform first (see
+    /// `commitAnyInProgressTransform()`), runs `showDialog` against the
+    /// active layer's real canvas and the live selection (issue #11:
+    /// `AdjustmentDialog`/`ImageAdjustments` restrict writes to it when
+    /// present), and — only if the dialog was actually confirmed with OK,
+    /// never on cancel — replicates the same "content changed" side effects
+    /// `CanvasView.onLayerContentChanged`/`onEditCompleted` produce for every
+    /// other editing gesture: layer panel + tab strip thumbnails refresh, the
+    /// document is marked dirty, and a new undo/redo checkpoint is recorded.
+    /// A cancelled dialog already restored the original pixels itself
+    /// (`AdjustmentDialog`'s own contract) and asked for one last redraw via
+    /// its own `onPreview` call, so nothing further is needed here for that
+    /// case.
+    private func presentAdjustment(label: String, showDialog: (PixelCanvas, SelectionMask?, @escaping () -> Void) -> Bool) {
+        commitAnyInProgressTransform()
+        let canvas = canvasView.layerStack.activeLayer.canvas
+        let mask = canvasView.selection
+        let applied = showDialog(canvas, mask) { [weak self] in
+            self?.canvasView.needsDisplay = true
+        }
+        guard applied else { return }
+        layerPanelView.reload()
+        documentTabBarView.reload()
+        documentManager.activeDocument.isDirty = true
+        recordHistoryCheckpoint(label: label)
     }
 
     private func presentError(_ message: String) {
