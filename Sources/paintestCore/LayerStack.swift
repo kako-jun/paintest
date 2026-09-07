@@ -37,16 +37,30 @@ final class LayerStack {
     /// flattened" — the part of `compositeImage(excludingLayerAtIndex:)`'s
     /// result that interactive editing (which only ever mutates
     /// `activeLayer.canvas`) cannot change from one frame to the next.
-    /// `excludedIndex` records which layer the cached `image` excludes, so a
-    /// stale cache built for a since-changed `activeLayerIndex` is never
-    /// mistaken for a fresh one.
+    ///
+    /// `moveLayer` reorders `layers` by tracking the active layer's object
+    /// identity, not its index, so the active layer is not guaranteed to be
+    /// the topmost element of the array — it can equally well end up with
+    /// non-active layers both below *and* above it in stacking order. A
+    /// single flattened "background" image can't represent that: it would
+    /// have to flatten the above-active layers on top of the active layer's
+    /// own contents, which is exactly backwards. So this instead caches the
+    /// two flattenable halves separately, each already bottom-to-top within
+    /// itself: `below` is `layers[0..<activeLayerIndex]` and `above` is
+    /// `layers[(activeLayerIndex + 1)...]`. Either (or both) is `nil` when
+    /// its range has no visible layer, so a document with nothing on one
+    /// side of the active layer never pays for an empty flatten.
+    ///
+    /// `excludedIndex` records which layer `below`/`above` are split around,
+    /// so a stale cache built for a since-changed `activeLayerIndex` is
+    /// never mistaken for a fresh one.
     ///
     /// Invalidated (reset to `nil`) by anything that can change what a
     /// non-active layer looks like, or which layer counts as "non-active":
     /// `setVisibility`, `setOpacity`, `addLayer`, `removeLayer`,
     /// `duplicateLayer`, `moveLayer`, and `activeLayerIndex` itself changing
     /// (see its `didSet` above).
-    private var backgroundCompositeCache: (excludedIndex: Int, image: CGImage)?
+    private var backgroundCompositeCache: (excludedIndex: Int, below: CGImage?, above: CGImage?)?
 
     /// Starts a new document with a single, opaque layer.
     init(width: Int, height: Int, background: NSColor = .white) {
@@ -210,10 +224,16 @@ final class LayerStack {
     /// two exclusion patterns `CanvasView` actually calls this with —
     /// "exclude nothing" and "exclude `activeLayerIndex`" — both reduce to
     /// the *same* underlying work: flatten every visible layer except the
-    /// active one (which `backgroundCompositeCache` remembers), then, only
-    /// for "exclude nothing", draw the active layer back on top. A
+    /// active one, split into the `below`/`above` halves
+    /// `backgroundCompositeCache` remembers (see its doc for why one
+    /// flattened image can't represent this once `moveLayer` has put
+    /// non-active layers on both sides of the active layer), then, only for
+    /// "exclude nothing", draw the active layer back in between them. A
     /// mouseDragged-driven redraw therefore only ever re-flattens the one
-    /// layer that could have changed, instead of every visible layer.
+    /// layer that could have changed, instead of every visible layer — and
+    /// always redraws `below` → (active layer) → `above` in that order, so
+    /// the active layer lands wherever it actually sits in the stack rather
+    /// than always on top.
     /// Any other `excludedIndex` (no current call site uses one, but this
     /// is a public API kept general) bypasses the cache entirely and falls
     /// back to a full from-scratch composite, so the cache — which is only
@@ -221,12 +241,13 @@ final class LayerStack {
     /// contaminated by, an unrelated exclusion.
     ///
     /// The result is pixel-identical to compositing all layers from scratch
-    /// in one pass: the cached background is drawn at `alpha = 1` onto an
+    /// in one pass: `below` and `above` are drawn at `alpha = 1` onto an
     /// otherwise-empty context, which source-over blending reproduces
     /// exactly (the destination contributes nothing while its alpha is 0),
-    /// and the active layer is then drawn on top with its own opacity via
+    /// and the active layer is drawn between them with its own opacity via
     /// `context.setAlpha(_:)`, exactly as the single-pass loop would do for
-    /// that same layer.
+    /// that same layer — so the combined `below` → active → `above` order
+    /// always matches `layers`' own bottom-to-top order.
     func compositeImage(excludingLayerAtIndex excludedIndex: Int? = nil) -> CGImage? {
         if excludedIndex != nil && excludedIndex != activeLayerIndex {
             // Not a pattern any current call site uses — don't touch or
@@ -234,31 +255,38 @@ final class LayerStack {
             return renderComposite(excluding: excludedIndex)
         }
 
-        let background: CGImage
+        let below: CGImage?
+        let above: CGImage?
         if let cache = backgroundCompositeCache, cache.excludedIndex == activeLayerIndex {
-            background = cache.image
+            below = cache.below
+            above = cache.above
         } else {
-            guard let rendered = renderComposite(excluding: activeLayerIndex) else { return nil }
-            backgroundCompositeCache = (excludedIndex: activeLayerIndex, image: rendered)
-            background = rendered
+            let renderedBelow = renderRange(layers[0..<activeLayerIndex])
+            let renderedAbove = renderRange(layers[(activeLayerIndex + 1)...])
+            backgroundCompositeCache = (excludedIndex: activeLayerIndex, below: renderedBelow, above: renderedAbove)
+            below = renderedBelow
+            above = renderedAbove
         }
 
         if excludedIndex == activeLayerIndex {
-            // issue #9's transform-preview path: the cache already *is*
-            // "every visible layer except the active one" — exactly what
-            // was asked for — so hand it back untouched.
-            return background
+            // issue #9's transform-preview path: `below` then `above`, in
+            // that order, already *is* "every visible layer except the
+            // active one" in correct stacking order — exactly what was
+            // asked for.
+            return composite(below: below, activeLayer: nil, above: above)
         }
 
-        return compositeActiveLayer(onto: background)
+        return composite(below: below, activeLayer: activeLayer, above: above)
     }
 
     /// Flattens every visible layer except `excludedIndex` (bottom-to-top,
     /// plain source-over, no exclusion at all when `excludedIndex` is
     /// `nil`) into a brand-new image, from scratch. This is the same loop
-    /// `compositeImage` always ran before issue #17 — used directly for any
-    /// exclusion pattern the cache doesn't cover, and to (re)build
-    /// `backgroundCompositeCache` itself.
+    /// `compositeImage` always ran before issue #17 — kept only for the one
+    /// exclusion pattern the cache doesn't cover (an `excludedIndex` other
+    /// than `activeLayerIndex`). `backgroundCompositeCache`'s two halves are
+    /// built by `renderRange` instead, since a single "everything except
+    /// `excludedIndex`" flatten can't represent them separately.
     private func renderComposite(excluding excludedIndex: Int?) -> CGImage? {
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = Self.makeCompositeContext(width: width, height: height, colorSpace: colorSpace)
@@ -274,24 +302,62 @@ final class LayerStack {
         return context.makeImage()
     }
 
-    /// Draws `background` (assumed to already be "every visible layer
-    /// except the active one", pre-flattened) into a fresh context at full
-    /// strength, then draws the active layer on top — respecting its own
-    /// visibility and `opacity` — exactly as `renderComposite` would when
-    /// it reaches the active layer's turn in its loop.
-    private func compositeActiveLayer(onto background: CGImage) -> CGImage? {
+    /// Flattens a bottom-to-top slice of `layers` (skipping any that aren't
+    /// visible), the same way `renderComposite` flattens the whole array,
+    /// but returns `nil` instead of an empty/transparent image when the
+    /// slice contains no visible layer at all — so a document with nothing
+    /// on one side of the active layer never pays for creating a context
+    /// and drawing nothing into it. Used to build the `below` and `above`
+    /// halves of `backgroundCompositeCache`.
+    private func renderRange(_ slice: ArraySlice<Layer>) -> CGImage? {
+        guard slice.contains(where: { $0.isVisible }) else { return nil }
+
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = Self.makeCompositeContext(width: width, height: height, colorSpace: colorSpace)
         else { return nil }
 
         let rect = CGRect(x: 0, y: 0, width: width, height: height)
-        context.setAlpha(1)
-        context.draw(background, in: rect)
-
-        let layer = activeLayer
-        if layer.isVisible, let cgImage = layer.canvas.cgImage {
+        for layer in slice where layer.isVisible {
+            guard let cgImage = layer.canvas.cgImage else { continue }
             context.setAlpha(CGFloat(layer.opacity))
             context.draw(cgImage, in: rect)
+        }
+
+        return context.makeImage()
+    }
+
+    /// Draws, into a fresh context, whichever of `below`, `activeLayer` and
+    /// `above` are non-`nil` — in that order, bottom-to-top — which is
+    /// exactly the stacking order `layers` itself uses, since `below` and
+    /// `above` are `layers[0..<activeLayerIndex]` and
+    /// `layers[(activeLayerIndex + 1)...]` respectively (see
+    /// `backgroundCompositeCache`'s doc). `below`/`above` are already
+    /// pre-flattened images, drawn at full strength (`alpha = 1`);
+    /// `activeLayer`, when passed, is drawn respecting its own `isVisible`
+    /// and `opacity` — exactly as `renderComposite`'s loop would when it
+    /// reaches that layer's turn. Passing `nil` for any of the three simply
+    /// skips that draw, so e.g. a single-layer document (nothing below or
+    /// above the active layer) draws only the active layer itself.
+    private func composite(below: CGImage?, activeLayer: Layer?, above: CGImage?) -> CGImage? {
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = Self.makeCompositeContext(width: width, height: height, colorSpace: colorSpace)
+        else { return nil }
+
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+
+        if let below {
+            context.setAlpha(1)
+            context.draw(below, in: rect)
+        }
+
+        if let activeLayer, activeLayer.isVisible, let cgImage = activeLayer.canvas.cgImage {
+            context.setAlpha(CGFloat(activeLayer.opacity))
+            context.draw(cgImage, in: rect)
+        }
+
+        if let above {
+            context.setAlpha(1)
+            context.draw(above, in: rect)
         }
 
         return context.makeImage()
@@ -300,8 +366,8 @@ final class LayerStack {
     /// A blank ARGB context sized to the document, with the same
     /// nearest-neighbour / no-antialiasing compositing policy every
     /// `LayerStack` flatten has always used (see `compositeImage`'s doc).
-    /// Shared by `renderComposite` and `compositeActiveLayer` so both
-    /// compositing passes stay in lockstep.
+    /// Shared by `renderComposite`, `renderRange`, and `composite` so every
+    /// compositing pass stays in lockstep.
     private static func makeCompositeContext(width: Int, height: Int, colorSpace: CGColorSpace) -> CGContext? {
         guard let context = CGContext(
             data: nil,
