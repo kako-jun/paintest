@@ -165,13 +165,13 @@ final class LayerStack {
 
     func setVisibility(_ isVisible: Bool, at index: Int) {
         guard layers.indices.contains(index) else { return }
-        layers[index].isVisible = isVisible
+        layers[index].setVisible(isVisible)
         backgroundCompositeCache = nil
     }
 
     func setOpacity(_ opacity: Double, at index: Int) {
         guard layers.indices.contains(index) else { return }
-        layers[index].opacity = opacity
+        layers[index].setOpacity(opacity)
         backgroundCompositeCache = nil
     }
 

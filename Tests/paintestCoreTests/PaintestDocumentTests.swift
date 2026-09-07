@@ -29,8 +29,8 @@ final class PaintestDocumentTests: XCTestCase {
     func testRoundTrip_singleLayer_preservesNameVisibilityAndOpacity() {
         let stack = LayerStack(width: 3, height: 3, background: .white)
         stack.layers[0].name = "背景"
-        stack.layers[0].isVisible = false
-        stack.layers[0].opacity = 0.75
+        stack.setVisibility(false, at: 0)
+        stack.setOpacity(0.75, at: 0)
         let url = makeTempDocumentURL()
 
         XCTAssertNoThrow(try PaintestDocument.write(stack, to: url))
