@@ -56,10 +56,15 @@ final class LayerStack {
     /// never mistaken for a fresh one.
     ///
     /// Invalidated (reset to `nil`) by anything that can change what a
-    /// non-active layer looks like, or which layer counts as "non-active":
-    /// `setVisibility`, `setOpacity`, `addLayer`, `removeLayer`,
-    /// `duplicateLayer`, `moveLayer`, and `activeLayerIndex` itself changing
-    /// (see its `didSet` above).
+    /// non-active layer looks like, or which layer counts as "non-active".
+    /// `setVisibility`/`setOpacity` do this with their own explicit reset,
+    /// since neither ever touches `activeLayerIndex`. `addLayer`,
+    /// `removeLayer`, `duplicateLayer` and `moveLayer` need no such explicit
+    /// reset of their own: every one of them unconditionally reassigns
+    /// `activeLayerIndex` (past its early-return guard, if it has one) —
+    /// even when the value it computes is the same index `activeLayerIndex`
+    /// already held — and that assignment's `didSet` (see above) invalidates
+    /// the cache on their behalf.
     private var backgroundCompositeCache: (excludedIndex: Int, below: CGImage?, above: CGImage?)?
 
     /// Starts a new document with a single, opaque layer.
@@ -103,7 +108,6 @@ final class LayerStack {
         let insertIndex = activeLayerIndex + 1
         layers.insert(layer, at: insertIndex)
         activeLayerIndex = insertIndex
-        backgroundCompositeCache = nil
         return layer
     }
 
@@ -128,7 +132,6 @@ final class LayerStack {
         } else {
             activeLayerIndex = min(index, layers.count - 1)
         }
-        backgroundCompositeCache = nil
     }
 
     /// Duplicates the layer at `index`, inserting the copy directly above
@@ -146,7 +149,6 @@ final class LayerStack {
         let insertIndex = index + 1
         layers.insert(duplicate, at: insertIndex)
         activeLayerIndex = insertIndex
-        backgroundCompositeCache = nil
         return duplicate
     }
 
@@ -160,7 +162,6 @@ final class LayerStack {
         let layer = layers.remove(at: sourceIndex)
         layers.insert(layer, at: destinationIndex)
         activeLayerIndex = layers.firstIndex(where: { $0 === previouslyActive }) ?? activeLayerIndex
-        backgroundCompositeCache = nil
     }
 
     func setVisibility(_ isVisible: Bool, at index: Int) {

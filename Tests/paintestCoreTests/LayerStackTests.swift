@@ -683,11 +683,13 @@ final class LayerStackTests: XCTestCase {
 
     func testCompositeImage_afterMoveLayer_reflectsNewStackingOrder() {
         // Both reordered layers are non-active — the active layer (L2,
-        // transparent) stays topmost throughout, so this specifically
-        // exercises moveLayer's own explicit `backgroundCompositeCache =
-        // nil`, not activeLayerIndex's didSet (which this move never
-        // triggers, since the active layer is tracked by object identity
-        // and never itself moves here).
+        // transparent) stays topmost throughout, and never itself moves
+        // (it's tracked by object identity). moveLayer still reassigns
+        // `activeLayerIndex` unconditionally to the identical index it
+        // already held, so this specifically exercises that same-value
+        // reassignment's `didSet` as the sole cache-invalidation path here
+        // — moveLayer has no explicit `backgroundCompositeCache = nil` of
+        // its own.
         let stack = LayerStack(width: 2, height: 2, background: .white)
         stack.layers[0].canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // L0: red
         stack.addLayer() // L1
