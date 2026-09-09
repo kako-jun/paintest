@@ -425,9 +425,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // layer — see `LayerPanelView.willChangeActiveLayer`'s doc comment
         // for exactly which operations), so `canvasView.layerStack` is
         // still pointing at the transform's own layer when this runs.
+        //
+        // Also auto-flushes an in-progress pen stroke for the identical
+        // reason (issue #20): `penStrokeBuffer` targets
+        // `layerStack.activeLayer.canvas` too, so it's the same "pending
+        // edit against the *current* active layer" hazard `isTransforming`
+        // already guards against here — see `isPenStrokeInProgress`'s doc
+        // comment.
         layerPanelView.willChangeActiveLayer = { [weak self] in
-            guard let self, self.canvasView.isTransforming else { return }
-            self.canvasView.commitLayerTransform()
+            guard let self else { return }
+            if self.canvasView.isTransforming {
+                self.canvasView.commitLayerTransform()
+            }
+            if self.canvasView.isPenStrokeInProgress {
+                self.canvasView.flushPenStroke()
+            }
         }
         layerPanelView.translatesAutoresizingMaskIntoConstraints = false
         layerPanelView.wantsLayer = true
@@ -454,6 +466,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         historyPanelView.onJumpToIndex = { [weak self] index in
             guard let self else { return }
             if self.canvasView.isTransforming { self.canvasView.cancelLayerTransform() }
+            // Same cancel — not flush — for an in-progress pen stroke
+            // (issue #20), for the identical reason: it has no history
+            // entry of its own yet either. See `cancelPenStroke()`'s doc
+            // comment.
+            if self.canvasView.isPenStrokeInProgress { self.canvasView.cancelPenStroke() }
             guard let restored = self.documentManager.activeDocument.history.jump(to: index) else { return }
             self.applyHistorySnapshot(restored)
             self.refreshHistoryPanel()
@@ -697,6 +714,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if canvasView.isTransforming {
             canvasView.commitLayerTransform()
         }
+        // Same auto-confirm, for the same reason, for an in-progress pen
+        // stroke (issue #20): `penStrokeBuffer` is likewise a pending edit
+        // against the *outgoing* document's `layerStack.activeLayer.canvas`
+        // — see `isPenStrokeInProgress`'s doc comment. `flushPenStroke()`
+        // fires `onEditCompleted?("ペン")` itself, and
+        // `recordHistoryCheckpoint(label:)` records against
+        // `displayedDocument` (still the outgoing document at this point,
+        // not yet reassigned below), so the finished stroke lands in the
+        // correct document's history, not the incoming one's.
+        if canvasView.isPenStrokeInProgress {
+            canvasView.flushPenStroke()
+        }
         displayedDocument?.zoomScale = canvasView.zoomScale
         // Selection is per-document state too, same pattern as zoom above
         // (issue #11): write the outgoing document's selection back from
@@ -795,18 +824,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// (not committed) — Photoshop's own convention: undoing while
     /// free-transforming abandons the in-progress adjustment rather than
     /// baking it in first, since the transform itself was never recorded as
-    /// its own history entry until `commitLayerTransform()` runs.
+    /// its own history entry until `commitLayerTransform()` runs. An
+    /// in-progress pen stroke (issue #20) gets the identical cancel-first
+    /// treatment, for the identical reason — see `cancelPenStroke()`'s doc
+    /// comment.
     @objc private func undo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
+        if canvasView.isPenStrokeInProgress { canvasView.cancelPenStroke() }
         guard let restored = documentManager.activeDocument.history.undo() else { return }
         applyHistorySnapshot(restored)
         refreshHistoryPanel()
     }
 
-    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform handling as
-    /// `undo()` above.
+    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform/pen-stroke
+    /// handling as `undo()` above.
     @objc private func redo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
+        if canvasView.isPenStrokeInProgress { canvasView.cancelPenStroke() }
         guard let restored = documentManager.activeDocument.history.redo() else { return }
         applyHistorySnapshot(restored)
         refreshHistoryPanel()
@@ -1174,15 +1208,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// `commitLayerTransform()` overwrites the whole canvas from that scratch
     /// buffer. Auto-confirming first (the same call `activateActiveDocument()`
     /// already makes) avoids that trap.
-    private func commitAnyInProgressTransform() {
+    ///
+    /// Same reasoning extends to an in-progress pen stroke (issue #20):
+    /// `layerStack.activeLayer.canvas` doesn't yet include it either (it's
+    /// sitting in `penStrokeBuffer` until `mouseUp`), so an adjustment
+    /// dialog opened mid-stroke would adjust pixels the stroke hasn't
+    /// landed on yet, and the stroke would then flush on *top* of the
+    /// adjusted result — effectively un-adjusting its own area. Flushing
+    /// (not cancelling) here mirrors the transform's own auto-*confirm*,
+    /// not `undo()`/`redo()`'s auto-*cancel*: unlike undo/redo, opening a
+    /// dialog isn't "abandon this in-progress thing", so the stroke should
+    /// still land, just before the dialog reads the canvas.
+    private func commitAnyPendingLayerEdits() {
         if canvasView.isTransforming {
             canvasView.commitLayerTransform()
+        }
+        if canvasView.isPenStrokeInProgress {
+            canvasView.flushPenStroke()
         }
     }
 
     /// Shared plumbing for all four "イメージ" adjustment dialogs above:
-    /// commits any in-progress layer transform first (see
-    /// `commitAnyInProgressTransform()`), runs `showDialog` against the
+    /// commits any in-progress layer transform or pen stroke first (see
+    /// `commitAnyPendingLayerEdits()`), runs `showDialog` against the
     /// active layer's real canvas and the live selection (issue #11:
     /// `AdjustmentDialog`/`ImageAdjustments` restrict writes to it when
     /// present), and — only if the dialog was actually confirmed with OK,
@@ -1195,7 +1243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// its own `onPreview` call, so nothing further is needed here for that
     /// case.
     private func presentAdjustment(label: String, showDialog: (PixelCanvas, SelectionMask?, @escaping () -> Void) -> Bool) {
-        commitAnyInProgressTransform()
+        commitAnyPendingLayerEdits()
         let canvas = canvasView.layerStack.activeLayer.canvas
         let mask = canvasView.selection
         let applied = showDialog(canvas, mask) { [weak self] in
@@ -1285,10 +1333,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     /// Populates (or clears) the options bar to match the newly selected
-    /// tool (issue #13). The magnifier's zoom-level dropdown and the magic
-    /// wand's tolerance slider (issue #11, round 3) are the only tools with
-    /// options of their own so far — every other tool just clears the bar
-    /// back to its empty frame.
+    /// tool (issue #13). The magnifier's zoom-level dropdown, the magic
+    /// wand's tolerance slider (issue #11, round 3), and the pen's
+    /// size/hardness/opacity/flow controls (issue #20) are the only tools
+    /// with options of their own so far — every other tool just clears the
+    /// bar back to its empty frame.
     private func updateOptionBar(for tool: Tool) {
         switch tool {
         case .magnifier:
@@ -1299,6 +1348,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             optionBarView.showMagicWandOptions(currentTolerance: canvasView.magicWandTolerance) { [weak self] tolerance in
                 self?.canvasView.magicWandTolerance = tolerance
             }
+        case .pen:
+            // `canvasView.penBrushSettings` is the single source of truth
+            // (issue #20 — no separate `AppDelegate` copy, same as
+            // `magicWandTolerance` above); each callback just writes the
+            // one field its own slider owns straight back into it.
+            optionBarView.showPenOptions(
+                settings: canvasView.penBrushSettings,
+                onSizeChanged: { [weak self] size in
+                    self?.canvasView.penBrushSettings.size = size
+                },
+                onHardnessChanged: { [weak self] hardness in
+                    self?.canvasView.penBrushSettings.hardness = hardness
+                },
+                onOpacityChanged: { [weak self] opacity in
+                    self?.canvasView.penBrushSettings.opacity = opacity
+                },
+                onFlowChanged: { [weak self] flow in
+                    self?.canvasView.penBrushSettings.flow = flow
+                }
+            )
         default:
             optionBarView.clear()
         }

@@ -29,6 +29,14 @@ final class CanvasView: NSView {
     /// old single `penColor`.
     var foregroundColor: NSColor = .black
     var backgroundColor: NSColor = .white
+    /// The pen tool's own brush settings (issue #20) — size/hardness/
+    /// opacity/flow. Kept directly on `CanvasView` with no separate
+    /// `AppDelegate` copy, the same "one tool's own adjustable numeric
+    /// setting" pattern `magicWandTolerance` below already uses (unlike
+    /// `foregroundColor`/`backgroundColor` above, which several other views
+    /// also need to mirror). `AppDelegate.updateOptionBar(for:)`'s `.pen`
+    /// case reads/writes this directly through `OptionBarView`'s sliders.
+    var penBrushSettings = PenBrushSettings()
     var onZoomChanged: ((Int) -> Void)?
     /// Fired after a pixel-editing gesture (`mouseDown`/`mouseDragged`)
     /// writes to the active layer's canvas, so `AppDelegate` can refresh
@@ -65,13 +73,20 @@ final class CanvasView: NSView {
 
     static let zoomLevels = [1, 2, 4, 8, 16, 32]
     static let defaultZoomScale = 4
-    /// The pen's fixed stroke width — the pencil paints crisp 1px-at-a-time
-    /// strokes while the pen paints wider, anti-aliased ones, and this
-    /// constant is what makes that difference visible on screen. This is a
-    /// temporary fixed value (issue #10); a real brush-size control lands
-    /// with issue #20.
-    private static let penLineWidth: CGFloat = 3
     private var lastPixel: (x: Int, y: Int)?
+    /// The in-progress pen stroke's accumulation buffer (issue #20) — a
+    /// same-size, transparent scratch `PixelCanvas` that `stampPenDab(at:)`/
+    /// `stampPenDabs(from:to:)` stamp dabs onto (each at `penBrushSettings
+    /// .flow` alpha) for the duration of one pen `mouseDown`/`mouseDragged`
+    /// gesture. `nil` outside of an active pen stroke — created fresh in
+    /// `mouseDown`'s `.pen` branch, stamped into across `mouseDragged`, and
+    /// merged into the real active layer (then discarded) by
+    /// `flushPenStroke()` at `mouseUp`. See that method's doc comment for
+    /// why "buffer, then one final composite" — rather than stamping dabs
+    /// straight into the layer the way `paint(at:)` does for pencil/eraser
+    /// — is what makes `penBrushSettings.opacity` behave as a whole-stroke
+    /// cap instead of a per-dab one.
+    private var penStrokeBuffer: PixelCanvas?
     /// Whether `paint(at:)`/`paintLine(from:to:)` was actually invoked
     /// during the current pencil/eraser/pen gesture (issue #19) — set in
     /// `mouseDown`/`mouseDragged`'s pixel-painting fallback path (the only
@@ -232,6 +247,20 @@ final class CanvasView: NSView {
     /// lands is what makes the confirm land on the correct layer.
     var isTransforming: Bool { activeTransform != nil }
 
+    /// Whether a pen stroke's accumulation buffer is currently live (issue
+    /// #20) — `true` exactly when `penStrokeBuffer` is non-`nil`. Exposed
+    /// read-only, mirroring `isTransforming` immediately above for exactly
+    /// the same reason: `penStrokeBuffer` is a *pending* edit against
+    /// `layerStack.activeLayer.canvas` that doesn't land for real until
+    /// `flushPenStroke()` runs (at `mouseUp`), so anything that can swap out
+    /// `layerStack`, change `activeLayerIndex`, or restore a whole different
+    /// history snapshot out from under it needs to flush or cancel it first
+    /// — see `AppDelegate`'s `activateActiveDocument()`, `layerPanelView
+    /// .willChangeActiveLayer`, `undo()`/`redo()`, `historyPanelView
+    /// .onJumpToIndex`, and `commitAnyPendingLayerEdits()`, each of which
+    /// already does the equivalent for `isTransforming`.
+    var isPenStrokeInProgress: Bool { penStrokeBuffer != nil }
+
     /// A transform handle is hit-testable within this many *view* points of
     /// its exact position (so the hitbox stays a constant on-screen size
     /// regardless of zoom) — mirrors `magnifierClickThreshold`/
@@ -275,6 +304,17 @@ final class CanvasView: NSView {
             polygonVertices = []
             polygonFirstPoint = nil
             polygonCombineMode = nil
+            // A stale in-progress pen stroke (issue #20) must not survive a
+            // tool switch, or it would otherwise sit around and get silently
+            // flushed onto the layer by some later, unrelated `mouseUp` once
+            // the user switches back to `.pen`. Switching tools never
+            // changes `layerStack.activeLayer`, though, so the same safety
+            // reasoning as `mouseDown`'s `.pen` branch (issue #20 review)
+            // applies here too: flush (don't discard) so the pixels already
+            // drawn in this stroke aren't silently lost.
+            if isPenStrokeInProgress {
+                flushPenStroke()
+            }
             needsDisplay = true
         }
     }
@@ -372,6 +412,21 @@ final class CanvasView: NSView {
     /// ends and the old `activeTool` becomes live again.
     func beginLayerTransform() {
         guard activeTransform == nil else { return }
+        // Same reasoning as `activeTool`'s own `didSet` reset (issue #20):
+        // transform mode preempts every gesture, so an in-progress pen
+        // stroke's buffer must not survive into it unflushed — and since
+        // entering transform mode doesn't change `layerStack.activeLayer`
+        // either, flush (don't discard) so the stroke's already-drawn
+        // pixels land on the layer instead of disappearing. This must run
+        // *before* the `transformOriginalCanvas` snapshot just below: that
+        // snapshot (not `layerStack.activeLayer.canvas`) is what
+        // `commitLayerTransform()` later rasterizes back onto the real
+        // layer, so flushing after snapshotting would have the commit
+        // silently overwrite the just-flushed stroke with the pre-flush
+        // canvas.
+        if isPenStrokeInProgress {
+            flushPenStroke()
+        }
         transformOriginalCanvas = layerStack.activeLayer.canvas.copy()
         activeTransform = LayerTransform.identity(width: layerStack.width, height: layerStack.height)
         transformDragHandle = nil
@@ -828,6 +883,27 @@ final class CanvasView: NSView {
         )
         context.draw(image, in: destRect)
 
+        // Pen stroke live preview (issue #20): `penStrokeBuffer` holds the
+        // dabs stamped so far but isn't merged into the real active layer
+        // until `flushPenStroke()` at `mouseUp` (see that method's doc
+        // comment) — without drawing it here too, an in-progress pen stroke
+        // would be invisible on screen until the mouse is released. Drawn
+        // at `penBrushSettings.opacity * layerStack.activeLayer.opacity`,
+        // matching exactly what `flushPenStroke()` followed by the ordinary
+        // composite above would actually produce once the stroke ends, so
+        // the live preview never shows something the finished stroke won't
+        // — the same "preview must match the eventual commit" alpha
+        // handling the layer-transform preview below already follows via
+        // its own `context.setAlpha(layerStack.activeLayer.opacity)` calls.
+        if let penStrokeBuffer, let previewImage = penStrokeBuffer.cgImage {
+            context.saveGState()
+            context.interpolationQuality = .none
+            context.setShouldAntialias(false)
+            context.setAlpha(CGFloat(penBrushSettings.opacity) * CGFloat(layerStack.activeLayer.opacity))
+            context.draw(previewImage, in: destRect)
+            context.restoreGState()
+        }
+
         // Layer transform live preview + handles (issue #9; round 1: move
         // and scale; round 2: rotate too, so this rectangle is no longer
         // necessarily axis-aligned). `transformOriginalCanvas` is what
@@ -1113,7 +1189,13 @@ final class CanvasView: NSView {
     /// `onEditCompleted`'s history label for a pixel-painting tool (issue
     /// #19) — `nil` for every other tool, which fire `onEditCompleted` from
     /// their own dedicated gesture-completion code instead (selection
-    /// confirm, transform commit).
+    /// confirm, transform commit, `flushPenStroke()`). `.pen`'s own
+    /// `mouseUp` branch (issue #20) never actually reaches this lookup —
+    /// `flushPenStroke()` fires `onEditCompleted?("ペン")` itself, the same
+    /// self-contained shape `commitLayerTransform()` uses — but the case
+    /// stays listed here as the accurate tool→label mapping regardless (and
+    /// so the switch stays exhaustive without a redundant "never reached"
+    /// comment duplicating `flushPenStroke()`'s own).
     private static func editCompletedLabel(for tool: Tool) -> String? {
         switch tool {
         case .pencil: return "鉛筆"
@@ -1138,14 +1220,21 @@ final class CanvasView: NSView {
 
     /// Paints a single point with the active tool's own method: the pencil
     /// and eraser stay on the dot-exact, no-anti-aliasing `setPixel` path
-    /// (unchanged by issue #10); the pen goes through the new anti-aliased
-    /// path instead.
+    /// (unchanged by issue #10).
     private func paint(at pixel: (x: Int, y: Int)) {
         switch activeTool {
         case .pencil, .eraser:
             layerStack.activeLayer.canvas.setPixel(x: pixel.x, y: pixel.y, color: paintColor, mask: selection)
         case .pen:
-            layerStack.activeLayer.canvas.drawAntialiasedDot(at: pixel, color: paintColor, diameter: Self.penLineWidth, mask: selection)
+            // The pen never reaches here, post-#20: `mouseDown`/
+            // `mouseDragged` branch to `stampPenDab(at:)`/
+            // `stampPenDabs(from:to:)` (dab-stamping into
+            // `penStrokeBuffer`, merged onto the real layer at `mouseUp`'s
+            // `flushPenStroke()`) before calling `paint(at:)`, mirroring
+            // how the eyedropper/magnifier/selection tools below already
+            // bypass this method entirely. Kept only to satisfy this
+            // switch's exhaustiveness.
+            return
         case .eyedropper:
             // The eyedropper never reaches here: `mouseDown`/`mouseDragged`
             // branch to `sampleColor(at:)` before calling `paint(at:)`
@@ -1173,7 +1262,10 @@ final class CanvasView: NSView {
         case .pencil, .eraser:
             layerStack.activeLayer.canvas.drawLine(from: p0, to: p1, color: paintColor, mask: selection)
         case .pen:
-            layerStack.activeLayer.canvas.drawAntialiasedLine(from: p0, to: p1, color: paintColor, lineWidth: Self.penLineWidth, mask: selection)
+            // Same as `paint(at:)` above: the pen never reaches here,
+            // post-#20 — `mouseDragged` calls `stampPenDabs(from:to:)`
+            // instead. Kept only for exhaustiveness.
+            return
         case .eyedropper:
             // Same as `paint(at:)` above: the eyedropper never drags into a
             // stroke (issue #14), this exists only for exhaustiveness.
@@ -1187,6 +1279,127 @@ final class CanvasView: NSView {
             // (issue #11), this exists only for exhaustiveness.
             return
         }
+    }
+
+    // MARK: - Pen tool (issue #20: dab-stamping, hardness/opacity/flow)
+
+    /// Stamps one pen dab at `pixel` into `penStrokeBuffer` (issue #20),
+    /// using `penBrushSettings`' current `size`/`hardness` and `flow` as the
+    /// dab's own alpha — `flow`, not `opacity`: see `PenBrushSettings`'s and
+    /// `flushPenStroke()`'s doc comments for why the stroke-level `opacity`
+    /// cap is deliberately *not* applied per dab. A no-op if
+    /// `penStrokeBuffer` is `nil` (called outside of an active pen stroke —
+    /// shouldn't happen given `mouseDown`'s `.pen` branch always creates the
+    /// buffer first, but this keeps the method safe to call unconditionally
+    /// regardless).
+    private func stampPenDab(at pixel: (x: Int, y: Int)) {
+        guard let buffer = penStrokeBuffer else { return }
+        buffer.drawPenDab(
+            at: pixel,
+            color: paintColor,
+            diameter: penBrushSettings.size,
+            hardness: penBrushSettings.hardness,
+            alpha: penBrushSettings.flow,
+            mask: selection
+        )
+    }
+
+    /// Stamps a line's worth of pen dabs from `p0` to `p1`, spaced
+    /// `max(1, size * 0.25)` points apart (issue #20) — the pen's
+    /// dab-stamping counterpart to `paintLine(from:to:)`'s single
+    /// `drawLine`/`drawAntialiasedLine` call, used by `mouseDragged`'s
+    /// `.pen` branch for the segment between the previous and current
+    /// dragged pixel. Always stamps `p1` itself, even when it falls short
+    /// of the next full spacing interval, so a stroke's dabs never lag
+    /// behind the cursor's actual position between `mouseDragged` events
+    /// the way a purely interval-based walk would — mirrors `drawLine`'s
+    /// own guarantee of visiting `p1` exactly.
+    private func stampPenDabs(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int)) {
+        let spacing = Double(max(1, penBrushSettings.size * 0.25))
+        let dx = Double(p1.x - p0.x)
+        let dy = Double(p1.y - p0.y)
+        let distance = (dx * dx + dy * dy).squareRoot()
+        guard distance > 0 else {
+            stampPenDab(at: p1)
+            return
+        }
+        var traveled = spacing
+        while traveled < distance {
+            let t = traveled / distance
+            let x = Int((Double(p0.x) + dx * t).rounded())
+            let y = Int((Double(p0.y) + dy * t).rounded())
+            stampPenDab(at: (x, y))
+            traveled += spacing
+        }
+        stampPenDab(at: p1)
+    }
+
+    /// Merges the in-progress pen stroke's accumulation buffer onto the
+    /// real active layer canvas at `penBrushSettings.opacity`, then
+    /// discards the buffer (issue #20) — the single point where a whole pen
+    /// stroke's worth of dabs actually becomes a permanent edit.
+    ///
+    /// Called once, from `mouseUp`'s shared pencil/eraser/pen fallback
+    /// (a pen "click" with no drag is just a one-dab stroke, same as every
+    /// other tool's single-click gesture) — never mid-drag:
+    /// `mouseDragged`'s `.pen` branch only ever stamps more dabs into
+    /// `penStrokeBuffer`, leaving the real layer untouched until this runs.
+    /// This is also *why* `opacity` behaves as a whole-stroke cap rather
+    /// than a per-dab one: every dab within the stroke only ever pushes
+    /// `penStrokeBuffer`'s own alpha up toward `1` (via `flow`, dab by dab,
+    /// through `PixelCanvas`'s standard alpha compositing), never toward
+    /// `opacity` directly — scaling the *entire accumulated buffer* by
+    /// `opacity` in one shot, here, is what caps the finished stroke's
+    /// alpha at `opacity` regardless of how many dabs overlapped a given
+    /// pixel along the way.
+    ///
+    /// Self-contained the same way `commitLayerTransform()` is (fires its
+    /// own `onLayerContentChanged`/`onEditCompleted` — see below — rather
+    /// than leaving that to whichever call site invoked it): every call
+    /// site (the `mouseUp` fallback below, and every `AppDelegate` site
+    /// that also auto-confirms an in-progress layer transform — see
+    /// `isPenStrokeInProgress`'s doc comment) gets the same correct
+    /// behavior automatically, and none of them needs to remember to fire
+    /// those two callbacks itself. A no-op if `penStrokeBuffer` is `nil`
+    /// (no pen stroke was in progress), so it's always safe to call
+    /// unconditionally.
+    ///
+    /// `onEditCompleted?("ペン")` fires with the merge already applied
+    /// above, so `AppDelegate.recordHistoryCheckpoint(label:)` — wired to
+    /// this callback — snapshots a `layerStack` that already includes the
+    /// finished stroke (issue #19). Not `private`, for the same reason
+    /// `commitLayerTransform()` isn't: `AppDelegate` needs to call this
+    /// directly wherever it already calls that method.
+    func flushPenStroke() {
+        guard let buffer = penStrokeBuffer else { return }
+        layerStack.activeLayer.canvas.compositeOverlay(buffer, alpha: penBrushSettings.opacity)
+        penStrokeBuffer = nil
+        onLayerContentChanged?()
+        onEditCompleted?("ペン")
+        needsDisplay = true
+    }
+
+    /// Discards the in-progress pen stroke's accumulation buffer *without*
+    /// compositing it onto the real layer (issue #20) — the pen-stroke
+    /// counterpart to `cancelLayerTransform()`, for the same reason
+    /// `AppDelegate.undo()`/`redo()`/`historyPanelView.onJumpToIndex` cancel
+    /// (rather than commit) an in-progress layer transform: the stroke has
+    /// no history entry of its own yet, so flushing it right as undo/redo
+    /// swaps in a whole different snapshot would silently bake an
+    /// unrecorded edit into that snapshot instead of just disappearing the
+    /// way an un-recorded, in-progress edit should. Also resets
+    /// `paintedDuringGesture`/`lastPixel` so that if the underlying mouse
+    /// gesture is still physically in progress (the button never actually
+    /// came up — cancellation reaching here at all means something else,
+    /// like a keyboard shortcut, interrupted the drag), the eventual real
+    /// `mouseUp` neither re-flushes anything (`penStrokeBuffer` is already
+    /// `nil`) nor fires a bogus, effect-less `onEditCompleted`. A no-op if
+    /// no pen stroke is in progress.
+    func cancelPenStroke() {
+        penStrokeBuffer = nil
+        paintedDuringGesture = false
+        lastPixel = nil
+        needsDisplay = true
     }
 
     /// Reads the color at a pixel out of the currently displayed
@@ -1449,6 +1662,38 @@ final class CanvasView: NSView {
             onEditCompleted?("選択範囲")
             return
         }
+        if activeTool == .pen {
+            // Flushes (never cancels) a leftover `penStrokeBuffer` before
+            // starting the new one. Normally `mouseDown`→`mouseDragged`→
+            // `mouseUp` always pairs up, so `penStrokeBuffer` should already
+            // be `nil` here — but AppKit doesn't guarantee that: a window
+            // deactivation/focus loss mid-stroke can swallow the matching
+            // `mouseUp`, and the next `mouseDown` (possibly after other
+            // gesture-state resets that don't touch `penStrokeBuffer`, e.g.
+            // a later click while `activeTool` never actually changed) would
+            // otherwise silently replace the buffer below, discarding
+            // whatever the previous, never-confirmed stroke had already
+            // drawn. Flushing (not `cancelPenStroke()`) is the safe
+            // direction here — same as `activeTool`'s own `didSet` and
+            // `beginLayerTransform()` (issue #20 review): none of these
+            // three change `layerStack.activeLayer`, so the right move is
+            // always to keep the already-drawn pixels rather than lose
+            // them.
+            if penStrokeBuffer != nil {
+                flushPenStroke()
+            }
+            // Starts a fresh accumulation buffer for this stroke (issue
+            // #20) — nothing is written to the real active layer until
+            // `mouseUp`'s `flushPenStroke()`; see `penStrokeBuffer`'s own
+            // doc comment. Skips `paint(at:)`/the generic fallback below
+            // entirely, same as every other special-cased tool above.
+            penStrokeBuffer = PixelCanvas(width: layerStack.width, height: layerStack.height, background: .clear)
+            stampPenDab(at: pixel)
+            paintedDuringGesture = true
+            lastPixel = pixel
+            needsDisplay = true
+            return
+        }
         paint(at: pixel)
         paintedDuringGesture = true
         lastPixel = pixel
@@ -1581,6 +1826,32 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if activeTool == .pen {
+            // Stamps more dabs into `penStrokeBuffer` (issue #20); the real
+            // active layer stays untouched until `mouseUp`'s
+            // `flushPenStroke()` — see `mouseDown`'s `.pen` branch and
+            // `penStrokeBuffer`'s own doc comment. Bails out up front if
+            // `penStrokeBuffer` is already `nil`: normally impossible mid-
+            // drag (every pen stroke starts in `mouseDown`, which creates
+            // it), but `cancelPenStroke()` can clear it out from under a
+            // still-physically-in-progress drag (undo/redo, a document/tab
+            // switch, etc. — see that method's own doc comment) — without
+            // this guard, a `mouseDragged` arriving after that would still
+            // flag `paintedDuringGesture = true` for a stroke that no
+            // longer exists, and `mouseUp` would then fire a bogus,
+            // effect-less `onEditCompleted`.
+            guard penStrokeBuffer != nil else { return }
+            let pixel = pixelCoordinate(for: event)
+            if let last = lastPixel {
+                stampPenDabs(from: last, to: pixel)
+            } else {
+                stampPenDab(at: pixel)
+            }
+            paintedDuringGesture = true
+            lastPixel = pixel
+            needsDisplay = true
+            return
+        }
         let pixel = pixelCoordinate(for: event)
         if let last = lastPixel {
             paintLine(from: last, to: pixel)
@@ -1676,14 +1947,33 @@ final class CanvasView: NSView {
             onEditCompleted?("選択範囲")
             return
         }
+        if activeTool == .pen {
+            // The pen's whole stroke becomes a real edit only now (issue
+            // #20): `mouseDown`/`mouseDragged` only ever stamped dabs into
+            // `penStrokeBuffer`, so the active layer itself is still
+            // exactly as it was before this stroke started until
+            // `flushPenStroke()` merges the buffer in — see that method's
+            // own doc comment for why it's self-contained (fires
+            // `onLayerContentChanged`/`onEditCompleted` itself) rather than
+            // this branch firing them separately, the way the generic
+            // pencil/eraser fallback below does via `editCompletedLabel`.
+            // A pen "click" with no drag reaches here too and is just a
+            // one-dab stroke, same as every other tool's single-click
+            // gesture.
+            flushPenStroke()
+            paintedDuringGesture = false
+            lastPixel = nil
+            return
+        }
         guard activeTool == .magnifier else {
-            // Pencil/eraser/pen strokes fire `onEditCompleted` here, at the
+            // Pencil/eraser strokes fire `onEditCompleted` here, at the
             // gesture's actual end, and only if something was actually
             // painted during it (issue #19) — a click that landed on the
             // eyedropper/polygon-select/magic-wand tools also reaches this
             // fallback (they handle their own gesture end elsewhere or take
             // no `mouseUp` action at all), but `editCompletedLabel` returns
-            // `nil` for those, so nothing fires.
+            // `nil` for those, so nothing fires. `.pen` never reaches here:
+            // it returns from its own branch above.
             if paintedDuringGesture, let label = CanvasView.editCompletedLabel(for: activeTool) {
                 onEditCompleted?(label)
             }

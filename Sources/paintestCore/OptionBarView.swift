@@ -22,6 +22,15 @@ final class OptionBarView: NSView {
     private static let toleranceSliderWidth: CGFloat = 150
     private static let toleranceRange: ClosedRange<Double> = 0...255
     private static let controlSpacing: CGFloat = 8
+    /// Between one pen control group ("label + slider + value") and the
+    /// next (issue #20) — wider than `controlSpacing` (used *within* a
+    /// group, between its own label/slider/value) so four groups packed
+    /// into one bar row still read as visually distinct settings rather
+    /// than one long run of controls.
+    private static let penGroupSpacing: CGFloat = 16
+    private static let penSizeSliderWidth: CGFloat = 90
+    private static let penUnitSliderWidth: CGFloat = 70
+    private static let penValueLabelWidth: CGFloat = 36
 
     /// The magic wand's current-value readout (issue #11, round 3) — kept as
     /// a stored reference (unlike the zoom popup, which reads its own
@@ -29,6 +38,14 @@ final class OptionBarView: NSView {
     /// update its text directly instead of needing to look the label back up
     /// among `subviews`.
     private var toleranceValueLabel: NSTextField?
+
+    /// The pen tool's four current-value readouts (issue #20) — same
+    /// "stored reference, updated directly by the slider's own action
+    /// method" pattern as `toleranceValueLabel` above.
+    private var penSizeValueLabel: NSTextField?
+    private var penHardnessValueLabel: NSTextField?
+    private var penOpacityValueLabel: NSTextField?
+    private var penFlowValueLabel: NSTextField?
 
     /// Fired when the zoom presets popup's selection changes (issue #13).
     /// `AppDelegate` forwards the picked level straight into
@@ -40,6 +57,14 @@ final class OptionBarView: NSView {
     /// 3). `AppDelegate` forwards the new value straight into
     /// `CanvasView.magicWandTolerance`.
     private var onToleranceChanged: ((Int) -> Void)?
+
+    /// Fired when the pen tool's size/hardness/opacity/flow sliders move
+    /// (issue #20). `AppDelegate` forwards each new value straight into the
+    /// matching field of `CanvasView.penBrushSettings`.
+    private var onPenSizeChanged: ((CGFloat) -> Void)?
+    private var onPenHardnessChanged: ((Double) -> Void)?
+    private var onPenOpacityChanged: ((Double) -> Void)?
+    private var onPenFlowChanged: ((Double) -> Void)?
 
     init() {
         super.init(frame: .zero)
@@ -125,6 +150,115 @@ final class OptionBarView: NSView {
         ])
     }
 
+    /// Populates the bar with the pen tool's brush detail controls (issue
+    /// #20): four "label + `NSSlider` + numeric readout" groups laid out
+    /// side by side — サイズ (`PenBrushSettings.sizeRange`, shown as a plain
+    /// point value), then 硬さ/不透明度/フロー (each
+    /// `PenBrushSettings.unitRange`, shown as a percentage, matching
+    /// `LayerPanelView`'s own opacity-slider readout convention). Same
+    /// "rebuilt from scratch on every call" pattern as
+    /// `showZoomPresets`/`showMagicWandOptions` above.
+    func showPenOptions(
+        settings: PenBrushSettings,
+        onSizeChanged: @escaping (CGFloat) -> Void,
+        onHardnessChanged: @escaping (Double) -> Void,
+        onOpacityChanged: @escaping (Double) -> Void,
+        onFlowChanged: @escaping (Double) -> Void
+    ) {
+        clear()
+        self.onPenSizeChanged = onSizeChanged
+        self.onPenHardnessChanged = onHardnessChanged
+        self.onPenOpacityChanged = onOpacityChanged
+        self.onPenFlowChanged = onFlowChanged
+
+        let sizeGroup = makePenControlGroup(
+            title: "サイズ",
+            value: Double(settings.size),
+            range: Double(PenBrushSettings.sizeRange.lowerBound)...Double(PenBrushSettings.sizeRange.upperBound),
+            sliderWidth: Self.penSizeSliderWidth,
+            valueText: "\(Int(settings.size.rounded()))",
+            action: #selector(penSizeSliderChanged(_:))
+        )
+        penSizeValueLabel = sizeGroup.valueLabel
+
+        let hardnessGroup = makePenControlGroup(
+            title: "硬さ",
+            value: settings.hardness,
+            range: PenBrushSettings.unitRange,
+            sliderWidth: Self.penUnitSliderWidth,
+            valueText: Self.percentString(settings.hardness),
+            action: #selector(penHardnessSliderChanged(_:))
+        )
+        penHardnessValueLabel = hardnessGroup.valueLabel
+
+        let opacityGroup = makePenControlGroup(
+            title: "不透明度",
+            value: settings.opacity,
+            range: PenBrushSettings.unitRange,
+            sliderWidth: Self.penUnitSliderWidth,
+            valueText: Self.percentString(settings.opacity),
+            action: #selector(penOpacitySliderChanged(_:))
+        )
+        penOpacityValueLabel = opacityGroup.valueLabel
+
+        let flowGroup = makePenControlGroup(
+            title: "フロー",
+            value: settings.flow,
+            range: PenBrushSettings.unitRange,
+            sliderWidth: Self.penUnitSliderWidth,
+            valueText: Self.percentString(settings.flow),
+            action: #selector(penFlowSliderChanged(_:))
+        )
+        penFlowValueLabel = flowGroup.valueLabel
+
+        var previousTrailingAnchor = leadingAnchor
+        var leadingSpacing = Self.horizontalPadding
+        for group in [sizeGroup, hardnessGroup, opacityGroup, flowGroup] {
+            addSubview(group.label)
+            addSubview(group.slider)
+            addSubview(group.valueLabel)
+            NSLayoutConstraint.activate([
+                group.label.leadingAnchor.constraint(equalTo: previousTrailingAnchor, constant: leadingSpacing),
+                group.label.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+                group.slider.leadingAnchor.constraint(equalTo: group.label.trailingAnchor, constant: Self.controlSpacing),
+                group.slider.centerYAnchor.constraint(equalTo: centerYAnchor),
+                group.slider.widthAnchor.constraint(equalToConstant: group.sliderWidth),
+
+                group.valueLabel.leadingAnchor.constraint(equalTo: group.slider.trailingAnchor, constant: Self.controlSpacing),
+                group.valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+                group.valueLabel.widthAnchor.constraint(equalToConstant: Self.penValueLabelWidth)
+            ])
+            previousTrailingAnchor = group.valueLabel.trailingAnchor
+            leadingSpacing = Self.penGroupSpacing
+        }
+    }
+
+    /// Builds one "label + slider + numeric readout" control group for
+    /// `showPenOptions` above (issue #20) — pulled out since that method
+    /// needs four near-identical groups side by side, unlike
+    /// `showMagicWandOptions`'s single inline one.
+    private func makePenControlGroup(title: String, value: Double, range: ClosedRange<Double>, sliderWidth: CGFloat, valueText: String, action: Selector) -> (label: NSTextField, slider: NSSlider, valueLabel: NSTextField, sliderWidth: CGFloat) {
+        let label = NSTextField(labelWithString: title)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let slider = NSSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: self, action: action)
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        slider.isContinuous = true
+
+        let valueLabel = NSTextField(labelWithString: valueText)
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        return (label, slider, valueLabel, sliderWidth)
+    }
+
+    /// Formats a `0...1` setting as a rounded percentage (issue #20) —
+    /// matches `LayerPanelView`'s own opacity-slider readout convention
+    /// (e.g. "100%").
+    private static func percentString(_ value: Double) -> String {
+        "\(Int((value * 100).rounded()))%"
+    }
+
     /// Removes every control from the bar, returning it to the empty frame
     /// it starts as (issue #13) — used when switching to a tool that has no
     /// options of its own.
@@ -133,12 +267,44 @@ final class OptionBarView: NSView {
         onZoomPresetSelected = nil
         onToleranceChanged = nil
         toleranceValueLabel = nil
+        onPenSizeChanged = nil
+        onPenHardnessChanged = nil
+        onPenOpacityChanged = nil
+        onPenFlowChanged = nil
+        penSizeValueLabel = nil
+        penHardnessValueLabel = nil
+        penOpacityValueLabel = nil
+        penFlowValueLabel = nil
     }
 
     @objc private func toleranceSliderChanged(_ sender: NSSlider) {
         let tolerance = Int(sender.doubleValue.rounded())
         toleranceValueLabel?.stringValue = "\(tolerance)"
         onToleranceChanged?(tolerance)
+    }
+
+    @objc private func penSizeSliderChanged(_ sender: NSSlider) {
+        let size = CGFloat(sender.doubleValue)
+        penSizeValueLabel?.stringValue = "\(Int(size.rounded()))"
+        onPenSizeChanged?(size)
+    }
+
+    @objc private func penHardnessSliderChanged(_ sender: NSSlider) {
+        let hardness = sender.doubleValue
+        penHardnessValueLabel?.stringValue = Self.percentString(hardness)
+        onPenHardnessChanged?(hardness)
+    }
+
+    @objc private func penOpacitySliderChanged(_ sender: NSSlider) {
+        let opacity = sender.doubleValue
+        penOpacityValueLabel?.stringValue = Self.percentString(opacity)
+        onPenOpacityChanged?(opacity)
+    }
+
+    @objc private func penFlowSliderChanged(_ sender: NSSlider) {
+        let flow = sender.doubleValue
+        penFlowValueLabel?.stringValue = Self.percentString(flow)
+        onPenFlowChanged?(flow)
     }
 
     @objc private func zoomPresetChanged(_ sender: NSPopUpButton) {

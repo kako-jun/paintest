@@ -252,8 +252,15 @@ final class PixelCanvas {
     }
 
     /// Paints a filled, anti-aliased circle centered on `point`, in
-    /// `setPixel`'s top-left-origin pixel-space coordinates. Used by the pen
-    /// tool for a single click (no drag).
+    /// `setPixel`'s top-left-origin pixel-space coordinates.
+    ///
+    /// Superseded as the pen tool's own paint path by `drawPenDab` (issue
+    /// #20's dab-stamping model, with hardness/flow); `CanvasView` no longer
+    /// calls this. Kept rather than deleted — nothing else in the app used
+    /// this single-shot "one anti-aliased circle, no hardness falloff"
+    /// primitive, but it stays well covered by `PixelCanvasTests` in its own
+    /// right (alpha compositing, masking, coordinate flipping) and remains
+    /// available if a future tool wants a plain anti-aliased stamp again.
     func drawAntialiasedDot(at point: (x: Int, y: Int), color: NSColor, diameter: CGFloat, mask: SelectionMask? = nil) {
         drawAntialiased(mask: mask) { context in
             context.setFillColor(color.cgColor)
@@ -269,8 +276,13 @@ final class PixelCanvas {
     }
 
     /// Strokes an anti-aliased, round-capped/joined line between two points,
-    /// in `setPixel`'s top-left-origin pixel-space coordinates. Used by the
-    /// pen tool while dragging.
+    /// in `setPixel`'s top-left-origin pixel-space coordinates.
+    ///
+    /// Same "superseded, kept for its own test coverage" status as
+    /// `drawAntialiasedDot` above — see its doc comment. The pen tool now
+    /// draws a dragged stroke as a series of `drawPenDab` stamps
+    /// (`CanvasView.stampPenDabs(from:to:)`) instead of one continuous
+    /// stroked path.
     func drawAntialiasedLine(from p0: (x: Int, y: Int), to p1: (x: Int, y: Int), color: NSColor, lineWidth: CGFloat, mask: SelectionMask? = nil) {
         drawAntialiased(mask: mask) { context in
             context.setLineCap(.round)
@@ -281,6 +293,115 @@ final class PixelCanvas {
             context.move(to: CGPoint(x: CGFloat(p0.x) + 0.5, y: CGFloat(p0.y) + 0.5))
             context.addLine(to: CGPoint(x: CGFloat(p1.x) + 0.5, y: CGFloat(p1.y) + 0.5))
             context.strokePath()
+        }
+    }
+
+    // MARK: - Pen brush dabs (issue #20)
+    //
+    // The pen tool's real paint path post-#20: a stroke is built out of
+    // discrete circular "dabs" (`drawPenDab`) instead of one continuous
+    // fill/stroke, so `hardness` (per-dab radial falloff) and `flow`
+    // (per-dab alpha, building up across overlapping dabs) can both apply.
+    // `CanvasView` stamps dabs into a temporary per-stroke accumulation
+    // buffer — itself just another `PixelCanvas` — and merges that buffer
+    // onto the real active layer exactly once, via `compositeOverlay`, when
+    // the stroke ends; see `CanvasView.flushPenStroke()`'s doc comment for
+    // why that split is what makes `opacity` behave as a whole-stroke cap
+    // rather than a per-dab one.
+
+    /// Paints one pen dab centered on `point`, in `setPixel`'s
+    /// top-left-origin pixel-space coordinates: a radial-gradient disc,
+    /// solid at `color`/`alpha` from the center out to `hardness * radius`,
+    /// then fading linearly to fully transparent at the (anti-aliased)
+    /// circle edge. `alpha` is the dab's own opacity (issue #20: callers
+    /// pass `flow` here, the per-dab knob, kept separate from the
+    /// stroke-level `opacity` cap `compositeOverlay` applies once at
+    /// stroke end).
+    ///
+    /// `hardness == 1` collapses the fade region to zero width — the two
+    /// gradient stops land on top of each other at the very edge, so
+    /// `.drawsBeforeStartLocation` (below) paints the first stop's solid
+    /// color across the entire disc interior, and only the circle's own
+    /// (already anti-aliased, via `context.clip()`) boundary softens the
+    /// edge — making this visually identical to the pre-#20
+    /// `drawAntialiasedDot`'s plain `fillEllipse`. `hardness == 0` is a
+    /// gradient across the dab's *entire* radius, from solid at dead center
+    /// to transparent at the edge — "fades out smoothly from the center",
+    /// per the issue.
+    func drawPenDab(at point: (x: Int, y: Int), color: NSColor, diameter: CGFloat, hardness: Double, alpha: Double, mask: SelectionMask? = nil) {
+        let clampedAlpha = max(0, min(1, alpha))
+        guard diameter > 0, clampedAlpha > 0 else { return }
+        let clampedHardness = max(0, min(1, hardness))
+
+        drawAntialiased(mask: mask) { context in
+            let radius = diameter / 2
+            let center = CGPoint(x: CGFloat(point.x) + 0.5, y: CGFloat(point.y) + 0.5)
+
+            context.saveGState()
+            context.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: diameter, height: diameter))
+            context.clip()
+
+            // `CGColorSpaceCreateDeviceRGB()` (not `LayerStack`'s own
+            // `CGColorSpace(name: CGColorSpace.sRGB)`) matches the device
+            // RGB components `solidColor`/`transparentColor` are actually
+            // built from below (`color.usingColorSpace(.deviceRGB)`) —
+            // avoids a needless space mismatch between the gradient's own
+            // color space and the colors handed to it.
+            let rgba = color.usingColorSpace(.deviceRGB) ?? color
+            let solidColor = NSColor(deviceRed: rgba.redComponent, green: rgba.greenComponent, blue: rgba.blueComponent, alpha: CGFloat(clampedAlpha)).cgColor
+            let transparentColor = NSColor(deviceRed: rgba.redComponent, green: rgba.greenComponent, blue: rgba.blueComponent, alpha: 0).cgColor
+            guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [solidColor, transparentColor] as CFArray, locations: [CGFloat(clampedHardness), 1.0]) else {
+                context.restoreGState()
+                return
+            }
+
+            // `.drawsBeforeStartLocation` matters specifically for
+            // `hardness == 1` (see this method's own doc comment above):
+            // without it, the region before the first stop (the whole disc,
+            // when both stops sit at `t == 1`) would be left fully
+            // transparent instead of solid. `.drawsAfterEndLocation` is
+            // symmetric/defensive — nothing currently falls past `t == 1`
+            // since `endRadius` below already equals the clip circle's own
+            // radius, but it costs nothing to keep both directions clamped.
+            context.drawRadialGradient(
+                gradient,
+                startCenter: center, startRadius: 0,
+                endCenter: center, endRadius: radius,
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+            context.restoreGState()
+        }
+    }
+
+    /// Composites `overlay`'s entire contents onto this canvas in one pass,
+    /// at `alpha` (issue #20) — the pen stroke's stroke-end merge step: see
+    /// this file's "Pen brush dabs" section comment and
+    /// `CanvasView.flushPenStroke()` for the full picture of why `opacity`
+    /// is applied here, once, rather than per dab.
+    ///
+    /// `overlay` must be the same size as this canvas (true by construction
+    /// for `CanvasView`'s per-stroke accumulation buffer, which is always
+    /// built via `PixelCanvas(width: layerStack.width, height:
+    /// layerStack.height, ...)`) — a mismatched size draws `overlay`
+    /// stretched to fill `width`x`height` rather than failing outright,
+    /// since `CGContext.draw(_:in:)` itself has no notion of "wrong size".
+    ///
+    /// Reuses `drawAntialiased(mask:_:)`'s same premultiplied-scratch-overlay
+    /// technique as `drawPenDab` above (`overlay` is `.alphaNonpremultiplied`
+    /// like every `PixelCanvas`, so — same reasoning as that method's own
+    /// doc comment — it can't vend a `CGContext` of its own either); here the
+    /// "draw" step is just `context.draw(overlay.cgImage, ...)` under
+    /// `context.setAlpha(alpha)`, instead of a CG fill/stroke/gradient path.
+    /// No `mask` parameter: `overlay`'s own pixels were already masked at
+    /// dab-stamping time (`drawPenDab`'s own `mask` argument), so any pixel
+    /// outside the selection is already fully transparent here and
+    /// contributes nothing to the composite regardless.
+    func compositeOverlay(_ overlay: PixelCanvas, alpha: Double) {
+        let clampedAlpha = max(0, min(1, alpha))
+        guard clampedAlpha > 0, let overlayImage = overlay.cgImage else { return }
+        drawAntialiased(mask: nil) { context in
+            context.setAlpha(CGFloat(clampedAlpha))
+            context.draw(overlayImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
     }
 
