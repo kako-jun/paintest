@@ -7,7 +7,9 @@ import AppKit
 /// #11) — clicking any of them fires `onToolSelected` and exclusively
 /// toggles that button's pressed state against the others' — so every other
 /// button here stays a purely visual placeholder with no target/action, same
-/// as before.
+/// as before. The テキスト placeholder additionally renders disabled
+/// (`isEnabled = false`) so it reads as not-yet-implemented instead of a
+/// placeholder that silently does nothing when clicked (issue #43).
 /// The pencil cell renders pressed (`state == .on`) by default so the
 /// column still communicates "this is the active tool" the way the
 /// reference screenshots do.
@@ -149,6 +151,25 @@ final class ToolboxView: NSView {
         button.imageScaling = .scaleProportionallyDown
         button.toolTip = tool.label
         button.state = isPencil ? .on : .off
+        // "テキスト" (issue #42) has no target/action yet like the other
+        // unwired placeholders, but unlike them it's disabled here so it
+        // reads as not-yet-implemented instead of a button that silently
+        // does nothing when clicked (issue #43). The other placeholders
+        // (bucket-fill/airbrush/line/curve/rectangle/polygon/ellipse/
+        // rounded-rectangle, plus gradient which has no icon here yet under
+        // issue #41) are intentionally left alone — out of scope for #43.
+        //
+        // Matched by label rather than a dedicated flag on `ToolDescriptor`
+        // (same pattern as `pencilIndex` above): if "テキスト" is ever
+        // renamed (e.g. localization), this condition needs to be updated
+        // too, or the disable silently stops applying. `ToolboxViewTests`
+        // looks up this button by the same label string, so a rename would
+        // at least surface there as a test failure rather than failing
+        // silently.
+        // TODO(#42): remove once the text tool is wired up.
+        if tool.label == "テキスト" {
+            button.isEnabled = false
+        }
         NSLayoutConstraint.activate([
             button.widthAnchor.constraint(equalToConstant: Self.buttonSide),
             button.heightAnchor.constraint(equalToConstant: Self.buttonSide)

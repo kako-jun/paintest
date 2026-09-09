@@ -61,6 +61,12 @@ final class ToolboxViewTests: XCTestCase {
     // purely visual placeholder with no target/action, same as before.
     private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド"]
 
+    // The one placeholder tool tip that's disabled rather than merely
+    // unwired (issue #43); kept alongside `wiredToolTips` since the two
+    // constants are used together throughout this file to partition all 19
+    // buttons into wired / disabled-placeholder / other-placeholder.
+    private static let textToolTip = "テキスト"
+
     func testOnlyPencilEraserPenEyedropperMagnifierAndSelectTools_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
@@ -321,6 +327,76 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pen.state, .off)
         XCTAssertEqual(eyedropper.state, .off)
         XCTAssertEqual(magnifier.state, .off)
+    }
+
+    // MARK: - Text tool disabled placeholder (issue #43)
+    //
+    // "テキスト" stays a purely visual placeholder like the other 8 (no
+    // target/action, unchanged and out of scope here), but unlike them it's
+    // also disabled now, so it reads as not-yet-implemented instead of a
+    // button that silently does nothing when clicked.
+
+    func testTextButton_isDisabled() {
+        let view = makeView()
+        guard let text = button(toolTip: Self.textToolTip, in: view) else {
+            XCTFail("could not find テキスト button")
+            return
+        }
+        XCTAssertFalse(text.isEnabled, "テキスト should read as not-yet-implemented (disabled), not a silently-do-nothing placeholder")
+    }
+
+    func testTextButton_stillHasNoTargetOrAction() {
+        let view = makeView()
+        guard let text = button(toolTip: Self.textToolTip, in: view) else {
+            XCTFail("could not find テキスト button")
+            return
+        }
+        XCTAssertNil(text.target, "disabling テキスト must not accidentally wire it up too")
+        XCTAssertNil(text.action, "disabling テキスト must not accidentally wire it up too")
+    }
+
+    func testTextButton_toolTipStillReportsText() {
+        let view = makeView()
+        guard let text = button(toolTip: Self.textToolTip, in: view) else {
+            XCTFail("could not find テキスト button")
+            return
+        }
+        XCTAssertEqual(text.toolTip, Self.textToolTip, "setting isEnabled right after toolTip must not clobber it")
+    }
+
+    func testTextButton_stateRemainsOff() {
+        let view = makeView()
+        guard let text = button(toolTip: Self.textToolTip, in: view) else {
+            XCTFail("could not find テキスト button")
+            return
+        }
+        XCTAssertEqual(text.state, .off, "テキスト isn't the default-pressed pencil, so it should still render unpressed")
+        XCTAssertFalse(text.isEnabled, "state and isEnabled are independent; disabling must not stand in for the .off state or vice versa")
+    }
+
+    func testOtherEightPlaceholderButtons_remainEnabled() {
+        let view = makeView()
+        let otherPlaceholders = allButtons(in: view).filter { !Self.wiredToolTips.contains($0.toolTip ?? "") && $0.toolTip != Self.textToolTip }
+        XCTAssertEqual(otherPlaceholders.count, 8)
+        for button in otherPlaceholders {
+            XCTAssertTrue(button.isEnabled, "only テキスト should be disabled; \(button.toolTip ?? "?") must stay enabled like before")
+        }
+    }
+
+    func testAllTenWiredButtons_remainEnabled() {
+        let view = makeView()
+        let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
+        XCTAssertEqual(wired.count, 10)
+        for button in wired {
+            XCTAssertTrue(button.isEnabled, "the テキスト-only disable condition must not leak onto wired tools (\(button.toolTip ?? "?"))")
+        }
+    }
+
+    func testExactlyOneButton_isDisabled() {
+        let view = makeView()
+        let disabled = allButtons(in: view).filter { !$0.isEnabled }
+        XCTAssertEqual(disabled.count, 1, "of all 19 buttons, only テキスト should be disabled")
+        XCTAssertEqual(disabled.first?.toolTip, Self.textToolTip)
     }
 
     // Not independently unit-tested here: `Self.tools` is a private static
