@@ -304,12 +304,17 @@ final class CanvasView: NSView {
             polygonVertices = []
             polygonFirstPoint = nil
             polygonCombineMode = nil
-            // A stale in-progress pen stroke (issue #20) would otherwise
-            // sit around and get silently flushed onto the layer by some
-            // later, unrelated `mouseUp` — same defensive reasoning as
-            // every other gesture-state reset in this `didSet` (see its
-            // opening comment).
-            penStrokeBuffer = nil
+            // A stale in-progress pen stroke (issue #20) must not survive a
+            // tool switch, or it would otherwise sit around and get silently
+            // flushed onto the layer by some later, unrelated `mouseUp` once
+            // the user switches back to `.pen`. Switching tools never
+            // changes `layerStack.activeLayer`, though, so the same safety
+            // reasoning as `mouseDown`'s `.pen` branch (issue #20 review)
+            // applies here too: flush (don't discard) so the pixels already
+            // drawn in this stroke aren't silently lost.
+            if isPenStrokeInProgress {
+                flushPenStroke()
+            }
             needsDisplay = true
         }
     }
@@ -407,6 +412,21 @@ final class CanvasView: NSView {
     /// ends and the old `activeTool` becomes live again.
     func beginLayerTransform() {
         guard activeTransform == nil else { return }
+        // Same reasoning as `activeTool`'s own `didSet` reset (issue #20):
+        // transform mode preempts every gesture, so an in-progress pen
+        // stroke's buffer must not survive into it unflushed — and since
+        // entering transform mode doesn't change `layerStack.activeLayer`
+        // either, flush (don't discard) so the stroke's already-drawn
+        // pixels land on the layer instead of disappearing. This must run
+        // *before* the `transformOriginalCanvas` snapshot just below: that
+        // snapshot (not `layerStack.activeLayer.canvas`) is what
+        // `commitLayerTransform()` later rasterizes back onto the real
+        // layer, so flushing after snapshotting would have the commit
+        // silently overwrite the just-flushed stroke with the pre-flush
+        // canvas.
+        if isPenStrokeInProgress {
+            flushPenStroke()
+        }
         transformOriginalCanvas = layerStack.activeLayer.canvas.copy()
         activeTransform = LayerTransform.identity(width: layerStack.width, height: layerStack.height)
         transformDragHandle = nil
@@ -423,10 +443,6 @@ final class CanvasView: NSView {
         polygonFirstPoint = nil
         polygonCombineMode = nil
         lastPixel = nil
-        // Same reasoning as `activeTool`'s own `didSet` reset (issue #20):
-        // transform mode preempts every gesture, so an in-progress pen
-        // stroke's buffer must not survive into it unflushed.
-        penStrokeBuffer = nil
         needsDisplay = true
     }
 
@@ -1658,11 +1674,11 @@ final class CanvasView: NSView {
             // otherwise silently replace the buffer below, discarding
             // whatever the previous, never-confirmed stroke had already
             // drawn. Flushing (not `cancelPenStroke()`) is the safe
-            // direction here — unlike the deliberate `activeTool`
-            // `didSet`/`beginLayerTransform()` cancels (issue #20), this
-            // isn't a user-initiated switch away from the pen tool, so the
-            // right move is to keep the already-drawn pixels rather than
-            // lose them.
+            // direction here — same as `activeTool`'s own `didSet` and
+            // `beginLayerTransform()` (issue #20 review): none of these
+            // three change `layerStack.activeLayer`, so the right move is
+            // always to keep the already-drawn pixels rather than lose
+            // them.
             if penStrokeBuffer != nil {
                 flushPenStroke()
             }

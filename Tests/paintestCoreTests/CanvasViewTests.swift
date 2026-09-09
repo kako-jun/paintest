@@ -1069,29 +1069,48 @@ final class CanvasViewTests: XCTestCase {
         }
     }
 
-    func testActiveTool_switchedAwayFromPenMidStroke_discardsBufferWithoutCommitting() {
+    func testActiveTool_switchedAwayFromPenMidStroke_flushesBufferBeforeSwitching() {
+        // Review fix locked in (issue #20, should-3 round): a tool switch
+        // never changes `layerStack.activeLayer`, so the same safety
+        // reasoning as `mouseDown`'s `.pen` branch applies here too —
+        // flush (keep the already-drawn pixels), don't discard them, when
+        // the user switches tools mid-stroke.
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.activeTool = .pen
         view.foregroundColor = .black
         let window = view.window!
+        var layerContentChangedCount = 0
+        var editCompletedLabels: [String] = []
+        view.onLayerContentChanged = { layerContentChangedCount += 1 }
+        view.onEditCompleted = { editCompletedLabels.append($0) }
 
         let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
         view.mouseDown(with: mouseDownEvent(at: point, in: window))
         view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
         XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke")
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r, 255, "precondition: the stroke hasn't been flushed onto the real layer yet")
 
         view.activeTool = .pencil // a user-initiated switch away from the pen mid-gesture
 
-        XCTAssertFalse(view.isPenStrokeInProgress, "switching tools mid-stroke must discard the buffer (activeTool's own didSet)")
-        for y in 0..<8 {
-            for x in 0..<8 {
-                XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) the discarded stroke must never have reached the real layer")
-            }
-        }
+        XCTAssertEqual(view.activeTool, .pencil, "the tool switch itself must still go through normally")
+        XCTAssertFalse(view.isPenStrokeInProgress, "switching tools mid-stroke must flush (not merely clear) the buffer")
+        XCTAssertLessThan(view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r ?? 255, 255, "the stroke's already-drawn pixels must have landed on the real layer, not been discarded")
+        XCTAssertEqual(layerContentChangedCount, 1, "the tool switch must have gone through flushPenStroke(), which fires onLayerContentChanged")
+        XCTAssertEqual(editCompletedLabels, ["ペン"], "the tool switch must have gone through flushPenStroke(), which fires onEditCompleted(\"ペン\")")
     }
 
-    func testBeginLayerTransform_calledMidPenStroke_discardsBufferWithoutCommitting() {
+    func testBeginLayerTransform_calledMidPenStroke_flushesBufferBeforeEnteringTransformMode() {
+        // Review fix locked in (issue #20, should-3 round): entering
+        // transform mode never changes `layerStack.activeLayer` either, so
+        // the in-progress pen stroke is flushed (not discarded) the same
+        // way a tool switch is above — and that flush must land *before*
+        // `beginLayerTransform()` snapshots `transformOriginalCanvas`, or
+        // `commitLayerTransform()` would later rasterize the pre-flush
+        // snapshot back over the just-flushed stroke, silently erasing it
+        // (see `beginLayerTransform()`'s own doc comment). This test drives
+        // all the way through a no-op (identity) commit to pin that
+        // ordering down, not just the moment transform mode opens.
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.activeTool = .pen
@@ -1102,16 +1121,17 @@ final class CanvasViewTests: XCTestCase {
         view.mouseDown(with: mouseDownEvent(at: point, in: window))
         view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
         XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke")
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r, 255, "precondition: the stroke hasn't been flushed onto the real layer yet")
 
         view.beginLayerTransform() // transform mode preempts every other gesture
 
-        XCTAssertFalse(view.isPenStrokeInProgress, "beginLayerTransform() must discard the in-progress pen buffer, not carry it over into transform mode")
-        for y in 0..<8 {
-            for x in 0..<8 {
-                XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) the discarded stroke must never have reached the real layer")
-            }
-        }
-        view.cancelLayerTransform() // tidy up: leave transform mode
+        XCTAssertTrue(view.isTransforming, "entering transform mode itself must still go through normally")
+        XCTAssertFalse(view.isPenStrokeInProgress, "beginLayerTransform() must flush (not merely clear) the in-progress pen buffer")
+        XCTAssertLessThan(view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r ?? 255, 255, "the stroke's already-drawn pixels must have landed on the real layer before transform mode snapshotted it")
+
+        view.commitLayerTransform() // identity transform: a no-op drag, just leaves transform mode
+
+        XCTAssertLessThan(view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r ?? 255, 255, "the flushed stroke must survive an identity transform commit, not get wiped by a stale pre-flush snapshot")
     }
 
     func testMouseDown_calledTwiceWithoutInterveningMouseUp_flushesFirstBufferBeforeStartingNewOne() {
