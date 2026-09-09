@@ -172,10 +172,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // reads it — keeping that method's existing "`document.layerStack`
         // already is the edit being recorded" assumption true for crop too.
         // See `CanvasView.onLayerStackReplaced`'s own doc comment.
+        //
+        // Repoints `layerPanelView` at the new stack without asking it to
+        // rebuild its rows yet (issue #21 review should-2): `commitCrop()`
+        // always fires `onLayerContentChanged` right after this callback,
+        // within the same method, and that handler's own
+        // `layerPanelView.reload()` (below) already rebuilds against
+        // whatever `layerPanelView.layerStack` currently points at — calling
+        // `replaceLayerStack(_:)` here too would rebuild the identical row
+        // list twice for one crop commit. See
+        // `setLayerStackReferenceWithoutReload(_:)`'s own doc comment.
         canvasView.onLayerStackReplaced = { [weak self] newLayerStack in
             guard let self, let document = self.displayedDocument else { return }
             document.layerStack = newLayerStack
-            self.layerPanelView.replaceLayerStack(newLayerStack)
+            self.layerPanelView.setLayerStackReferenceWithoutReload(newLayerStack)
         }
 
         scrollView = NSScrollView()
