@@ -840,17 +840,24 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(midPixel?.b, 0)
     }
 
-    // MARK: - Pen tool routes through the antialiased path (issue #10)
+    // MARK: - Pen tool routes through the antialiased dab-stamping path (issue #10, #20)
     //
-    // `PixelCanvasTests` already covers `drawAntialiasedDot`/
-    // `drawAntialiasedLine` in isolation, but before this pair, nothing
+    // `PixelCanvasTests` already covers `PixelCanvas.drawPenDab`/
+    // `compositeOverlay` in isolation, but before this pair, nothing
     // exercised `.pen` through `CanvasView`'s real `mouseDown`/
-    // `mouseDragged` entry points at all — the integration wiring in
-    // `CanvasView.paint(at:)`/`paintLine(from:to:)` that picks the
-    // antialiased path for `.pen` (vs. `setPixel`/`drawLine` for
-    // `.pencil`/`.eraser`) had no test of its own.
+    // `mouseDragged`/`mouseUp` entry points at all — the integration wiring
+    // that routes `.pen` through the accumulation-buffer dab-stamping path
+    // (vs. `setPixel`/`drawLine` for `.pencil`/`.eraser`) had no test of its
+    // own.
+    //
+    // Post-#20, a pen stroke's dabs land in `CanvasView`'s private
+    // `penStrokeBuffer` and aren't merged onto `layerStack.activeLayer
+    // .canvas` until `mouseUp` (`flushPenStroke()`) — so unlike the
+    // pencil/eraser tests above, these must drive the gesture through to
+    // `mouseUp` before reading `rawPixel`, or the layer would still read
+    // back as untouched white.
 
-    func testMouseDown_withPenActive_paintsWithAntialiasing() {
+    func testMouseUp_afterPenMouseDown_paintsWithAntialiasing() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.activeTool = .pen
@@ -859,6 +866,7 @@ final class CanvasViewTests: XCTestCase {
 
         let targetPoint = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
         view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+        view.mouseUp(with: mouseUpEvent(at: targetPoint, in: view.window!))
 
         let center = view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)
         XCTAssertLessThan(center?.r ?? 255, 255, "the pen should have painted with the foreground color at the click point")
@@ -878,7 +886,7 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertTrue(foundPartialCoverage, "a pen dot should have a soft, anti-aliased edge — the setPixel path never produces this")
     }
 
-    func testMouseDragged_withPenActive_paintsAntialiasedLine() {
+    func testMouseUp_afterPenDrag_paintsAntialiasedLine() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.activeTool = .pen
@@ -889,28 +897,27 @@ final class CanvasViewTests: XCTestCase {
         view.mouseDown(with: mouseDownEvent(at: startPoint, in: view.window!))
         let dragPoint = windowPoint(forPixelCol: 6, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
         view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: view.window!))
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: view.window!))
 
         let midpoint = view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)
         XCTAssertLessThan(midpoint?.r ?? 255, 255, "the stroke should be painted along the dragged path")
 
         // `drawLine` (pencil/eraser) is exactly 1px wide with hard edges;
-        // `drawAntialiasedLine` (pen) is round-capped and soft-edged
-        // (issue #10's fixed pen line width), so around its rounded end
-        // caps there should be partial (non-binary) coverage instead of
-        // either staying untouched white or being hard-painted black.
-        // (Empirically confirmed: along the straight middle of the stroke
-        // the coverage is a hard 0/255 edge here too, since a horizontal
-        // stroke's vertical extent happens to land exactly on the pixel
-        // grid — it's specifically the round caps at the ends that expose
-        // the anti-aliasing this test is after.)
+        // the pen's dab-stamped stroke is round and soft-edged at full
+        // hardness (issue #20's default settings reproduce issue #10's
+        // fixed pen line width), so around the dabs' rims there should be
+        // partial (non-binary) coverage instead of either staying untouched
+        // white or being hard-painted black.
         var foundPartialCoverage = false
-        for (x, y) in [(1, 3), (1, 5), (6, 3), (6, 5)] {
-            guard let pixel = view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y) else { continue }
-            if pixel.r != 0, pixel.r != 255 {
-                foundPartialCoverage = true
+        for y in 3...5 {
+            for x in 1...6 {
+                guard let pixel = view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y) else { continue }
+                if pixel.r != 0, pixel.r != 255 {
+                    foundPartialCoverage = true
+                }
             }
         }
-        XCTAssertTrue(foundPartialCoverage, "an antialiased stroke's round end caps should show partial coverage — drawLine's hard 1px edge never does this")
+        XCTAssertTrue(foundPartialCoverage, "an antialiased stroke's dab rims should show partial coverage — drawLine's hard 1px edge never does this")
     }
 
     // MARK: - Eyedropper tool (issue #14)
