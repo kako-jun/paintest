@@ -260,6 +260,319 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
     }
 
+    // MARK: - drawPenDab / compositeOverlay (pen tool dab-stamping + stroke-end merge, issue #20)
+    //
+    // `drawPenDab` reuses `drawAntialiasedDot`/`drawAntialiasedLine`'s own
+    // `drawAntialiased(mask:_:)` compositing helper (same coordinate flip,
+    // same source-over math, same mask handling — already covered above),
+    // so these tests focus on what's actually new: the hardness/flow
+    // radial-gradient shape, clamping of the hardness/flow/diameter inputs,
+    // and `compositeOverlay`'s own whole-buffer, once-per-flush alpha
+    // scaling — the mechanism that makes `PenBrushSettings.opacity` a
+    // stroke-level cap rather than a per-dab one (see
+    // `CanvasView.flushPenStroke()`'s doc comment for the full picture;
+    // `CanvasViewTests` exercises that through the real gesture, these
+    // tests drive `PixelCanvas` directly instead).
+
+    func testDrawPenDab_hardness1_visuallyMatchesDrawAntialiasedDot() {
+        let dotCanvas = PixelCanvas(width: 20, height: 20, background: .white)
+        let dabCanvas = PixelCanvas(width: 20, height: 20, background: .white)
+        dotCanvas.drawAntialiasedDot(at: (x: 10, y: 10), color: .black, diameter: 8)
+        dabCanvas.drawPenDab(at: (x: 10, y: 10), color: .black, diameter: 8, hardness: 1, alpha: 1)
+
+        for y in 6...14 {
+            for x in 6...14 {
+                let dotPixel = dotCanvas.rawPixel(x: x, y: y)
+                let dabPixel = dabCanvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(Double(dotPixel?.r ?? 0), Double(dabPixel?.r ?? 0), accuracy: 3, "(\(x),\(y)) red should match drawAntialiasedDot at hardness 1 (regression baseline)")
+                XCTAssertEqual(Double(dotPixel?.a ?? 0), Double(dabPixel?.a ?? 0), accuracy: 3, "(\(x),\(y)) alpha should match drawAntialiasedDot at hardness 1")
+            }
+        }
+    }
+
+    func testDrawPenDab_atOrigin_paintsTopLeftCorner_notBottomLeft() {
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        canvas.drawPenDab(at: (x: 0, y: 0), color: .black, diameter: 3, hardness: 1, alpha: 1)
+
+        let topLeft = canvas.rawPixel(x: 0, y: 0)
+        XCTAssertNotNil(topLeft)
+        XCTAssertLessThan(topLeft?.r ?? 255, 255, "the dab drawn at (0,0) should darken the top-left corner")
+
+        let bottomLeft = canvas.rawPixel(x: 0, y: canvas.height - 1)
+        XCTAssertEqual(bottomLeft?.r, 255, "the bottom-left corner must stay untouched background color")
+        XCTAssertEqual(bottomLeft?.g, 255)
+        XCTAssertEqual(bottomLeft?.b, 255)
+    }
+
+    func testDrawPenDab_hardnessZero_producesRadialGradientFromCenter() {
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        canvas.drawPenDab(at: (x: 10, y: 10), color: .black, diameter: 10, hardness: 0, alpha: 1)
+
+        let center = canvas.rawPixel(x: 10, y: 10)
+        let mid = canvas.rawPixel(x: 12, y: 10) // 2px from center
+        let near = canvas.rawPixel(x: 14, y: 10) // 4px from center, close to the radius-5 edge
+
+        XCTAssertLessThan(center?.r ?? 255, mid?.r ?? 0, "hardness 0 should fade smoothly: the center must be darker than a point partway to the edge")
+        XCTAssertLessThan(mid?.r ?? 255, near?.r ?? 0, "...and a point closer to the edge must be lighter still")
+    }
+
+    func testDrawPenDab_hardnessOne_hasNoInteriorGradient_onlyEdgeAA() {
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        canvas.drawPenDab(at: (x: 10, y: 10), color: .black, diameter: 10, hardness: 1, alpha: 1)
+
+        let center = canvas.rawPixel(x: 10, y: 10)
+        let interior = canvas.rawPixel(x: 12, y: 10) // 2px from center, still well inside the radius-5 disc
+        XCTAssertEqual(center?.r, 0)
+        XCTAssertEqual(interior?.r, 0, "hardness 1 must be uniformly solid throughout the interior, not fading gradually the way hardness 0 does")
+
+        // The circle's own boundary (clipped via context.clip(), anti-aliased) is
+        // the only place partial coverage should appear.
+        var foundPartialCoverage = false
+        for x in 5...15 {
+            guard let pixel = canvas.rawPixel(x: x, y: 10) else { continue }
+            if pixel.r != 0, pixel.r != 255 { foundPartialCoverage = true }
+        }
+        XCTAssertTrue(foundPartialCoverage, "the dab's own circular boundary should still show anti-aliased partial coverage")
+    }
+
+    func testDrawPenDab_flowZero_leavesCanvasUnchanged() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        canvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: 0)
+        for y in 0..<12 {
+            for x in 0..<12 {
+                let pixel = canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(pixel?.r, 255, "(\(x),\(y)) should stay untouched: flow (alpha) 0 is a no-op guard")
+                XCTAssertEqual(pixel?.a, 255)
+            }
+        }
+    }
+
+    func testDrawPenDab_flowNegative_clampsToZero_doesNotCrash() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        canvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: -0.5)
+        for y in 0..<12 {
+            for x in 0..<12 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) a negative flow must clamp to 0, same as an explicit 0")
+            }
+        }
+        // Canvas still usable afterward.
+        canvas.setPixel(x: 0, y: 0, color: .black)
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+    }
+
+    func testDrawPenDab_flowAboveOne_clampsToOne_doesNotCrash() {
+        let clampedCanvas = PixelCanvas(width: 12, height: 12, background: .white)
+        let referenceCanvas = PixelCanvas(width: 12, height: 12, background: .white)
+        clampedCanvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: 5.0)
+        referenceCanvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: 1.0)
+
+        XCTAssertEqual(clampedCanvas.rawPixel(x: 6, y: 6)?.r, referenceCanvas.rawPixel(x: 6, y: 6)?.r, "flow above 1 must clamp to 1, matching the explicit alpha:1 result exactly")
+    }
+
+    func testDrawPenDab_hardnessNegative_clampsToZero_doesNotCrash() {
+        let clampedCanvas = PixelCanvas(width: 20, height: 20, background: .white)
+        let referenceCanvas = PixelCanvas(width: 20, height: 20, background: .white)
+        clampedCanvas.drawPenDab(at: (x: 10, y: 10), color: .black, diameter: 10, hardness: -1.0, alpha: 1)
+        referenceCanvas.drawPenDab(at: (x: 10, y: 10), color: .black, diameter: 10, hardness: 0, alpha: 1)
+
+        XCTAssertEqual(clampedCanvas.rawPixel(x: 12, y: 10)?.r, referenceCanvas.rawPixel(x: 12, y: 10)?.r, "a negative hardness must clamp to 0, matching the explicit hardness:0 gradient exactly")
+    }
+
+    func testDrawPenDab_hardnessAboveOne_clampsToOne_doesNotCrash() {
+        let clampedCanvas = PixelCanvas(width: 20, height: 20, background: .white)
+        let referenceCanvas = PixelCanvas(width: 20, height: 20, background: .white)
+        clampedCanvas.drawPenDab(at: (x: 10, y: 10), color: .black, diameter: 10, hardness: 2.0, alpha: 1)
+        referenceCanvas.drawPenDab(at: (x: 10, y: 10), color: .black, diameter: 10, hardness: 1.0, alpha: 1)
+
+        XCTAssertEqual(clampedCanvas.rawPixel(x: 12, y: 10)?.r, referenceCanvas.rawPixel(x: 12, y: 10)?.r, "hardness above 1 must clamp to 1, matching the explicit hardness:1 solid-disc result exactly")
+    }
+
+    func testDrawPenDab_diameterZeroOrNegative_doesNotCrashAndPaintsNothing() {
+        let canvas = PixelCanvas(width: 8, height: 8, background: .white)
+        canvas.drawPenDab(at: (x: 4, y: 4), color: .black, diameter: 0, hardness: 1, alpha: 1)
+        canvas.drawPenDab(at: (x: 4, y: 4), color: .black, diameter: -5, hardness: 1, alpha: 1)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) a zero or negative diameter must paint nothing")
+            }
+        }
+        canvas.setPixel(x: 0, y: 0, color: .black)
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+    }
+
+    func testDrawPenDab_translucentFlowOverTransparentDestination_resultAlphaMatchesFormula() {
+        // Fully transparent destination + hardness 1 (uniform interior, no
+        // gradient to complicate the math) isolates flow's own alpha
+        // contribution exactly, mirroring
+        // `testDrawAntialiasedDot_translucentColorOverTransparentDestination_resultAlphaEqualsSrcAlpha`.
+        let canvas = PixelCanvas(width: 12, height: 12, background: NSColor(deviceWhite: 1, alpha: 0))
+        canvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: 0.5)
+
+        guard let center = canvas.rawPixel(x: 6, y: 6) else {
+            XCTFail("expected a readable center pixel")
+            return
+        }
+        XCTAssertEqual(Double(center.a), 0.5 * 255, accuracy: 3, "result alpha over a fully transparent destination should equal flow's own alpha")
+        XCTAssertEqual(Double(center.r), 0, accuracy: 3, "result color should be exactly the source color; the transparent destination must not contribute")
+    }
+
+    func testDrawPenDab_translucentFlowOverOpaqueBackground_blendsProportionally() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: .white)
+        canvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: 0.5)
+
+        guard let center = canvas.rawPixel(x: 6, y: 6) else {
+            XCTFail("expected a readable center pixel")
+            return
+        }
+        XCTAssertEqual(center.a, 255, "compositing a 50%-flow dab over an opaque background must stay fully opaque")
+        XCTAssertEqual(Double(center.r), 127.5, accuracy: 3, "expected outColor = flow*src + (1-flow)*dest = 0.5*0 + 0.5*255")
+    }
+
+    func testDrawPenDab_centeredOffCanvasEdge_doesNotCrashAndClipsToCanvas() {
+        let canvas = PixelCanvas(width: 10, height: 10, background: .white)
+
+        // diameter 60 deliberately exceeds `PenBrushSettings.sizeRange`'s UI
+        // upper bound of 50 (issue #20 boundary value: size 51+ is
+        // unreachable through the slider, but `drawPenDab` itself carries no
+        // clamp of its own — see its and `PenBrushSettings.sizeRange`'s own
+        // doc comments) — this test doubles as that boundary case: no
+        // crash, no clamp, just a big dab that clips cleanly to the canvas.
+        canvas.drawPenDab(at: (x: -2, y: -2), color: .black, diameter: 60, hardness: 1, alpha: 1)
+        let corner = canvas.rawPixel(x: 0, y: 0)
+        XCTAssertLessThan(corner?.r ?? 255, 255, "the overlapping part of the off-canvas dab should still paint the corner it reaches")
+
+        // Center entirely outside the canvas with no overlap at all: a no-op, not a crash.
+        canvas.drawPenDab(at: (x: -1000, y: -1000), color: .black, diameter: 4, hardness: 1, alpha: 1)
+        canvas.setPixel(x: 9, y: 9, color: .black) // canvas still usable afterward
+        XCTAssertEqual(canvas.rawPixel(x: 9, y: 9)?.r, 0)
+    }
+
+    func testDrawPenDab_repeatedCallsAtSamePoint_alphaAccumulatesViaSrcOver_notSimpleAddition() {
+        let canvas = PixelCanvas(width: 12, height: 12, background: NSColor(deviceWhite: 1, alpha: 0))
+        canvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: 0.5)
+        canvas.drawPenDab(at: (x: 6, y: 6), color: .black, diameter: 8, hardness: 1, alpha: 0.5)
+
+        guard let center = canvas.rawPixel(x: 6, y: 6) else {
+            XCTFail("expected a readable center pixel")
+            return
+        }
+        // src-over compositing twice at flow 0.5: outAlpha = 0.5 + 0.5*(1-0.5) = 0.75,
+        // not the naive 0.5+0.5 = 1.0 a simple additive accumulation would give.
+        XCTAssertEqual(Double(center.a), 0.75 * 255, accuracy: 3, "two flow-0.5 dabs over the same spot must build toward 0.75 via src-over, not saturate straight to 1.0")
+    }
+
+    func testCompositeOverlay_alphaZero_leavesTargetCanvasUnchanged() {
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+        let overlay = PixelCanvas(width: 8, height: 8, background: NSColor(deviceWhite: 1, alpha: 0))
+        overlay.drawPenDab(at: (x: 4, y: 4), color: .black, diameter: 6, hardness: 1, alpha: 1)
+
+        target.compositeOverlay(overlay, alpha: 0)
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(target.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) alpha 0 must leave the target untouched, even though the overlay itself is fully painted")
+            }
+        }
+    }
+
+    func testCompositeOverlay_alphaOne_fullyAppliesOverlayContents() {
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+        let overlay = PixelCanvas(width: 8, height: 8, background: NSColor(deviceWhite: 1, alpha: 0))
+        overlay.drawPenDab(at: (x: 4, y: 4), color: .black, diameter: 6, hardness: 1, alpha: 1)
+
+        target.compositeOverlay(overlay, alpha: 1)
+
+        XCTAssertEqual(target.rawPixel(x: 4, y: 4)?.r, 0, "alpha 1 must fully apply the overlay's own opaque center pixel")
+        XCTAssertEqual(target.rawPixel(x: 4, y: 4)?.a, 255)
+    }
+
+    func testCompositeOverlay_partialAlpha_scalesEntireBufferAtOnce_notPerPixelIndependently() {
+        let overlay = PixelCanvas(width: 12, height: 12, background: NSColor(deviceWhite: 1, alpha: 0))
+        // Point A: flow=1 dab, re-stamped 3 times (mimics dense overlapping
+        // dabs within a slow-moving stroke) — buffer alpha saturates at 1.0
+        // no matter how many times it's re-stamped (decision table 2-1 No.7).
+        for _ in 0..<3 {
+            overlay.drawPenDab(at: (x: 3, y: 3), color: .black, diameter: 4, hardness: 1, alpha: 1)
+        }
+        // Point B: flow=0.5 dab, stamped twice — src-over accumulation
+        // builds buffer alpha to 0.75, not 1.0 (decision table 2-1 No.6).
+        overlay.drawPenDab(at: (x: 8, y: 8), color: .black, diameter: 4, hardness: 1, alpha: 0.5)
+        overlay.drawPenDab(at: (x: 8, y: 8), color: .black, diameter: 4, hardness: 1, alpha: 0.5)
+
+        // A transparent (not opaque) target: compositing onto an opaque
+        // destination always yields an opaque (`.a == 255`) result
+        // regardless of source alpha (outAlpha = srcAlpha + destAlpha*(1 -
+        // srcAlpha), which collapses to 1 whenever destAlpha is already 1)
+        // — that would mask exactly the per-pixel alpha-scaling effect this
+        // test exists to observe, so `.a` has to be read back off a
+        // destination that starts at alpha 0.
+        let target = PixelCanvas(width: 12, height: 12, background: NSColor(deviceWhite: 1, alpha: 0))
+        target.compositeOverlay(overlay, alpha: 0.5)
+
+        let pointA = target.rawPixel(x: 3, y: 3)
+        let pointB = target.rawPixel(x: 8, y: 8)
+        // A single `context.setAlpha(0.5)` draw scales the WHOLE overlay
+        // uniformly — each destination pixel's result alpha is simply its
+        // own buffer alpha times 0.5, not something recomputed per pixel.
+        XCTAssertEqual(Double(pointA?.a ?? 0), 1.0 * 0.5 * 255, accuracy: 3, "point A's buffer alpha (1.0, saturated) must be scaled down to exactly the 0.5 opacity, not left at full")
+        XCTAssertEqual(Double(pointB?.a ?? 0), 0.75 * 0.5 * 255, accuracy: 3, "point B's buffer alpha (0.75, from two 0.5-flow dabs) must be scaled by that same 0.5 opacity factor")
+    }
+
+    func testCompositeOverlay_appliedTwiceOverSameArea_secondApplicationDarkensFurther() {
+        // Decision table 2-1 No.10: opacity is a per-STROKE cap, applied
+        // fresh at each `compositeOverlay` call — it is not a canvas-wide
+        // ceiling that a later, separate stroke can't cross.
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+        func makeOverlay() -> PixelCanvas {
+            let overlay = PixelCanvas(width: 8, height: 8, background: NSColor(deviceWhite: 1, alpha: 0))
+            overlay.drawPenDab(at: (x: 4, y: 4), color: .black, diameter: 6, hardness: 1, alpha: 1)
+            return overlay
+        }
+
+        target.compositeOverlay(makeOverlay(), alpha: 0.5) // stroke 1
+        let afterFirst = target.rawPixel(x: 4, y: 4)
+
+        target.compositeOverlay(makeOverlay(), alpha: 0.5) // stroke 2, same opacity, but a NEW stroke
+        let afterSecond = target.rawPixel(x: 4, y: 4)
+
+        XCTAssertLessThan(afterSecond?.r ?? 255, afterFirst?.r ?? 0, "a second stroke over the same area must darken it further — opacity never caps the canvas itself, only each individual stroke's own merge")
+    }
+
+    func testCompositeOverlay_negativeOrAboveOneAlpha_clampsSafely() {
+        let overlay = PixelCanvas(width: 8, height: 8, background: NSColor(deviceWhite: 1, alpha: 0))
+        overlay.drawPenDab(at: (x: 4, y: 4), color: .black, diameter: 6, hardness: 1, alpha: 1)
+
+        let negativeTarget = PixelCanvas(width: 8, height: 8, background: .white)
+        negativeTarget.compositeOverlay(overlay, alpha: -0.5)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(negativeTarget.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) a negative alpha must clamp to 0 (no-op), not crash or invert")
+            }
+        }
+
+        let aboveOneTarget = PixelCanvas(width: 8, height: 8, background: .white)
+        let referenceTarget = PixelCanvas(width: 8, height: 8, background: .white)
+        aboveOneTarget.compositeOverlay(overlay, alpha: 5.0)
+        referenceTarget.compositeOverlay(overlay, alpha: 1.0)
+        XCTAssertEqual(aboveOneTarget.rawPixel(x: 4, y: 4)?.r, referenceTarget.rawPixel(x: 4, y: 4)?.r, "an alpha above 1 must clamp to 1, matching the explicit alpha:1 result exactly")
+    }
+
+    func testCompositeOverlay_withMaskAppliedAtDabTime_selectionBoundaryRespectedAfterComposite() {
+        let width = 12, height = 12
+        let mask = SelectionMask.rectangle(x0: 0, y0: 0, x1: 5, y1: 11, width: width, height: height) // left half only (columns 0...5)
+
+        let overlay = PixelCanvas(width: width, height: height, background: NSColor(deviceWhite: 1, alpha: 0))
+        // The dab (radius 4, centered on column 5) reaches columns 1...9 if
+        // unmasked — comfortably straddling the mask boundary at column 5/6.
+        overlay.drawPenDab(at: (x: 5, y: 5), color: .black, diameter: 8, hardness: 1, alpha: 1, mask: mask)
+
+        let target = PixelCanvas(width: width, height: height, background: .white)
+        target.compositeOverlay(overlay, alpha: 1)
+
+        XCTAssertLessThan(target.rawPixel(x: 3, y: 5)?.r ?? 255, 255, "inside the mask, well within the dab's own circle, paint must reach the target after compositing")
+        XCTAssertEqual(target.rawPixel(x: 7, y: 5)?.r, 255, "outside the mask, even though this point is well within the dab's unmasked circle, the target must stay untouched — masking happens at dab time, and compositeOverlay itself carries no mask of its own")
+    }
+
     // MARK: - drawLine
 
     func testDrawLine_horizontal_fillsExactRunAndNothingElse() {
