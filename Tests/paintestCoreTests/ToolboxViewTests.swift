@@ -38,9 +38,9 @@ final class ToolboxViewTests: XCTestCase {
         _ = makeView()
     }
 
-    func testButtonCount_equals19() {
+    func testButtonCount_equals20() {
         let view = makeView()
-        XCTAssertEqual(allButtons(in: view).count, 19)
+        XCTAssertEqual(allButtons(in: view).count, 20)
     }
 
     func testExactlyOneButton_isPressedByDefault() {
@@ -55,25 +55,26 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pressed.first?.toolTip, "鉛筆")
     }
 
-    // Pencil, eraser, pen, the eyedropper, the magnifier, and the
-    // rectangle/ellipse/lasso/polygon select tools are wired to real
-    // behavior (issues #5, #10, #14, #13, #11); every other button stays a
-    // purely visual placeholder with no target/action, same as before.
-    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド"]
+    // Pencil, eraser, pen, the eyedropper, the magnifier, the
+    // rectangle/ellipse/lasso/polygon/magic-wand select tools, and crop are
+    // wired to real behavior (issues #5, #10, #14, #13, #11, #21); every
+    // other button stays a purely visual placeholder with no target/action,
+    // same as before.
+    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド", "切り抜き"]
 
     // The one placeholder tool tip that's disabled rather than merely
     // unwired (issue #43); kept alongside `wiredToolTips` since the two
-    // constants are used together throughout this file to partition all 19
+    // constants are used together throughout this file to partition all 20
     // buttons into wired / disabled-placeholder / other-placeholder.
     private static let textToolTip = "テキスト"
 
-    func testOnlyPencilEraserPenEyedropperMagnifierAndSelectTools_haveTargetAndAction() {
+    func testOnlyPencilEraserPenEyedropperMagnifierSelectToolsAndCrop_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 10)
+        XCTAssertEqual(wired.count, 11)
         for button in wired {
-            XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier/select tools must be wired to onToolSelected")
-            XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier/select tools must be wired to onToolSelected")
+            XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop must be wired to onToolSelected")
+            XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop must be wired to onToolSelected")
         }
     }
 
@@ -100,7 +101,7 @@ final class ToolboxViewTests: XCTestCase {
             XCTFail("could not find the toolbox's scroll view")
             return
         }
-        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 19 buttons in one column run taller than the window")
+        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 20 buttons in one column run taller than the window")
     }
 
     func testGrid_hasSingleColumn() {
@@ -209,7 +210,7 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off, "selecting pen must turn the default-on pencil off")
     }
 
-    func testCyclingThroughAllFourWiredTools_alwaysLeavesExactlyOneOfAll19ButtonsPressed() {
+    func testCyclingThroughAllFourWiredTools_alwaysLeavesExactlyOneOfAll20ButtonsPressed() {
         let view = makeView()
         guard let pencil = button(toolTip: "鉛筆", in: view),
               let eraser = button(toolTip: "消しゴム", in: view),
@@ -221,7 +222,7 @@ final class ToolboxViewTests: XCTestCase {
 
         func assertExactlyOnePressed(_ label: String) {
             let pressed = allButtons(in: view).filter { $0.state == .on }
-            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 19 buttons pressed after \(label)")
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 20 buttons pressed after \(label)")
         }
 
         assertExactlyOnePressed("initial state")
@@ -282,11 +283,12 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off, "selecting the magnifier must turn the default-on pencil off")
     }
 
-    func testCyclingThroughAllFiveWiredTools_alwaysLeavesExactlyOneOfAll19ButtonsPressed() {
+    func testCyclingThroughAllFiveWiredTools_alwaysLeavesExactlyOneOfAll20ButtonsPressed() {
         // Extends `testCyclingThroughAllFourWiredTools_...` (issue #10) with
         // the magnifier (issue #13), now that there are five wired tools
-        // instead of four. (Two more — rectangle/ellipse select, issue #11 —
-        // exist on the toolbox now too, but aren't cycled through here; see
+        // instead of four. (Five more — rectangle/ellipse/lasso/polygon/
+        // magic-wand select, issue #11, and crop, issue #21 — exist on the
+        // toolbox now too, but aren't cycled through here; see
         // `CanvasViewTests` for their own selection-specific coverage.)
         let view = makeView()
         guard let pencil = button(toolTip: "鉛筆", in: view),
@@ -300,7 +302,7 @@ final class ToolboxViewTests: XCTestCase {
 
         func assertExactlyOnePressed(_ label: String) {
             let pressed = allButtons(in: view).filter { $0.state == .on }
-            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 19 buttons pressed after \(label)")
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 20 buttons pressed after \(label)")
         }
 
         assertExactlyOnePressed("initial state")
@@ -383,10 +385,10 @@ final class ToolboxViewTests: XCTestCase {
         }
     }
 
-    func testAllTenWiredButtons_remainEnabled() {
+    func testAllElevenWiredButtons_remainEnabled() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 10)
+        XCTAssertEqual(wired.count, 11)
         for button in wired {
             XCTAssertTrue(button.isEnabled, "the テキスト-only disable condition must not leak onto wired tools (\(button.toolTip ?? "?"))")
         }
@@ -395,7 +397,7 @@ final class ToolboxViewTests: XCTestCase {
     func testExactlyOneButton_isDisabled() {
         let view = makeView()
         let disabled = allButtons(in: view).filter { !$0.isEnabled }
-        XCTAssertEqual(disabled.count, 1, "of all 19 buttons, only テキスト should be disabled")
+        XCTAssertEqual(disabled.count, 1, "of all 20 buttons, only テキスト should be disabled")
         XCTAssertEqual(disabled.first?.toolTip, Self.textToolTip)
     }
 

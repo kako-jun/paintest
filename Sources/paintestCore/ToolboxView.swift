@@ -2,19 +2,20 @@ import AppKit
 
 /// Photoshop's left-hand toolbox: a single vertical column of tool icons
 /// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, the
-/// eyedropper, the magnifier, and the rectangle/ellipse/lasso/polygon/magic-
-/// wand select tools are wired to real behavior (issues #5, #10, #14, #13,
-/// #11) — clicking any of them fires `onToolSelected` and exclusively
-/// toggles that button's pressed state against the others' — so every other
-/// button here stays a purely visual placeholder with no target/action, same
-/// as before. The テキスト placeholder additionally renders disabled
+/// eyedropper, the magnifier, the rectangle/ellipse/lasso/polygon/magic-
+/// wand select tools, and the crop tool are wired to real behavior (issues
+/// #5, #10, #14, #13, #11, #21) — clicking any of them fires
+/// `onToolSelected` and exclusively toggles that button's pressed state
+/// against the others' — so every other button here stays a purely visual
+/// placeholder with no target/action, same as before. The テキスト
+/// placeholder additionally renders disabled
 /// (`isEnabled = false`) so it reads as not-yet-implemented instead of a
 /// placeholder that silently does nothing when clicked (issue #43).
 /// The pencil cell renders pressed (`state == .on`) by default so the
 /// column still communicates "this is the active tool" the way the
 /// reference screenshots do.
 ///
-/// A single column of 19 icons runs taller than the window at typical
+/// A single column of 20 icons runs taller than the window at typical
 /// sizes, so (like `DocumentTabBarView`) the column is wrapped in a
 /// vertically-scrolling `NSScrollView` rather than widened back into extra
 /// columns.
@@ -24,21 +25,24 @@ final class ToolboxView: NSView {
         let label: String
         // Non-nil only for the buttons wired up so far — pencil/eraser
         // (issue #5), pen (issue #10), the eyedropper (issue #14), the
-        // magnifier (issue #13), and the rectangle/ellipse/lasso/polygon/
-        // magic-wand select tools (issue #11); every other descriptor stays
-        // `nil` and its button gets no target/action, matching the previous
-        // all-placeholder behavior.
+        // magnifier (issue #13), the rectangle/ellipse/lasso/polygon/
+        // magic-wand select tools (issue #11), and crop (issue #21); every
+        // other descriptor stays `nil` and its button gets no target/action,
+        // matching the previous all-placeholder behavior.
         let tool: Tool?
     }
 
     // Top to bottom, one per row, matching Photoshop's single-column
-    // toolbar layout.
+    // toolbar layout. Crop sits right after the five selection tools and
+    // before eraser (issue #21), mirroring where Photoshop's own toolbox
+    // places its crop tool relative to its selection tool group.
     private static let tools: [ToolDescriptor] = [
         ToolDescriptor(symbol: "lasso", label: "投げ縄選択", tool: .lassoSelect),
         ToolDescriptor(symbol: "hexagon.dashed", label: "多角形選択", tool: .polygonSelect),
         ToolDescriptor(symbol: "rectangle.dashed", label: "矩形選択", tool: .rectangleSelect),
         ToolDescriptor(symbol: "circle.dashed", label: "楕円選択", tool: .ellipseSelect),
         ToolDescriptor(symbol: "wand.and.rays", label: "マジックワンド", tool: .magicWandSelect),
+        ToolDescriptor(symbol: "crop", label: "切り抜き", tool: .crop),
         ToolDescriptor(symbol: "eraser", label: "消しゴム", tool: .eraser),
         ToolDescriptor(symbol: "drop.fill", label: "塗りつぶし", tool: nil),
         ToolDescriptor(symbol: "eyedropper", label: "スポイト", tool: .eyedropper),
@@ -108,7 +112,7 @@ final class ToolboxView: NSView {
         grid.column(at: 0).width = Self.buttonSide
 
         // Wrapped in a scroll view (same pattern as `DocumentTabBarView`):
-        // 16 buttons in a single column run taller than the window at
+        // 20 buttons in a single column run taller than the window at
         // typical sizes, so the column scrolls vertically instead of
         // widening back into extra columns.
         let scrollView = NSScrollView()

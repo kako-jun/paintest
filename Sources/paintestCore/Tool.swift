@@ -5,9 +5,10 @@ import Foundation
 /// (issue #15) — matching classic Paint/Photoshop's single current-tool
 /// model (issue #5).
 ///
-/// `pencil`, `eraser`, `pen`, `eyedropper`, and `magnifier` are wired to real
-/// behavior so far; `ToolboxView`'s other 11 buttons stay purely visual
-/// placeholders until their own issues give them real tool implementations.
+/// `pencil`, `eraser`, `pen`, `eyedropper`, `magnifier`, the five selection
+/// tools, and `crop` are wired to real behavior so far; `ToolboxView`'s
+/// other 9 buttons stay purely visual placeholders until their own issues
+/// give them real tool implementations.
 enum Tool {
     case pencil
     case eraser
@@ -51,4 +52,14 @@ enum Tool {
     /// the whole gesture. See `CanvasView`'s `mouseDown` handling and
     /// `SelectionMask.magicWand(...)`.
     case magicWandSelect
+    /// Drags out a rectangle, then resizes/moves it via 8 handles (4
+    /// corners + 4 edge midpoints, no rotation — see `CanvasView`'s
+    /// `CropHandle`), instead of painting or selecting (issue #21): Enter
+    /// or a double-click on the rectangle's interior confirms, replacing
+    /// `LayerStack` with a new one cropped to that rectangle (every
+    /// layer's pixels copied across, `LayerStack.width`/`height` changed);
+    /// Escape cancels, leaving every pixel untouched. See `CanvasView`'s
+    /// `mouseDown`/`mouseDragged`/`mouseUp`/`keyDown` handling and
+    /// `commitCrop()`.
+    case crop
 }

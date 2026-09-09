@@ -161,6 +161,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvasView.onEditCompleted = { [weak self] label in
             self?.recordHistoryCheckpoint(label: label)
         }
+        // The crop tool (issue #21) replaces `canvasView.layerStack` with a
+        // brand new instance (its `width`/`height` are `let`, so a crop
+        // can't just mutate the existing one in place) — `displayedDocument`
+        // and `layerPanelView` each hold their own separate reference to
+        // the pre-crop stack that only this delegate can re-point.
+        // `CanvasView.commitCrop()` fires this callback *before*
+        // `onEditCompleted` above, so `document.layerStack` already points
+        // at the cropped stack by the time `recordHistoryCheckpoint(label:)`
+        // reads it — keeping that method's existing "`document.layerStack`
+        // already is the edit being recorded" assumption true for crop too.
+        // See `CanvasView.onLayerStackReplaced`'s own doc comment.
+        //
+        // Repoints `layerPanelView` at the new stack without asking it to
+        // rebuild its rows yet (issue #21 review should-2): `commitCrop()`
+        // always fires `onLayerContentChanged` right after this callback,
+        // within the same method, and that handler's own
+        // `layerPanelView.reload()` (below) already rebuilds against
+        // whatever `layerPanelView.layerStack` currently points at — calling
+        // `replaceLayerStack(_:)` here too would rebuild the identical row
+        // list twice for one crop commit. See
+        // `setLayerStackReferenceWithoutReload(_:)`'s own doc comment.
+        canvasView.onLayerStackReplaced = { [weak self] newLayerStack in
+            guard let self, let document = self.displayedDocument else { return }
+            document.layerStack = newLayerStack
+            self.layerPanelView.setLayerStackReferenceWithoutReload(newLayerStack)
+        }
 
         scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -440,6 +466,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if self.canvasView.isPenStrokeInProgress {
                 self.canvasView.flushPenStroke()
             }
+            // A pending crop rectangle (issue #21 test-design review):
+            // `layerStack` itself doesn't get swapped out by any of
+            // `willChangeActiveLayer`'s callers (select/add/duplicate/remove
+            // a layer only changes `activeLayerIndex`), so this is lower risk
+            // than the `activateActiveDocument()`/`undo()`/`redo()`/
+            // `onJumpToIndex` cases above — but `commitCrop()` still reads
+            // `layerStack.activeLayerIndex` to seed the cropped stack's own
+            // active index, so cancel here too for consistency with every
+            // other place this file already guards `isTransforming`/
+            // `isPenStrokeInProgress`. See `isCropping`'s doc comment.
+            if self.canvasView.isCropping {
+                self.canvasView.cancelCrop()
+            }
         }
         layerPanelView.translatesAutoresizingMaskIntoConstraints = false
         layerPanelView.wantsLayer = true
@@ -471,6 +510,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // entry of its own yet either. See `cancelPenStroke()`'s doc
             // comment.
             if self.canvasView.isPenStrokeInProgress { self.canvasView.cancelPenStroke() }
+            // Same cancel for a pending crop rectangle (issue #21
+            // test-design review) — same reasoning as `undo()`/`redo()`'s
+            // own crop handling: `jump(to:)` below replaces `layerStack`
+            // wholesale with a snapshot from an arbitrary point in history,
+            // which a stale `cropRect` was never adjusted for. See
+            // `isCropping`'s doc comment.
+            if self.canvasView.isCropping { self.canvasView.cancelCrop() }
             guard let restored = self.documentManager.activeDocument.history.jump(to: index) else { return }
             self.applyHistorySnapshot(restored)
             self.refreshHistoryPanel()
@@ -726,6 +772,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if canvasView.isPenStrokeInProgress {
             canvasView.flushPenStroke()
         }
+        // A pending crop rectangle (issue #21 test-design review) is a
+        // hazard of the same shape as the two checks just above — it too is
+        // a pending edit against the *outgoing* document's `layerStack` —
+        // but unlike those two, it's discarded here, not applied:
+        // `cropRect` holds pixel coordinates sized to the outgoing
+        // document's canvas, which are meaningless (and possibly
+        // out-of-bounds or referring to the wrong region entirely) against
+        // the incoming document's own, possibly differently-sized, canvas.
+        // Auto-committing it onto the wrong document the way the transform/
+        // pen-stroke checks above auto-commit theirs would silently crop to
+        // an unrelated rectangle instead. See `isCropping`'s doc comment.
+        if canvasView.isCropping {
+            canvasView.cancelCrop()
+        }
         displayedDocument?.zoomScale = canvasView.zoomScale
         // Selection is per-document state too, same pattern as zoom above
         // (issue #11): write the outgoing document's selection back from
@@ -827,20 +887,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// its own history entry until `commitLayerTransform()` runs. An
     /// in-progress pen stroke (issue #20) gets the identical cancel-first
     /// treatment, for the identical reason — see `cancelPenStroke()`'s doc
-    /// comment.
+    /// comment. A pending crop rectangle (issue #21 test-design review) gets
+    /// the same cancel-first treatment too, and for undo/redo specifically
+    /// cancelling is doubly correct: `applyHistorySnapshot(_:)` below
+    /// replaces `canvasView.layerStack` wholesale with a snapshot from
+    /// (possibly) a different point in the document's size history, so a
+    /// `cropRect` left alive across it would carry stale pixel coordinates
+    /// against a `layerStack` it was never adjusted for. See `isCropping`'s
+    /// doc comment.
     @objc private func undo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         if canvasView.isPenStrokeInProgress { canvasView.cancelPenStroke() }
+        if canvasView.isCropping { canvasView.cancelCrop() }
         guard let restored = documentManager.activeDocument.history.undo() else { return }
         applyHistorySnapshot(restored)
         refreshHistoryPanel()
     }
 
-    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform/pen-stroke
+    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform/pen-stroke/crop
     /// handling as `undo()` above.
     @objc private func redo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         if canvasView.isPenStrokeInProgress { canvasView.cancelPenStroke() }
+        if canvasView.isCropping { canvasView.cancelCrop() }
         guard let restored = documentManager.activeDocument.history.redo() else { return }
         applyHistorySnapshot(restored)
         refreshHistoryPanel()
@@ -1219,6 +1288,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// not `undo()`/`redo()`'s auto-*cancel*: unlike undo/redo, opening a
     /// dialog isn't "abandon this in-progress thing", so the stroke should
     /// still land, just before the dialog reads the canvas.
+    ///
+    /// Deliberately does *not* touch a pending crop rectangle (issue #21
+    /// review should-1), unlike every other place in this file that pairs
+    /// `isTransforming`/`isPenStrokeInProgress` with a matching `isCropping`
+    /// check (`activateActiveDocument()`, `undo()`/`redo()`,
+    /// `historyPanelView.onJumpToIndex`, `layerPanelView
+    /// .willChangeActiveLayer`): every one of those guards against
+    /// `layerStack` (or `activeLayerIndex`) getting swapped out from under
+    /// `cropRect`, but nothing this function's own caller,
+    /// `presentAdjustment(label:showDialog:)`, does that — it only ever
+    /// writes into the *existing* `layerStack.activeLayer.canvas` in place.
+    /// `commitCrop()` doesn't read that canvas until it actually runs, at
+    /// which point it picks up whatever the dialog just wrote, the same way
+    /// it already picks up any earlier pencil/pen edit — so there's no
+    /// equivalent "the dialog's writes get silently undone" trap here for
+    /// crop the way there is for an unconfirmed transform or pen stroke.
     private func commitAnyPendingLayerEdits() {
         if canvasView.isTransforming {
             canvasView.commitLayerTransform()

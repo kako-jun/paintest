@@ -97,6 +97,22 @@ final class LayerPanelView: NSView {
         reload()
     }
 
+    /// Repoints `layerStack` at a new instance *without* rebuilding the row
+    /// list (issue #21 review should-2) — for the one caller
+    /// (`AppDelegate.onLayerStackReplaced`, wired for `CanvasView`'s crop
+    /// tool) that's always immediately followed by its own `reload()` call
+    /// moments later (`onLayerContentChanged`'s handler, which
+    /// `CanvasView.commitCrop()` fires right after `onLayerStackReplaced`,
+    /// within the same method). Calling `replaceLayerStack(_:)` there
+    /// instead would rebuild the identical row list twice for one crop
+    /// commit. Every other caller that swaps in a different `LayerStack`
+    /// (document/tab switches, undo/redo, history jumps) has no such
+    /// guaranteed follow-up reload and must keep using
+    /// `replaceLayerStack(_:)`.
+    func setLayerStackReferenceWithoutReload(_ newLayerStack: LayerStack) {
+        layerStack = newLayerStack
+    }
+
     // MARK: - Layout
 
     private func buildLayout() {

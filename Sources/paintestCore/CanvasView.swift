@@ -66,6 +66,23 @@ final class CanvasView: NSView {
     /// into `HistoryManager.record(_:selection:label:)`.
     var onEditCompleted: ((String) -> Void)?
 
+    /// Fired only when `CanvasView` itself swaps in a brand-new `LayerStack`
+    /// *instance* (issue #21: `commitCrop()`, the only call site so far) —
+    /// as opposed to `onEditCompleted`, which fires for every completed edit
+    /// including ones that just mutate the existing `layerStack`/its layers
+    /// in place. That distinction matters here because `Document.layerStack`
+    /// and `LayerPanelView` each hold their own separate reference to the
+    /// pre-crop stack: every other edit in this file (pencil strokes, layer
+    /// transforms, pen strokes) only ever writes into a `Layer.canvas` that
+    /// reference already points at, so those two stay implicitly in sync for
+    /// free. `LayerStack.width`/`height` are `let`, so a crop can only ever
+    /// produce a whole new instance — this callback is what tells
+    /// `AppDelegate` to re-point `Document.layerStack`/`LayerPanelView` at it,
+    /// mirroring what `activateActiveDocument()`/`applyHistorySnapshot(_:)`
+    /// already do whenever the displayed document's own `layerStack`
+    /// reference changes.
+    var onLayerStackReplaced: ((LayerStack) -> Void)?
+
     /// The active selection, if any — `nil` means "no restriction", i.e. the
     /// whole canvas is editable (issue #11). `AppDelegate` keeps this in
     /// sync with `Document.selection` the same way it does `zoomScale`.
@@ -261,6 +278,25 @@ final class CanvasView: NSView {
     /// already does the equivalent for `isTransforming`.
     var isPenStrokeInProgress: Bool { penStrokeBuffer != nil }
 
+    /// Whether a crop rectangle is currently pending (issue #21 test-design
+    /// review) — `true` exactly when `cropRect` is non-`nil`. Exposed
+    /// read-only, mirroring `isTransforming`/`isPenStrokeInProgress` above,
+    /// for a related but distinct hazard: `cropRect` holds pixel coordinates
+    /// against *this* `layerStack`'s own size, so anything that can swap
+    /// `layerStack` out for a different (possibly differently-sized) one, or
+    /// restore a whole different history snapshot, needs to discard it
+    /// first — unlike `isTransforming`/`isPenStrokeInProgress`, whose callers
+    /// commit/flush the pending edit onto the canvas, every one of these
+    /// callers instead calls `cancelCrop()`: `commitCrop()` is a destructive,
+    /// canvas-resizing operation, and auto-committing it the instant the user
+    /// switches documents/undoes/redoes/jumps history would be surprising and
+    /// unrecoverable in a way flushing a pen stroke or baking in a transform
+    /// isn't. See `AppDelegate.activateActiveDocument()`, `undo()`/`redo()`,
+    /// `historyPanelView.onJumpToIndex`, and `layerPanelView
+    /// .willChangeActiveLayer`, each of which already does the equivalent for
+    /// `isTransforming`/`isPenStrokeInProgress`.
+    var isCropping: Bool { cropRect != nil }
+
     /// A transform handle is hit-testable within this many *view* points of
     /// its exact position (so the hitbox stays a constant on-screen size
     /// regardless of zoom) — mirrors `magnifierClickThreshold`/
@@ -304,6 +340,13 @@ final class CanvasView: NSView {
             polygonVertices = []
             polygonFirstPoint = nil
             polygonCombineMode = nil
+            // A stale pending crop rectangle (issue #21) must not survive a
+            // tool switch either — same reasoning as the selection tools'
+            // resets just above: nothing has been applied to any pixels yet
+            // (only `commitCrop()` does that), so there's nothing to
+            // preserve by leaving it around once the crop tool itself is no
+            // longer selected.
+            cancelCrop()
             // A stale in-progress pen stroke (issue #20) must not survive a
             // tool switch, or it would otherwise sit around and get silently
             // flushed onto the layer by some later, unrelated `mouseUp` once
@@ -442,6 +485,12 @@ final class CanvasView: NSView {
         polygonVertices = []
         polygonFirstPoint = nil
         polygonCombineMode = nil
+        // Same reasoning as every other tool's gesture-state reset just
+        // above, extended to the crop tool's own pending rectangle (issue
+        // #21): entering transform mode preempts it too, and nothing has
+        // been applied to any pixels by it yet, so there's nothing worth
+        // preserving.
+        cancelCrop()
         lastPixel = nil
         needsDisplay = true
     }
@@ -857,6 +906,215 @@ final class CanvasView: NSView {
         return result
     }
 
+    // MARK: - Crop tool (issue #21)
+
+    /// Which handle of `cropRect`'s rectangle a crop drag grabbed — the
+    /// crop tool's counterpart to `TransformHandle`, minus its `.rotate`/
+    /// `.distort` cases: crop is always an axis-aligned rectangle (the
+    /// issue's own plan: "回転ハンドルは無し、軸並行矩形のみ"), so there is
+    /// nothing for either of those two gestures to ever grab. `.move`/
+    /// `.corner`/`.edge` mean exactly what they do on `TransformHandle`.
+    private enum CropHandle: Equatable {
+        case move
+        case corner(TransformCorner)
+        case edge(TransformEdge)
+    }
+
+    /// The crop tool's very first drag — before any pending rectangle
+    /// exists yet — in view-space coordinates, the same rubber-band shape
+    /// `selectionDragStart`/`selectionDragCurrent` track for the rectangle/
+    /// ellipse select tools. Once this drag ends (`mouseUp`), its bounds
+    /// seed `cropRect` below and both of these go back to `nil` for the
+    /// remainder of the gesture.
+    private var cropDragStart: NSPoint?
+    private var cropDragCurrent: NSPoint?
+
+    /// The crop tool's pending rectangle, once the user has dragged one out
+    /// — `nil` before that first drag completes. Reuses `LayerTransform`'s
+    /// center+size shape purely as a convenient "rectangle in canvas
+    /// pixel space" value type: `rotation` and every `distort*` offset are
+    /// never touched by any crop code path, so `cropRect.corners` always
+    /// comes out as a plain axis-aligned rectangle — the same reduction
+    /// `LayerTransform.corners` makes for any transform with `rotation == 0`
+    /// and no distortion — and `resizeByCorner`/`resizeByEdge` above (round
+    /// 1's math, before rotation/distortion existed) can be reused as-is for
+    /// the handle-resize drags below. Non-`nil` for the remainder of the
+    /// gesture — handle resize, interior move, Enter/double-click to
+    /// confirm (`commitCrop()`), Escape to cancel (`cancelCrop()`) —
+    /// mirroring `activeTransform`'s own "non-`nil` means mid-adjustment"
+    /// convention, just tool-gated (`activeTool == .crop`) instead of
+    /// preempting every tool the way `activeTransform` does.
+    private var cropRect: LayerTransform?
+    /// Same role as `transformDragHandle`, captured at the crop drag's
+    /// `mouseDown` and consumed (read every `mouseDragged`, cleared at
+    /// `mouseUp`) the same way.
+    private var cropDragHandle: CropHandle?
+    /// Same role as `transformDragStartPoint`.
+    private var cropDragStartPoint: NSPoint?
+    /// Same role as `transformDragStartTransform` — `cropRect`'s value at
+    /// the moment the current handle/move drag started, so every
+    /// `mouseDragged` recomputes from this snapshot plus the drag's total
+    /// movement so far, rather than accumulating per-event deltas.
+    private var cropDragStartRect: LayerTransform?
+
+    /// Whether the *current* `cropRect` came from an initial drag so short
+    /// it needed floor-clamping to `transformMinimumSize` on either axis —
+    /// i.e. the user never actually dragged out a rectangle, they just
+    /// clicked (issue #21 review must-1). A plain click and the first tap of
+    /// a double-click are indistinguishable to `mouseDown`/`mouseUp` up to
+    /// this point, so without this flag the second tap's `mouseDown` —
+    /// landing well inside the freshly-created minimum-size rectangle, since
+    /// its half-width/half-height comfortably clear
+    /// `transformHandleHitRadius` — reads as an ordinary `.move`-handle
+    /// double-click and `commitCrop()` fires immediately: a destructive,
+    /// unconfirmed crop down to 4x4 pixels with no drag and no rectangle
+    /// ever actually shown to the user.
+    ///
+    /// `mouseUp` sets this the moment it creates `cropRect` from the initial
+    /// drag (see that branch below); `mouseDown`'s double-click check
+    /// refuses to `commitCrop()` while it's `true`, falling through to the
+    /// ordinary single-click handle-drag start instead — so the second tap
+    /// just starts adjusting the rectangle rather than confirming it
+    /// outright. Cleared back to `false` the moment the user actually
+    /// adjusts the rectangle via a handle/move drag (`mouseDragged`'s
+    /// crop-handle branch): from that point on the pending rectangle
+    /// reflects a deliberate choice, so a later double-click confirming it
+    /// is legitimate again, the same way it always safely is for
+    /// `activeTransform`'s own identity-rectangle double-click convention.
+    /// `cancelCrop()` resets this too, for the same "safe to call at any
+    /// point in the gesture" reason it resets every other piece of crop
+    /// state.
+    private var cropRectWasClamped = false
+
+    /// Hit-tests a view-space click/drag-start point against `rect`'s
+    /// handles and interior, at the current `zoomScale` — the crop tool's
+    /// counterpart to `hitTestTransformHandle(at:transform:)`, minus that
+    /// method's rotate-ring and Option+corner distort handling: `rect`
+    /// (`cropRect`) stays axis-aligned for the whole gesture (see its own
+    /// doc comment), so this reduces to exactly `hitTestTransformHandle`'s
+    /// own `rotation == 0`, no-distortion code path — corners/edges checked
+    /// first (within `transformHandleHitRadius`), a point inside the
+    /// rectangle otherwise is `.move`, and a point outside it entirely is
+    /// `nil`.
+    private func hitTestCropHandle(at point: NSPoint, rect: LayerTransform) -> CropHandle? {
+        let scale = CGFloat(zoomScale)
+        let (corners, edges) = CanvasView.transformHandlePoints(for: rect, scale: scale)
+        for corner in TransformCorner.allCases {
+            if let handlePoint = corners[corner], hypot(point.x - handlePoint.x, point.y - handlePoint.y) <= Self.transformHandleHitRadius {
+                return .corner(corner)
+            }
+        }
+        for edge in TransformEdge.allCases {
+            if let handlePoint = edges[edge], hypot(point.x - handlePoint.x, point.y - handlePoint.y) <= Self.transformHandleHitRadius {
+                return .edge(edge)
+            }
+        }
+        let centerView = CGPoint(x: rect.centerX * Double(scale), y: rect.centerY * Double(scale))
+        let halfWidth = rect.width / 2 * Double(scale)
+        let halfHeight = rect.height / 2 * Double(scale)
+        let dx = Double(point.x) - centerView.x
+        let dy = Double(point.y) - centerView.y
+        return (abs(dx) <= halfWidth && abs(dy) <= halfHeight) ? .move : nil
+    }
+
+    /// Abandons the pending crop rectangle without touching any pixels —
+    /// the crop tool's counterpart to `cancelLayerTransform()`. Resets every
+    /// piece of the crop gesture's state, including the initial-drag fields
+    /// (`cropDragStart`/`cropDragCurrent`), so it's safe to call at any
+    /// point in the gesture (mid rubber-band drag, mid handle drag, or with
+    /// a fully-formed pending rectangle) — used by `activeTool`'s own
+    /// `didSet`, `beginLayerTransform()` (both preempt the crop tool
+    /// entirely), `commitCrop()` (to clear its own state once the crop
+    /// lands for real), the crop tool's own Escape handling in
+    /// `keyDown(with:)`, and (issue #21 test-design review, via `isCropping`)
+    /// every `AppDelegate` call site that can swap `layerStack` out or
+    /// restore a different history snapshot out from under a pending crop:
+    /// `activateActiveDocument()`, `undo()`/`redo()`, `historyPanelView
+    /// .onJumpToIndex`, and `layerPanelView.willChangeActiveLayer`. Not
+    /// `private` for exactly that reason — `AppDelegate` needs to call it
+    /// directly, the same way it calls `cancelLayerTransform()`/
+    /// `cancelPenStroke()`.
+    func cancelCrop() {
+        cropDragStart = nil
+        cropDragCurrent = nil
+        cropRect = nil
+        cropDragHandle = nil
+        cropDragStartPoint = nil
+        cropDragStartRect = nil
+        cropRectWasClamped = false
+        needsDisplay = true
+    }
+
+    /// Confirms the pending crop rectangle: builds a brand-new `LayerStack`
+    /// sized to `cropRect`'s bounds (each corner rounded to the nearest
+    /// whole canvas pixel), with every existing layer's own pixels copied
+    /// across from the corresponding region of its current canvas. Pixels
+    /// the rectangle covers that fall outside the *original* canvas —
+    /// possible once a handle drag has pushed an edge past it, since
+    /// nothing in this file clamps `cropRect` to the canvas bounds, the same
+    /// way Photoshop's own crop tool lets you drag a handle outward to pad
+    /// the canvas with blank space — are simply left at the new canvas's
+    /// default transparent fill, the same "nothing to sample, leave the
+    /// destination untouched" rule `rasterizeTransform` already follows for
+    /// layer transforms.
+    ///
+    /// Unlike every other confirm-style method in this file
+    /// (`commitLayerTransform()`, `flushPenStroke()`, the selection tools'
+    /// `mouseUp`), this can't just mutate `layerStack`/its layers in place:
+    /// `LayerStack.width`/`height` are `let`, so a crop can only ever
+    /// produce a whole new `LayerStack` instance — `onLayerStackReplaced`
+    /// is what tells `AppDelegate` about that specifically; see its own doc
+    /// comment for why that has to be a dedicated callback rather than
+    /// folding into `onEditCompleted`.
+    ///
+    /// Also resets `selection` to `nil` (per the issue's own plan): a
+    /// selection mask built for the pre-crop canvas size no longer lines up
+    /// with the cropped one.
+    private func commitCrop() {
+        guard let cropRect else { return }
+        let corners = cropRect.corners
+        let minX = Int(corners.topLeft.x.rounded())
+        let minY = Int(corners.topLeft.y.rounded())
+        let maxX = Int(corners.bottomRight.x.rounded())
+        let maxY = Int(corners.bottomRight.y.rounded())
+        let newWidth = max(1, maxX - minX)
+        let newHeight = max(1, maxY - minY)
+
+        // `layer.canvas.rawPixel(x:y:)` already returns `nil` for any
+        // out-of-bounds coordinate (negative or past `width`/`height`), so
+        // the loop below relies on that alone rather than a redundant
+        // manual bounds check — same convention `rasterizeTransform` above
+        // already follows for its own "pixels outside the source, leave the
+        // destination untouched" rule.
+        let newLayers = layerStack.layers.map { layer -> Layer in
+            let newCanvas = PixelCanvas(width: newWidth, height: newHeight, background: .clear)
+            for y in 0..<newHeight {
+                for x in 0..<newWidth {
+                    guard let raw = layer.canvas.rawPixel(x: minX + x, y: minY + y) else { continue }
+                    let color = NSColor(
+                        deviceRed: Double(raw.r) / 255,
+                        green: Double(raw.g) / 255,
+                        blue: Double(raw.b) / 255,
+                        alpha: Double(raw.a) / 255
+                    )
+                    newCanvas.setPixel(x: x, y: y, color: color)
+                }
+            }
+            return Layer(canvas: newCanvas, name: layer.name, isVisible: layer.isVisible, opacity: layer.opacity)
+        }
+        let newStack = LayerStack(width: newWidth, height: newHeight, layers: newLayers, activeLayerIndex: layerStack.activeLayerIndex)
+
+        layerStack = newStack
+        invalidateIntrinsicContentSize()
+        selection = nil
+        cancelCrop()
+
+        onLayerStackReplaced?(newStack)
+        onLayerContentChanged?()
+        onEditCompleted?("切り抜き")
+        needsDisplay = true
+    }
+
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1149,6 +1407,68 @@ final class CanvasView: NSView {
             }
         }
 
+        // Crop tool rubber-band preview (issue #21): the very first drag,
+        // before any pending rectangle exists yet — same dashed rubber-band
+        // shape as the rectangle select tool's own drag preview above, just
+        // gated on `cropRect == nil` (once the drag ends, `mouseUp` promotes
+        // it into `cropRect`, and the block below takes over instead).
+        if activeTool == .crop, cropRect == nil, let start = cropDragStart, let current = cropDragCurrent {
+            let rect = NSRect(
+                x: min(start.x, current.x),
+                y: min(start.y, current.y),
+                width: abs(current.x - start.x),
+                height: abs(current.y - start.y)
+            )
+            if rect.width > 0 && rect.height > 0 {
+                context.setShouldAntialias(true)
+                context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+                context.setLineWidth(1)
+                context.setLineDash(phase: 0, lengths: [4, 3])
+                context.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
+            }
+        }
+
+        // Crop tool pending rectangle + 8-handle overlay (issue #21): the
+        // same 4-corner + 4-edge-midpoint handle layout `activeTransform`'s
+        // own preview draws above, minus a rotate ring (crop is
+        // axis-aligned only — see `CropHandle`'s doc comment) and minus any
+        // re-rasterized pixel preview, since cropping doesn't move or
+        // resample any pixels until it's actually confirmed — the ordinary
+        // composite already drawn at the top of this method is exactly what
+        // the cropped layers will keep, just clipped to this rectangle.
+        if activeTool == .crop, let cropRect {
+            let scale = CGFloat(zoomScale)
+            let (corners, edges) = CanvasView.transformHandlePoints(for: cropRect, scale: scale)
+            context.setShouldAntialias(true)
+            context.setStrokeColor(NSColor.systemBlue.cgColor)
+            context.setLineWidth(1)
+            context.setLineDash(phase: 0, lengths: [])
+            if let topLeft = corners[.topLeft], let topRight = corners[.topRight],
+               let bottomRight = corners[.bottomRight], let bottomLeft = corners[.bottomLeft] {
+                context.beginPath()
+                context.move(to: topLeft)
+                context.addLine(to: topRight)
+                context.addLine(to: bottomRight)
+                context.addLine(to: bottomLeft)
+                context.closePath()
+                context.strokePath()
+            }
+            let handleSize: CGFloat = 6
+            for point in Array(corners.values) + Array(edges.values) {
+                let handleRect = CGRect(
+                    x: point.x - handleSize / 2,
+                    y: point.y - handleSize / 2,
+                    width: handleSize,
+                    height: handleSize
+                )
+                context.setFillColor(NSColor.white.cgColor)
+                context.fill(handleRect)
+                context.setStrokeColor(NSColor.systemBlue.cgColor)
+                context.setLineWidth(1)
+                context.stroke(handleRect.insetBy(dx: 0.5, dy: 0.5))
+            }
+        }
+
         // Committed selection outline (issue #11): a static dashed
         // "marching ants"-style border around every selected region.
         // Animation is out of scope (round 1) — this is deliberately a
@@ -1201,7 +1521,11 @@ final class CanvasView: NSView {
         case .pencil: return "鉛筆"
         case .eraser: return "消しゴム"
         case .pen: return "ペン"
-        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect:
+        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop:
+            // `.crop`'s own `commitCrop()` fires `onEditCompleted?("切り抜き")`
+            // itself (issue #21), the same self-contained shape
+            // `flushPenStroke()`/`commitLayerTransform()` use — this lookup
+            // is never actually reached for it either.
             return nil
         }
     }
@@ -1246,11 +1570,11 @@ final class CanvasView: NSView {
             // before calling `paint(at:)` (issue #13). Kept only to satisfy
             // this switch's exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop:
             // Same as the magnifier above: these branch to their own
             // drag/combine handling in `mouseDown`/`mouseDragged`/`mouseUp`
-            // before calling `paint(at:)` (issue #11). Kept only to satisfy
-            // this switch's exhaustiveness.
+            // before calling `paint(at:)` (issue #11; `.crop` under issue
+            // #21). Kept only to satisfy this switch's exhaustiveness.
             return
         }
     }
@@ -1274,9 +1598,10 @@ final class CanvasView: NSView {
             // Same as `paint(at:)` above: the magnifier never drags into a
             // stroke (issue #13), this exists only for exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop:
             // Same as `paint(at:)` above: these never drag into a stroke
-            // (issue #11), this exists only for exhaustiveness.
+            // (issue #11; `.crop` under issue #21), this exists only for
+            // exhaustiveness.
             return
         }
     }
@@ -1504,6 +1829,27 @@ final class CanvasView: NSView {
             }
             return
         }
+        // Crop tool confirm/cancel (issue #21) — same Enter/Escape
+        // convention as the polygon tool's own handling just below, but
+        // gated on a pending `cropRect` existing rather than a non-empty
+        // vertex list. Known, deliberate gap (issue #21 review nit-1,
+        // locked in by
+        // `testCropTool_escapeDuringInitialRubberBandDragBeforeCropRectExists_isIgnoredByKeyDown`):
+        // Escape pressed *during* the very first rubber-band drag, before
+        // `mouseUp` has promoted it into `cropRect`, falls through to
+        // `super.keyDown(with:)` and does nothing — there is no in-progress
+        // rectangle yet for it to cancel.
+        if activeTool == .crop, cropRect != nil {
+            switch event.keyCode {
+            case 53: // Escape: cancel the pending crop, no canvas change.
+                cancelCrop()
+            case 36, 76: // Return / keypad Enter: confirm.
+                commitCrop()
+            default:
+                super.keyDown(with: event)
+            }
+            return
+        }
         // Only the polygon tool, and only mid-gesture, cares about Escape/
         // Return (issue #11 round 2) — every other key, and every other
         // tool, falls through to `super` unchanged.
@@ -1660,6 +2006,48 @@ final class CanvasView: NSView {
             // `Tool.magicWandSelect`), so its `onEditCompleted` fires right
             // here rather than in `mouseUp`.
             onEditCompleted?("選択範囲")
+            return
+        }
+        if activeTool == .crop {
+            let point = convert(event.locationInWindow, from: nil)
+            if let cropRect {
+                // A pending rectangle already exists (issue #21): hit-test
+                // its handles/interior, mirroring `activeTransform`'s own
+                // `mouseDown` handling above, minus the rotate-ring/Option+
+                // corner distort cases neither this tool nor
+                // `hitTestCropHandle` supports. A double-click on the
+                // rectangle's interior confirms outright, the same
+                // "done adjusting, apply it now" convention `activeTransform`
+                // already uses.
+                let handle = hitTestCropHandle(at: point, rect: cropRect)
+                // A double-click confirms outright — but only once the
+                // pending rectangle actually reflects a user-specified
+                // range, not the click-sized default `mouseUp` falls back to
+                // when the initial drag was too short to clear
+                // `transformMinimumSize` (issue #21 review must-1): a
+                // drag-less click immediately followed by the second tap of
+                // a double-click would otherwise land squarely inside that
+                // freshly-created minimum-size rectangle and auto-commit it
+                // with no confirmation ever shown — see
+                // `cropRectWasClamped`'s own doc comment. Falling through to
+                // the ordinary single-click handle-drag start below instead
+                // just lets the user keep adjusting it, exactly as any other
+                // click on the rectangle would.
+                if event.clickCount == 2, handle == .move, !cropRectWasClamped {
+                    commitCrop()
+                    return
+                }
+                cropDragHandle = handle
+                cropDragStartPoint = point
+                cropDragStartRect = cropRect
+                return
+            }
+            // No pending rectangle yet: starts a fresh rubber-band drag, the
+            // same shape as `rectangleSelect`'s own `mouseDown` (issue #11)
+            // — the dragged bounds seed `cropRect` once this drag ends, in
+            // `mouseUp`.
+            cropDragStart = point
+            cropDragCurrent = point
             return
         }
         if activeTool == .pen {
@@ -1826,6 +2214,54 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if let startRect = cropDragStartRect, let handle = cropDragHandle, let startPoint = cropDragStartPoint {
+            // A handle/move drag on the already-pending crop rectangle
+            // (issue #21) — same recompute-from-drag-start-plus-total-
+            // movement convention as `activeTransform`'s own handle drags
+            // above, reusing `resizeByCorner`/`resizeByEdge` outright since
+            // `cropRect` never carries any rotation for either to correct
+            // for (see `cropRect`'s own doc comment).
+            //
+            // Reaching here at all means the user is actively dragging a
+            // handle to adjust the rectangle (issue #21 review must-1) —
+            // even when `cropRect` started out click-sized (see
+            // `cropRectWasClamped`), it no longer counts as an unadjusted
+            // default once a real drag has touched it, so a later
+            // double-click confirming it becomes legitimate again.
+            cropRectWasClamped = false
+            let point = convert(event.locationInWindow, from: nil)
+            let scale = CGFloat(zoomScale)
+            let dx = Double((point.x - startPoint.x) / scale)
+            let dy = Double((point.y - startPoint.y) / scale)
+            switch handle {
+            case .move:
+                var rect = startRect
+                rect.centerX = startRect.centerX + dx
+                rect.centerY = startRect.centerY + dy
+                cropRect = rect
+            case .corner(let corner):
+                cropRect = CanvasView.resizeByCorner(corner, start: startRect, dx: dx, dy: dy, keepAspect: event.modifierFlags.contains(.shift))
+            case .edge(let edge):
+                cropRect = CanvasView.resizeByEdge(edge, start: startRect, dx: dx, dy: dy)
+            }
+            needsDisplay = true
+            return
+        }
+        if cropRect != nil {
+            // The drag started outside the rectangle/handles entirely —
+            // deliberately inert, mirroring `activeTransform`'s identical
+            // guard above.
+            return
+        }
+        if activeTool == .crop {
+            // The crop tool's very first drag (issue #21), before any
+            // pending rectangle exists yet — just records the current point
+            // for `draw(_:)`'s rubber-band preview; the actual rectangle
+            // isn't built until this drag ends, in `mouseUp`.
+            cropDragCurrent = convert(event.locationInWindow, from: nil)
+            needsDisplay = true
+            return
+        }
         if activeTool == .pen {
             // Stamps more dabs into `penStrokeBuffer` (issue #20); the real
             // active layer stays untouched until `mouseUp`'s
@@ -1965,6 +2401,57 @@ final class CanvasView: NSView {
             lastPixel = nil
             return
         }
+        if activeTool == .crop {
+            if let start = cropDragStart, let current = cropDragCurrent {
+                // Ends the crop tool's very first drag (issue #21): the
+                // dragged bounds become `cropRect`, so the *next* click
+                // starts adjusting it via handles instead of dragging out a
+                // brand new rectangle (see `mouseDown`'s own `if let
+                // cropRect` branch).
+                defer {
+                    cropDragStart = nil
+                    cropDragCurrent = nil
+                    needsDisplay = true
+                }
+                let p0 = CanvasView.pixelCoordinate(forPoint: start, zoomScale: zoomScale)
+                let p1 = CanvasView.pixelCoordinate(forPoint: current, zoomScale: zoomScale)
+                // Pixel index `x` occupies the continuous range `[x, x + 1)`
+                // (same convention the ellipse-select branch above
+                // documents), so the dragged rectangle's continuous bounds
+                // run from `min` to `max + 1` on each axis. Clamped to at
+                // least `transformMinimumSize` on each axis (same floor
+                // `resizeByCorner`/`resizeByEdge` already enforce for
+                // handle-driven resizes), so even a stray click with no real
+                // drag still produces a small, adjustable pending rectangle
+                // rather than a degenerate zero-area one.
+                let minX = min(p0.x, p1.x)
+                let maxX = max(p0.x, p1.x) + 1
+                let minY = min(p0.y, p1.y)
+                let maxY = max(p0.y, p1.y) + 1
+                let rawWidth = Double(maxX - minX)
+                let rawHeight = Double(maxY - minY)
+                let width = max(Self.transformMinimumSize, rawWidth)
+                let height = max(Self.transformMinimumSize, rawHeight)
+                // Recorded from the *raw*, pre-clamp extent (issue #21
+                // review must-1): a drag whose raw width or height already
+                // needed flooring up to `transformMinimumSize` means the
+                // user didn't really drag out a rectangle at all — see
+                // `cropRectWasClamped`'s own doc comment for why that
+                // disqualifies the very next double-click from
+                // auto-confirming.
+                cropRectWasClamped = rawWidth < Self.transformMinimumSize || rawHeight < Self.transformMinimumSize
+                cropRect = LayerTransform(centerX: Double(minX + maxX) / 2, centerY: Double(minY + maxY) / 2, width: width, height: height)
+                return
+            }
+            // Ends a handle/move drag on the already-pending rectangle
+            // (issue #21) — mirrors `activeTransform`'s own `mouseUp`
+            // above: never confirms by itself, just resets the drag state
+            // so the next `mouseDown` starts a fresh hit test.
+            cropDragHandle = nil
+            cropDragStartPoint = nil
+            cropDragStartRect = nil
+            return
+        }
         guard activeTool == .magnifier else {
             // Pencil/eraser strokes fire `onEditCompleted` here, at the
             // gesture's actual end, and only if something was actually
@@ -1972,8 +2459,8 @@ final class CanvasView: NSView {
             // eyedropper/polygon-select/magic-wand tools also reaches this
             // fallback (they handle their own gesture end elsewhere or take
             // no `mouseUp` action at all), but `editCompletedLabel` returns
-            // `nil` for those, so nothing fires. `.pen` never reaches here:
-            // it returns from its own branch above.
+            // `nil` for those, so nothing fires. `.pen`/`.crop` never reach
+            // here: they return from their own branches above.
             if paintedDuringGesture, let label = CanvasView.editCompletedLabel(for: activeTool) {
                 onEditCompleted?(label)
             }

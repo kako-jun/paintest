@@ -159,6 +159,18 @@ final class CanvasViewTests: XCTestCase {
         if view.isPenStrokeInProgress {
             view.flushPenStroke()
         }
+        // Same discard (not auto-commit) for a pending crop rectangle
+        // (issue #21 test-design review) — mirrors the real
+        // `AppDelegate.activateActiveDocument()`'s own `isCropping` check,
+        // which runs before the zoom/selection write-back and the
+        // `replaceLayerStack` swap below: `cropRect` holds pixel
+        // coordinates sized to the OUTGOING document's canvas, meaningless
+        // (and possibly out-of-bounds) against the incoming document's own,
+        // possibly differently-sized, canvas. See `isCropping`'s own doc
+        // comment.
+        if view.isCropping {
+            view.cancelCrop()
+        }
         previouslyDisplayed?.zoomScale = view.zoomScale
         // Selection write-back/restore, same pattern as zoom above and in
         // the real `AppDelegate.activateActiveDocument()` (issue #11).
@@ -4348,5 +4360,1371 @@ final class CanvasViewTests: XCTestCase {
         view.mouseUp(with: mouseUpEvent(at: point, in: window)) // no mouseDragged at all: zero-size drag
 
         XCTAssertEqual(labels, ["選択範囲"], "current implementation fires onEditCompleted even for a zero-size drag — see this test's doc comment")
+    }
+
+    // MARK: - Crop tool (issue #21 test-design pass)
+    //
+    // Covers the crop tool's own decision table (padding x multi-layer x
+    // active-layer position), the "pending crop rectangle survives across
+    // an interrupting operation" hazard fixed by `isCropping`/`cancelCrop()`
+    // (issue #21 test-design review), boundary values around
+    // `transformMinimumSize` and the canvas edges, and the usual
+    // error/null/state-machine/double-submit sweep this file already runs
+    // for every other tool. `Tool.crop`/`CanvasView.commitCrop()`'s own doc
+    // comments (and `ToolboxView`'s) describe the feature; this section
+    // exercises it.
+
+    /// The crop tool's very first rubber-band drag (issue #21) — same shape
+    /// as `dragRectangleSelect` above, just with no modifier flags (the crop
+    /// tool has no combine-mode concept). Ends with a *pending* rectangle,
+    /// not a commit: callers still need their own `keyDown(...)` (Return) or
+    /// double-click to actually confirm it.
+    private func dragOutCropRect(on view: CanvasView, fromCol: Int, fromRow: Int, toCol: Int, toRow: Int, zoomScale: Int) {
+        let window = view.window!
+        let start = windowPoint(forPixelCol: fromCol, row: fromRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: toCol, row: toRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+    }
+
+    // MARK: Normal path
+
+    func testCropTool_dragThenEnter_commitsCropToNewSmallerLayerStack() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale) // pixel columns/rows 2...5 inclusive = 4px each axis
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                let expected = before[y + 2][x + 2]
+                XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    func testCropTool_dragThenDoubleClickInterior_commitsSameResultAsEnter() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        // (4, 4) is this rectangle's own center — comfortably clear of every
+        // handle's hit radius (half-width/height is 8 *view* points at this
+        // zoom, well past transformHandleHitRadius's 6), so this
+        // unambiguously hits `.move`, and clickCount 2 on `.move` confirms.
+        let interior = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: interior, in: window, clickCount: 2))
+
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                let expected = before[y + 2][x + 2]
+                XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    func testCropTool_handleResizeAfterInitialDrag_commitsResizedRect() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        _ = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale) // pending rect: canvas (2,2)-(6,6)
+        // Grabs the now-pending rectangle's bottom-right corner (canvas
+        // (6, 6)) and drags it out to (8, 8), pinning the top-left corner
+        // at (2, 2) — same anchor-corner math `resizeByCorner` already uses
+        // for layer transforms (see e.g.
+        // testLayerTransform_dragBottomRightCornerToDoubleSize_...), reused
+        // as-is here since `cropRect` never carries rotation.
+        let cornerDown = transformWindowPoint(canvasX: 6, canvasY: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let cornerDrag = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: cornerDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: cornerDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: cornerDrag, in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        XCTAssertEqual(view.layerStack.width, 6, "the corner resize (2,2)-(6,6) -> (2,2)-(8,8) must widen the committed rect from 4 to 6, proving the handle-resize step actually changed what got committed")
+        XCTAssertEqual(view.layerStack.height, 6)
+    }
+
+    func testCropTool_interiorDrag_movesRectWithoutResizing_commitsMovedRegion() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale) // pending rect: canvas (2,2)-(6,6), centered at (4,4)
+        // Grabs the interior (well clear of every handle, same geometry
+        // note as testCropTool_dragThenDoubleClickInterior_... above) and
+        // drags it by a clean +1 canvas pixel on each axis.
+        let moveDown = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let moveDrag = windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: moveDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: moveDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: moveDrag, in: window))
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        XCTAssertEqual(view.layerStack.width, 4, "an interior move drag must not change the rectangle's size")
+        XCTAssertEqual(view.layerStack.height, 4)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                let expected = before[y + 3][x + 3]
+                XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    func testCropTool_commit_resetsSelectionToNil() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 3, y1: 3, width: 8, height: 8)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertNil(view.selection, "a selection mask built for the pre-crop canvas size no longer lines up with the cropped one")
+    }
+
+    func testCropTool_commit_preservesActiveLayerIndex_multiLayerMiddleActive() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.addLayer() // index 1, active
+        view.layerStack.addLayer() // index 2, active
+        view.layerStack.activeLayerIndex = 1 // middle of 3, deliberately not the layer addLayer left active
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.layers.count, 3, "precondition: crop must not drop or add layers")
+        XCTAssertEqual(view.layerStack.activeLayerIndex, 1, "commitCrop must seed the new stack's activeLayerIndex from the pre-crop one")
+    }
+
+    func testCropTool_commit_firesCallbacksInOrder_onLayerStackReplaced_thenOnEditCompletedWithLabel切り抜き() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        var events: [String] = []
+        view.onLayerStackReplaced = { _ in events.append("replaced") }
+        view.onEditCompleted = { label in events.append("edited:\(label)") }
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(events, ["replaced", "edited:切り抜き"], "onLayerStackReplaced must fire before onEditCompleted, so AppDelegate.document.layerStack already points at the cropped stack by the time recordHistoryCheckpoint(label:) reads it — see onLayerStackReplaced's own doc comment")
+    }
+
+    // MARK: Error paths
+
+    func testCropTool_mouseUpWithoutDrag_stillCreatesMinimumSizeRect_doesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window)) // no mouseDragged at all: zero-size drag
+
+        XCTAssertTrue(view.isCropping, "a click with no real drag must still produce a pending rectangle, not silently do nothing")
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit must not crash either
+        XCTAssertEqual(view.layerStack.width, 4, "a zero-size drag must clamp up to transformMinimumSize, not collapse to 0")
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    func testCropTool_doubleClickImmediatelyAfterUnadjustedMinimumSizeRect_doesNotAutoCommit() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        // First tap of a double-click: a plain click with no drag between
+        // mouseDown and mouseUp, exactly like
+        // testCropTool_mouseUpWithoutDrag_stillCreatesMinimumSizeRect_doesNotCrash
+        // above — mouseUp still promotes it into a minimum-size (4x4)
+        // pending rectangle centered on the click.
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        XCTAssertTrue(view.isCropping, "precondition: the drag-less click still produced a pending rectangle")
+        XCTAssertEqual(view.layerStack.width, 8, "precondition: nothing has been committed yet")
+
+        // Second tap, landing at essentially the same point: the freshly
+        // created rectangle's half-width/half-height (2 canvas px * 4 zoom
+        // = 8 view points) comfortably clears transformHandleHitRadius (6
+        // view points), so this click unambiguously hits `.move`, not a
+        // corner/edge handle — exactly the geometry issue #21 review
+        // must-1 identified as silently auto-committing before this fix.
+        view.mouseDown(with: mouseDownEvent(at: point, in: window, clickCount: 2))
+
+        XCTAssertTrue(view.isCropping, "an unadjusted, click-sized rectangle must not auto-commit on the very next double-click")
+        XCTAssertEqual(view.layerStack.width, 8, "the canvas must still be completely untouched — no destructive crop happened without the user ever seeing/adjusting a rectangle")
+        XCTAssertEqual(view.layerStack.height, 8)
+        assertCanvas(view, size: 8, matches: before)
+
+        // The pending crop must still be explicitly completable afterward
+        // (Return), proving this isn't stuck — just no longer
+        // auto-confirmed by an accidental double-click.
+        view.mouseUp(with: mouseUpEvent(at: point, in: window)) // resets the second click's own drag state
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    func testCropTool_handleDragAfterUnadjustedMinimumSizeRect_reenablesDoubleClickCommit() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        // Same drag-less click as the "does not auto-commit" test above:
+        // produces a click-sized, unadjusted 4x4 pending rectangle centered
+        // on (3.5, 3.5) — canvas corners (1.5,1.5)-(5.5,5.5).
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        XCTAssertTrue(view.isCropping, "precondition: the drag-less click still produced a pending rectangle")
+
+        // A real handle drag — grabs the bottom-right corner and pulls it
+        // out to (7.5, 7.5), pinning the top-left corner at (1.5, 1.5) —
+        // must count as the user actually adjusting the rectangle (issue
+        // #21 review must-1's "ハンドルドラッグで矩形を一度でも調整すれば"
+        // requirement), clearing the "still just an unadjusted click" state
+        // the double-click check above refuses to auto-commit from.
+        let cornerDown = transformWindowPoint(canvasX: 5.5, canvasY: 5.5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let cornerDrag = transformWindowPoint(canvasX: 7.5, canvasY: 7.5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: cornerDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: cornerDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: cornerDrag, in: window))
+        XCTAssertTrue(view.isCropping, "precondition: the handle drag only adjusts the pending rect, it doesn't commit by itself")
+
+        // A double-click on the now-adjusted rectangle's interior must
+        // confirm it normally, same as any other deliberately-dragged crop
+        // rectangle (testCropTool_dragThenDoubleClickInterior_commitsSameResultAsEnter).
+        let interior = transformWindowPoint(canvasX: 4.5, canvasY: 4.5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: interior, in: window, clickCount: 2))
+
+        XCTAssertFalse(view.isCropping, "a double-click after a real handle adjustment must commit, same as it always could")
+        XCTAssertEqual(view.layerStack.width, 6, "the corner drag (1.5,1.5)-(5.5,5.5) -> (1.5,1.5)-(7.5,7.5) must widen the committed rect to 6")
+        XCTAssertEqual(view.layerStack.height, 6)
+    }
+
+    func testCropTool_dragEntirelyOutsideCanvasBounds_commitProducesFullyTransparentLayerStack_doesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // opaque red, so any leaked pixel would be obviously wrong
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: -6, fromRow: -6, toCol: -2, toRow: -2, zoomScale: zoomScale) // entirely negative: fully outside the 8x8 canvas
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit must not crash
+
+        XCTAssertEqual(view.layerStack.width, 5)
+        XCTAssertEqual(view.layerStack.height, 5)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<5 {
+            for x in 0..<5 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.a, 0, "x=\(x) y=\(y) must be left at the new canvas's default transparent fill: every source pixel this rectangle covers falls outside the original 8x8 canvas")
+            }
+        }
+    }
+
+    func testCropTool_mouseDraggedWithoutPriorMouseDown_isNoOp_doesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window)) // no prior mouseDown at all
+
+        XCTAssertFalse(view.isCropping, "a mouseDragged with no prior mouseDown must not fabricate a pending crop rectangle")
+    }
+
+    func testCropTool_keyDown_returnWithNoPendingCropRect_isNoOp_doesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        var editCompletedCount = 0
+        view.onEditCompleted = { _ in editCompletedCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return, but no pending cropRect at all
+
+        XCTAssertEqual(editCompletedCount, 0, "Return with no pending crop rectangle must fall through to the default keyDown handling, not crash or fire a phantom commit")
+    }
+
+    func testCropTool_commitCrop_withOnLayerStackReplacedUnset_doesNotCrashAndStillUpdatesLayerStackLocally() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        XCTAssertNil(view.onLayerStackReplaced, "precondition: nobody has wired this callback up")
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit must not crash despite the nil callback
+
+        XCTAssertEqual(view.layerStack.width, 4, "CanvasView's own layerStack must still update locally even with nobody listening for the swap")
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    // MARK: Equivalence classes
+
+    func testCropTool_dragBelowMinimumSize_clampsToMinimum() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 3, fromRow: 3, toCol: 4, toRow: 4, zoomScale: zoomScale) // raw width/height = 2, well below the floor
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.width, 4, "a drag well below transformMinimumSize (4) must still clamp up to it")
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    func testCropTool_dragAtMinimumSize_staysExact() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 0, fromRow: 0, toCol: 3, toRow: 3, zoomScale: zoomScale) // raw width/height = 4, exactly the floor
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.width, 4, "a drag exactly at transformMinimumSize must land exactly there, with no extra padding")
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    func testCropTool_dragAboveMinimumSize_staysAsDragged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 6, toRow: 6, zoomScale: zoomScale) // raw width/height = 6
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.width, 6, "a drag comfortably above transformMinimumSize must be left exactly as dragged")
+        XCTAssertEqual(view.layerStack.height, 6)
+    }
+
+    func testCropTool_rectFullyInsideCanvas_noTransparentPadding() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // opaque green everywhere
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 0, fromRow: 0, toCol: 3, toRow: 3, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.a, 255, "x=\(x) y=\(y) must be fully opaque real data — the drag never left the original canvas")
+            }
+        }
+    }
+
+    func testCropTool_rectPartiallyOverflowing_partialPadding() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        // Bottom-right corner pushed past the canvas edge (columns/rows 8-9
+        // of a 0-7 canvas): the right/bottom edge of the cropped rect must
+        // be transparent padding, the rest real data.
+        dragOutCropRect(on: view, fromCol: 6, fromRow: 6, toCol: 9, toRow: 9, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "(0,0) maps to source (6,6), inside the original canvas")
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.a, 0, "(3,3) maps to source (9,9), past the original 8x8 canvas — must be transparent padding")
+    }
+
+    func testCropTool_rectFullyOutsideCanvas_allTransparent() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 12, fromRow: 12, toCol: 15, toRow: 15, zoomScale: zoomScale) // entirely past the positive edge
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.a, 0)
+    }
+
+    // MARK: Boundary values
+
+    func testCropTool_initialDrag_width3px_clampsToWidth4px() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 0, toCol: 4, toRow: 3, zoomScale: zoomScale) // x-span: cols 2...4 inclusive = 3px wide; y kept at 4px so only width is under test
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.width, 4, "a 3px-wide drag is below transformMinimumSize (4) and must clamp up to it")
+    }
+
+    func testCropTool_initialDrag_width4px_staysWidth4px() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 0, toCol: 5, toRow: 3, zoomScale: zoomScale) // x-span: cols 2...5 inclusive = 4px wide
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.width, 4, "a drag exactly at transformMinimumSize must not be padded any further")
+    }
+
+    func testCropTool_initialDrag_width5px_staysWidth5px() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 0, toCol: 6, toRow: 3, zoomScale: zoomScale) // x-span: cols 2...6 inclusive = 5px wide
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.width, 5, "a drag one pixel above transformMinimumSize must be left exactly as dragged, not rounded back down to 4")
+    }
+
+    /// `mouseUp`'s initial-drag branch computes `centerX`/`centerY` from the
+    /// drag's own `min`/`max` x/y — not from whichever endpoint happened to
+    /// be the literal mouseDown point — so a clamped-up-to-4px rectangle's
+    /// resulting position must depend only on the drag's span, never on
+    /// which direction the user dragged in. Locked in by comparing a
+    /// forward drag (mouseDown at the low column) against a reverse drag
+    /// (mouseDown at the high column) of the identical span: a hypothetical
+    /// implementation that instead anchored the clamped rectangle at the
+    /// literal drag-start point would diverge the moment the drag runs in
+    /// reverse.
+    func testCropTool_initialDrag_width3pxClampedTo4_isCenteredOnOriginalDragCenter_notAnchoredToDragStart() {
+        let zoomScale = 4
+
+        func committedCanvas(fromCol: Int, toCol: Int) -> [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] {
+            let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+            view.activeTool = .crop
+            let window = view.window!
+            _ = makeDistinctlyColoredCanvas(view: view, size: 8)
+            dragOutCropRect(on: view, fromCol: fromCol, fromRow: 0, toCol: toCol, toRow: 3, zoomScale: zoomScale)
+            view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+            let canvas = view.layerStack.activeLayer.canvas
+            var result: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+            for y in 0..<view.layerStack.height {
+                result.append((0..<view.layerStack.width).map { canvas.rawPixel(x: $0, y: y)! })
+            }
+            return result
+        }
+
+        let forward = committedCanvas(fromCol: 4, toCol: 6) // mouseDown at the LOW column (x-span cols 4...6 = 3px, clamps to 4)
+        let reverse = committedCanvas(fromCol: 6, toCol: 4) // mouseDown at the HIGH column, identical span
+
+        XCTAssertEqual(forward.count, reverse.count)
+        for y in 0..<forward.count {
+            XCTAssertEqual(forward[y].count, reverse[y].count)
+            for x in 0..<forward[y].count {
+                XCTAssertEqual(forward[y][x].r, reverse[y][x].r, "x=\(x) y=\(y) red — the clamped rectangle must depend only on the drag's min/max span, not on which endpoint was the literal mouseDown point")
+                XCTAssertEqual(forward[y][x].g, reverse[y][x].g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(forward[y][x].b, reverse[y][x].b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(forward[y][x].a, reverse[y][x].a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    func testCommitCrop_sourcePixelAtMinusOne_isTransparent() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: -1, fromRow: 0, toCol: 2, toRow: 3, zoomScale: zoomScale) // minX = -1
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.a, 0, "new-canvas x=0 maps to source x=-1, one pixel before the canvas's left edge — must be transparent padding")
+    }
+
+    func testCommitCrop_sourcePixelAtZero_isCopied() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 0, fromRow: 0, toCol: 3, toRow: 3, zoomScale: zoomScale) // minX = 0, the canvas's own left edge
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.a, 255, "new-canvas x=0 maps to source x=0, the canvas's own leftmost column — must be real, copied data")
+    }
+
+    func testCommitCrop_sourcePixelAtOne_isCopied() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 0, toCol: 4, toRow: 3, zoomScale: zoomScale) // minX = 1
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.a, 255, "new-canvas x=0 maps to source x=1, one pixel in from the canvas's left edge — still real, copied data")
+    }
+
+    func testCommitCrop_sourcePixelAtWidthMinusOne_isCopied() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 4, fromRow: 0, toCol: 7, toRow: 3, zoomScale: zoomScale) // maxX = 8, so the rightmost sampled source column is 7 (width - 1)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        let rightmostColumn = view.layerStack.width - 1
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: rightmostColumn, y: 0)?.a, 255, "the new canvas's rightmost column maps to source x=7, the original canvas's own rightmost column — must be real, copied data")
+    }
+
+    func testCommitCrop_sourcePixelAtWidth_isTransparent() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 5, fromRow: 0, toCol: 8, toRow: 3, zoomScale: zoomScale) // maxX = 9, so the rightmost sampled source column is 8 (== width, one past the last valid index)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        let rightmostColumn = view.layerStack.width - 1
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: rightmostColumn, y: 0)?.a, 0, "the new canvas's rightmost column maps to source x=8 — rawPixel is only valid for x < width (8), so this must be transparent padding")
+    }
+
+    func testCommitCrop_sourcePixelAtWidthPlusOne_isTransparent() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 6, fromRow: 0, toCol: 9, toRow: 3, zoomScale: zoomScale) // maxX = 10, so the rightmost sampled source column is 9 (width + 1)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        let rightmostColumn = view.layerStack.width - 1
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: rightmostColumn, y: 0)?.a, 0, "the new canvas's rightmost column maps to source x=9, two past the last valid index — must be transparent padding")
+    }
+
+    func testCommitCrop_multiLayer_partialOverflow_realDataAndPaddingBoundaryAlignsAcrossAllLayers() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // bottom layer: opaque red
+        view.layerStack.addLayer() // index 1, becomes active
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1)) // top layer: opaque blue
+        view.activeTool = .crop
+        let window = view.window!
+
+        // Same overflow shape as testCropTool_rectPartiallyOverflowing_partialPadding
+        // above — this time checked against BOTH layers, since commitCrop()
+        // must apply the exact same destination bounds to every layer, not
+        // just the active one.
+        dragOutCropRect(on: view, fromCol: 6, fromRow: 6, toCol: 9, toRow: 9, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.layers.count, 2, "precondition: both layers survive the crop")
+        let bottom = view.layerStack.layers[0].canvas
+        let top = view.layerStack.layers[1].canvas
+        // (0,0) maps to source (6,6), inside the original 8x8 canvas on both layers.
+        XCTAssertEqual(bottom.rawPixel(x: 0, y: 0)?.a, 255, "bottom layer (0,0) must be real, copied data")
+        XCTAssertEqual(top.rawPixel(x: 0, y: 0)?.a, 255, "top layer (0,0) must be real, copied data too — same boundary as the bottom layer")
+        // (3,3) maps to source (9,9), past the original canvas on both layers.
+        XCTAssertEqual(bottom.rawPixel(x: 3, y: 3)?.a, 0, "bottom layer (3,3) must be transparent padding")
+        XCTAssertEqual(top.rawPixel(x: 3, y: 3)?.a, 0, "top layer (3,3) must be transparent padding too — same boundary as the bottom layer")
+    }
+
+    // MARK: Null/unset callbacks
+
+    func testCropTool_onLayerStackReplacedNil_commitCropDoesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        XCTAssertNil(view.onLayerStackReplaced, "precondition: unset")
+        var editCompletedLabels: [String] = []
+        view.onEditCompleted = { editCompletedLabels.append($0) }
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // must not crash despite onLayerStackReplaced being nil
+
+        XCTAssertEqual(editCompletedLabels, ["切り抜き"], "a nil onLayerStackReplaced must not stop the rest of commitCrop from running — onEditCompleted must still fire")
+    }
+
+    func testCropTool_onEditCompletedNil_commitCropDoesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        XCTAssertNil(view.onEditCompleted, "precondition: unset")
+        var replacedStacks: [LayerStack] = []
+        view.onLayerStackReplaced = { replacedStacks.append($0) }
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // must not crash despite onEditCompleted being nil
+
+        XCTAssertEqual(replacedStacks.count, 1, "a nil onEditCompleted must not stop the rest of commitCrop from running — onLayerStackReplaced must still fire")
+    }
+
+    // MARK: Decision table A: padding x multi-layer x active-layer position (issue #21 test-design review)
+    //
+    // commitCrop() crops every layer unconditionally, visible or not — see
+    // its own doc comment's "the loop below relies on that alone" note.
+
+    func testCommitCrop_decisionTableA1_singleLayer_fullyInsideCanvas_allRealData() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale) // fully inside the 8x8 canvas
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.layers.count, 1)
+        XCTAssertEqual(view.layerStack.activeLayerIndex, 0)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.a, 255, "x=\(x) y=\(y) must be real, fully opaque data — every pixel of this rectangle is inside the original canvas")
+            }
+        }
+    }
+
+    func testCommitCrop_decisionTableA2_multiLayer_threeDistinctContents_activeFirst_eachLayerKeepsItsOwnContentOnly() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // layer 0: red
+        view.layerStack.addLayer() // index 1
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // layer 1: green
+        view.layerStack.addLayer() // index 2
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1)) // layer 2: blue
+        view.layerStack.activeLayerIndex = 0 // active = first layer (this row's own column)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale) // fully inside: no padding to muddy the comparison
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.layers.count, 3)
+        func rgb(_ layer: Layer) -> (r: UInt8, g: UInt8, b: UInt8)? {
+            guard let p = layer.canvas.rawPixel(x: 0, y: 0) else { return nil }
+            return (p.r, p.g, p.b)
+        }
+        XCTAssertEqual(rgb(view.layerStack.layers[0])?.r, 255, "layer 0 must stay red — not mixed with layer 1/2's own colors")
+        XCTAssertEqual(rgb(view.layerStack.layers[1])?.g, 255, "layer 1 must stay green")
+        XCTAssertEqual(rgb(view.layerStack.layers[2])?.b, 255, "layer 2 must stay blue")
+    }
+
+    func testCommitCrop_decisionTableA3_multiLayer_topLeftOverflow_activeMiddle_paddingOnTopLeftOnly_activeIndexPreserved() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // layer 0
+        view.layerStack.addLayer() // layer 1
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.addLayer() // layer 2
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.activeLayerIndex = 1 // middle of 3
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: -2, fromRow: -2, toCol: 1, toRow: 1, zoomScale: zoomScale) // top-left corner pushed off the canvas
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.activeLayerIndex, 1, "commitCrop must preserve the pre-crop activeLayerIndex")
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 0, "top-left of the new canvas maps to source (-2,-2), off-canvas — must be transparent padding")
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.a, 255, "bottom-right of the new canvas maps to source (1,1), inside the original canvas — must be real data, correctly offset")
+    }
+
+    func testCommitCrop_decisionTableA4_multiLayer_bottomRightOverflow_activeLast_paddingOnBottomRightOnly() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // layer 0
+        view.layerStack.addLayer() // layer 1
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.addLayer() // layer 2, becomes active (the last of 3)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        XCTAssertEqual(view.layerStack.activeLayerIndex, 2, "precondition: the last-added layer is active")
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 6, fromRow: 6, toCol: 9, toRow: 9, zoomScale: zoomScale) // bottom-right corner pushed off the canvas
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.activeLayerIndex, 2)
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "top-left of the new canvas maps to source (6,6), inside the original canvas")
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.a, 0, "bottom-right of the new canvas maps to source (9,9), off-canvas — must be transparent padding")
+    }
+
+    func testCommitCrop_decisionTableA5_multiLayer_allFourSidesOverflow_activeMiddle_originalImageSurroundedByPadding() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 4, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // layer 0
+        view.layerStack.addLayer() // layer 1
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.addLayer() // layer 2
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.activeLayerIndex = 1
+        view.activeTool = .crop
+        let window = view.window!
+
+        // The crop rect extends 2px past every edge of the 4x4 canvas: source
+        // (-2,-2)-(6,6) onto a 4x4 canvas.
+        dragOutCropRect(on: view, fromCol: -2, fromRow: -2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.width, 8)
+        XCTAssertEqual(view.layerStack.height, 8)
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 0, "the new canvas's own corner is padding — outside every original edge")
+        XCTAssertEqual(canvas.rawPixel(x: 4, y: 4)?.a, 255, "source (2,2), inside the original 4x4 image, must be real data — the original image surrounded by padding")
+        XCTAssertEqual(canvas.rawPixel(x: 7, y: 7)?.a, 0, "the new canvas's opposite corner is padding too")
+    }
+
+    func testCommitCrop_decisionTableA6_singleLayer_completelyOutsideCanvas_entireNewCanvasTransparent_doesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 6, height: 6, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 1, blue: 0, alpha: 1)) // opaque yellow
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 20, fromRow: 20, toCol: 23, toRow: 23, zoomScale: zoomScale) // nowhere near the 6x6 canvas
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // must not crash
+
+        XCTAssertEqual(view.layerStack.layers.count, 1)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<view.layerStack.height {
+            for x in 0..<view.layerStack.width {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.a, 0, "x=\(x) y=\(y) must be transparent — the whole cropped rectangle fell outside the original 6x6 canvas")
+            }
+        }
+    }
+
+    func testCommitCrop_decisionTableA7_multiLayer_oneInvisibleLayer_stillGetsCroppedLikeEveryOther() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // layer 0
+        view.layerStack.addLayer() // layer 1
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.addLayer() // layer 2, becomes active
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.setVisibility(false, at: 1) // layer 1: invisible, and NOT the active layer (layer 2 is)
+        XCTAssertNotEqual(view.layerStack.activeLayerIndex, 1, "precondition: the invisible layer isn't the active one")
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.layers.count, 3, "precondition: the invisible layer must survive the crop, not be dropped")
+        XCTAssertFalse(view.layerStack.layers[1].isVisible, "the invisible layer must stay invisible after the crop")
+        XCTAssertEqual(view.layerStack.layers[1].canvas.rawPixel(x: 0, y: 0)?.a, 255, "the invisible layer's own pixels must still be actually cropped, byte for byte, same as every visible layer — commitCrop() doesn't special-case visibility")
+    }
+
+    func testCommitCrop_decisionTableA8_multiLayer_differingOpacity_opacityPreservedAcrossCrop() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // layer 0
+        view.layerStack.setOpacity(0.5, at: 0)
+        view.layerStack.addLayer() // layer 1
+        view.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        view.layerStack.setOpacity(0.25, at: 1)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 6, fromRow: 6, toCol: 9, toRow: 9, zoomScale: zoomScale) // right/bottom overflow
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.layers[0].opacity, 0.5, accuracy: 0.0001, "layer 0's opacity must carry over unchanged")
+        XCTAssertEqual(view.layerStack.layers[1].opacity, 0.25, accuracy: 0.0001, "layer 1's opacity must carry over unchanged too")
+    }
+
+    // MARK: Decision table B: pending crop x interrupting operation, corrected post-fix expectations
+    // (issue #21 test-design review)
+    //
+    // `AppDelegate` itself can't be unit tested directly (see
+    // `activate(_:previouslyDisplayed:on:)`'s own doc comment above), so
+    // these reproduce the exact cancel protocol each of `AppDelegate.undo()`/
+    // `redo()`, `historyPanelView.onJumpToIndex`, `activateActiveDocument()`
+    // (via `activate(...)`), and `layerPanelView.willChangeActiveLayer`
+    // already follow, directly against `CanvasView` + `HistoryManager`.
+
+    func testUndo_midCropGesture_cancelsCropBeforeApplyingUndo() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 8, height: 8, background: .white))
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+        view.activeTool = .crop
+
+        // A prior, completed edit — the checkpoint undo should actually land on.
+        document.layerStack.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+        document.history.record(document.layerStack, label: "鉛筆")
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending")
+
+        // Mirrors AppDelegate.undo()'s own ordering: cancel any pending crop
+        // BEFORE applying the restored snapshot.
+        if view.isCropping { view.cancelCrop() }
+        guard let restored = document.history.undo() else {
+            XCTFail("expected an undo checkpoint")
+            return
+        }
+        view.replaceLayerStack(restored.layerStack)
+
+        XCTAssertFalse(view.isCropping, "undo must cancel the pending crop rectangle")
+        XCTAssertEqual(view.layerStack.width, 8, "the restored snapshot must keep its own original size — an auto-committed crop would have shrunk it")
+        XCTAssertEqual(restored.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 255, "the restored snapshot is the pre-\"鉛筆\" \"初期状態\" entry — untouched by the never-committed crop")
+    }
+
+    func testRedo_midCropGesture_cancelsCropBeforeApplyingRedo() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 8, height: 8, background: .white))
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+
+        document.layerStack.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+        document.history.record(document.layerStack, label: "鉛筆")
+        _ = document.history.undo() // so there's something left to redo
+
+        view.activeTool = .crop
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending")
+
+        if view.isCropping { view.cancelCrop() }
+        guard let restored = document.history.redo() else {
+            XCTFail("expected a redo checkpoint")
+            return
+        }
+        view.replaceLayerStack(restored.layerStack)
+
+        XCTAssertFalse(view.isCropping, "redo must cancel the pending crop rectangle")
+        XCTAssertEqual(view.layerStack.width, 8, "the redone snapshot must keep its own original size — an auto-committed crop would have shrunk it")
+        XCTAssertEqual(restored.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 0, "the redone snapshot is the \"鉛筆\" entry, with the pixel actually painted")
+    }
+
+    func testHistoryJump_midCropGesture_cancelsCropBeforeJumping() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 8, height: 8, background: .white))
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+        view.activeTool = .crop
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending")
+
+        // Mirrors AppDelegate's historyPanelView.onJumpToIndex: a jump
+        // swaps in a whole different, unrelated snapshot, so the pending
+        // crop is cancelled, not auto-committed.
+        if view.isCropping { view.cancelCrop() }
+        guard let jumped = document.history.jump(to: 0) else {
+            XCTFail("expected the \"初期状態\" entry at index 0")
+            return
+        }
+        view.replaceLayerStack(jumped.layerStack)
+
+        XCTAssertFalse(view.isCropping, "a history jump must cancel the pending crop rectangle")
+        XCTAssertEqual(view.layerStack.width, 8, "the jumped-to snapshot must keep its own original size — an auto-committed crop would have shrunk it")
+    }
+
+    func testDocumentTabSwitch_midCropGesture_cancelsCropBeforeSwitching_doesNotLeakIntoIncomingDocument() {
+        let zoomScale = 4
+        // Deliberately different sizes: docA 8x8, docB 5x5 — a cropRect
+        // built against docA's canvas would be nonsensical (and possibly
+        // out-of-bounds) if it were ever allowed to survive onto docB. No
+        // existing helper builds two differently-sized documents for a tab
+        // switch, so both `Document`s are constructed inline here, the same
+        // way testZoom_perDocument_staysIndependentAcrossTabSwitches above
+        // already does (just with different width/height arguments), reusing
+        // the shared `activate(_:previouslyDisplayed:on:)` helper (now
+        // extended with the crop-cancel step) to reproduce
+        // AppDelegate.activateActiveDocument()'s tab-switch protocol.
+        let docA = Document(layerStack: LayerStack(width: 8, height: 8, background: .white), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 5, height: 5, background: .white), displayName: "b")
+        docB.layerStack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0.5, blue: 0, alpha: 1)) // solid orange, distinct from docA's plain white
+        var beforeB: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<5 { beforeB.append((0..<5).map { docB.layerStack.activeLayer.canvas.rawPixel(x: $0, y: y)! }) }
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(docA.layerStack)
+        view.activeTool = .crop
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending on docA")
+
+        activate(docB, previouslyDisplayed: docA, on: view) // switch tabs WITHOUT ever confirming the crop
+
+        XCTAssertFalse(view.isCropping, "switching documents must cancel the pending crop rectangle, not auto-commit or carry it over")
+        XCTAssertEqual(view.layerStack.width, 5, "the displayed canvas must now be docB's own 5x5 size")
+        XCTAssertEqual(view.layerStack.height, 5)
+        for y in 0..<5 {
+            for x in 0..<5 {
+                let actual = docB.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, beforeB[y][x].r, "docB x=\(x) y=\(y) red must be untouched by a crop that belonged to docA")
+                XCTAssertEqual(actual?.g, beforeB[y][x].g, "docB x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, beforeB[y][x].b, "docB x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, beforeB[y][x].a, "docB x=\(x) y=\(y) alpha")
+            }
+        }
+        // docA itself must be untouched too — the crop was cancelled, not
+        // silently applied before the switch.
+        XCTAssertEqual(docA.layerStack.width, 8, "docA's own size must be untouched by the cancelled crop")
+        XCTAssertEqual(docA.layerStack.height, 8)
+    }
+
+    func testLayerPanelActiveLayerSwitch_midCropGesture_cancelsCrop() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.addLayer() // a second layer to switch to
+        view.activeTool = .crop
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending")
+
+        // Mirrors AppDelegate's layerPanelView.willChangeActiveLayer
+        // closure: cancels any pending crop before the active layer
+        // actually changes.
+        if view.isCropping { view.cancelCrop() }
+        view.layerStack.activeLayerIndex = 0
+
+        XCTAssertFalse(view.isCropping, "switching the active layer must cancel the pending crop rectangle")
+    }
+
+    func testLayerPanelAddRemoveReorder_midCropGesture_commitCropSelfHealsAgainstCurrentLayerSet() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending")
+
+        // Unlike undo/redo/history-jump/tab-switch/layer-switch above,
+        // add/remove/reorder never swap out layerStack itself or change its
+        // size — only layerStack.layers/activeLayerIndex — so no cancel is
+        // needed for any of them; commitCrop() reads layerStack.layers fresh
+        // at commit time and just picks up whatever is there. (Issue #21
+        // review should-3: this test used to only actually exercise Add,
+        // despite its own name claiming all three — Remove/Reorder are
+        // exercised below too now.)
+        view.layerStack.addLayer(name: "追加1")
+        view.layerStack.addLayer(name: "追加2")
+        XCTAssertTrue(view.isCropping, "adding a layer must not cancel the pending crop — no cancel is needed for this call site")
+
+        // Remove: drop the original background layer, leaving only the two
+        // added above — commitCrop() must not choke on a layerStack.layers
+        // shorter than it was when the crop gesture began.
+        view.layerStack.removeLayer(at: 0)
+        XCTAssertTrue(view.isCropping, "removing a layer must not cancel the pending crop — no cancel is needed for this call site")
+        XCTAssertEqual(view.layerStack.layers.map(\.name), ["追加1", "追加2"], "precondition: removal left exactly the two added layers, in their original order")
+
+        // Reorder: swap the two remaining layers — commitCrop() must
+        // preserve whatever order layers is in at commit time, not some
+        // order captured back when the crop gesture started.
+        view.layerStack.moveLayer(from: 0, to: 1)
+        XCTAssertTrue(view.isCropping, "reordering layers must not cancel the pending crop — no cancel is needed for this call site")
+        XCTAssertEqual(view.layerStack.layers.map(\.name), ["追加2", "追加1"], "precondition: the reorder actually swapped the two layers")
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit must not crash
+
+        XCTAssertEqual(view.layerStack.layers.count, 2, "the add-then-remove left exactly 2 layers, and both must survive the commit, each cropped too")
+        XCTAssertEqual(view.layerStack.layers.map(\.name), ["追加2", "追加1"], "the committed stack must reflect the post-reorder layer order, proving commitCrop() reads layers fresh at commit time rather than some snapshot from when the crop gesture began")
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    func testAdjustmentDialogOpen_midCropGesture_pendingCropRectSurvivesUntouched() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending")
+
+        // Mirrors AppDelegate.commitAnyPendingLayerEdits(), which only ever
+        // commits/flushes an in-progress transform or pen stroke before an
+        // adjustment dialog opens — a pending crop rectangle is
+        // deliberately left alone, so the user can pick the dialog back up
+        // and continue adjusting the crop afterward.
+        if view.isTransforming { view.commitLayerTransform() }
+        if view.isPenStrokeInProgress { view.flushPenStroke() }
+
+        XCTAssertTrue(view.isCropping, "opening an adjustment dialog must leave the pending crop rectangle untouched")
+        XCTAssertEqual(view.layerStack.width, 8, "the crop must still be uncommitted — the canvas itself must be untouched")
+        XCTAssertEqual(view.layerStack.height, 8)
+
+        // The pending crop must still be completable afterward, proving it
+        // wasn't silently corrupted by being left alone.
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    // MARK: State transitions
+
+    func testCropTool_dragStart_toHandleAdjust_toCommit_fullLifecycle() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        // Stage 1: drag out the initial rectangle, canvas (2,2)-(6,6).
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a pending rectangle exists after the initial drag")
+
+        // Stage 2: grab the bottom-right corner and drag it out to (8,8),
+        // pinning the top-left corner at (2,2).
+        let cornerDown = transformWindowPoint(canvasX: 6, canvasY: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let cornerDrag = transformWindowPoint(canvasX: 8, canvasY: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: cornerDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: cornerDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: cornerDrag, in: window))
+
+        // Stage 3: confirm.
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertFalse(view.isCropping, "commit must clear the pending rectangle")
+        XCTAssertEqual(view.layerStack.width, 6)
+        XCTAssertEqual(view.layerStack.height, 6)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<6 {
+            for x in 0..<6 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                let expected = before[y + 2][x + 2]
+                XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    func testCropTool_dragStart_toEscape_cancelsWithoutTouchingPixelsOrHistory() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+        var editCompletedCount = 0
+        view.onEditCompleted = { _ in editCompletedCount += 1 }
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a pending rectangle exists")
+
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape: cancel
+
+        XCTAssertFalse(view.isCropping)
+        XCTAssertEqual(view.layerStack.width, 8, "Escape must leave the canvas completely untouched")
+        XCTAssertEqual(view.layerStack.height, 8)
+        XCTAssertEqual(editCompletedCount, 0, "a cancelled crop must not fire onEditCompleted, so it never reaches history")
+        assertCanvas(view, size: 8, matches: before)
+    }
+
+    func testCropTool_pendingRect_toolSwitchAway_cancelsCrop() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a pending rectangle exists")
+
+        view.activeTool = .pencil
+
+        XCTAssertFalse(view.isCropping, "switching tools away from crop must cancel the pending rectangle")
+        XCTAssertEqual(view.layerStack.width, 8, "the canvas must be untouched")
+    }
+
+    func testCropTool_pendingRect_beginLayerTransform_cancelsCrop() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a pending rectangle exists")
+
+        view.beginLayerTransform()
+
+        XCTAssertFalse(view.isCropping, "entering transform mode must cancel the pending crop rectangle")
+        XCTAssertTrue(view.isTransforming, "entering transform mode itself must still go through normally")
+    }
+
+    func testCropTool_afterCancel_startsCleanNewCropThatCommitsNormally() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+
+        dragOutCropRect(on: view, fromCol: 0, fromRow: 0, toCol: 3, toRow: 3, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape: cancel the first attempt
+        XCTAssertFalse(view.isCropping, "precondition: the first attempt was cancelled cleanly")
+
+        // A fresh crop, at a different position, must work exactly as if
+        // the cancelled attempt had never happened.
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                let expected = before[y + 2][x + 2]
+                XCTAssertEqual(actual?.r, expected.r, "x=\(x) y=\(y) red")
+                XCTAssertEqual(actual?.g, expected.g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, expected.b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, expected.a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    /// `keyDown`'s crop-tool branch is gated on `cropRect != nil` — before
+    /// the very first drag ends (`mouseUp`), there's no `cropRect` yet for
+    /// Escape to cancel, so it falls straight through to `super`: a
+    /// documented gap, not a genuine cancel of the still-live rubber-band
+    /// drag.
+    func testCropTool_escapeDuringInitialRubberBandDragBeforeCropRectExists_isIgnoredByKeyDown() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let mid = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: mid, in: window))
+        XCTAssertFalse(view.isCropping, "precondition: mid rubber-band drag, before mouseUp promotes it into a real cropRect")
+
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape
+
+        XCTAssertFalse(view.isCropping, "still no cropRect — Escape had nothing of the crop tool's own to act on")
+        // Finishing the still-live rubber-band drag normally afterward
+        // proves Escape didn't silently reset cropDragStart/cropDragCurrent
+        // either.
+        view.mouseUp(with: mouseUpEvent(at: mid, in: window))
+        XCTAssertTrue(view.isCropping, "the rubber-band drag must still have been live and completable — Escape did not cancel it")
+    }
+
+    // MARK: Double-submit / re-execution
+
+    func testCropTool_doubleEnterPress_secondPressIsNoOp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        var editCompletedLabels: [String] = []
+        view.onEditCompleted = { editCompletedLabels.append($0) }
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commits
+        XCTAssertEqual(editCompletedLabels, ["切り抜き"], "precondition: the first Return committed once")
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return again, with cropRect already nil
+
+        XCTAssertEqual(editCompletedLabels, ["切り抜き"], "a second Return with no pending crop must be a no-op, not a second commit")
+        XCTAssertEqual(view.layerStack.width, 4, "the canvas must not be cropped a second time")
+    }
+
+    func testCropTool_escapeThenEnterAgain_secondEnterIsNoOp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        var editCompletedLabels: [String] = []
+        view.onEditCompleted = { editCompletedLabels.append($0) }
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 53, in: window)) // Escape: cancel
+        XCTAssertFalse(view.isCropping, "precondition: cancelled")
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return, with cropRect already nil after the cancel
+
+        XCTAssertTrue(editCompletedLabels.isEmpty, "Return after Escape must not resurrect and commit the cancelled rectangle")
+        XCTAssertEqual(view.layerStack.width, 8, "the canvas must be untouched")
+    }
+
+    func testCropTool_mouseDownTwiceWithoutInterveningMouseUp_onPendingRect_doesNotCorruptDragState() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 2, fromRow: 2, toCol: 5, toRow: 5, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a pending rectangle exists")
+
+        // First mouseDown grabs the bottom-right corner...
+        let cornerPoint = transformWindowPoint(canvasX: 6, canvasY: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: cornerPoint, in: window))
+        // ...but no matching mouseUp arrives before a second mouseDown, this
+        // time on the rectangle's interior (a `.move` hit) — the second
+        // mouseDown must cleanly overwrite the drag state with its own
+        // handle, not leave some corrupted mix of both.
+        let interiorPoint = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: interiorPoint, in: window))
+
+        let dragPoint = windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window))
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        // If the second mouseDown had cleanly taken over, this is a plain
+        // +1/+1 move, unchanged 4x4 size (see
+        // testCropTool_interiorDrag_movesRectWithoutResizing_...); a
+        // corrupted mix with the first mouseDown's corner-grab would
+        // instead resize.
+        XCTAssertEqual(view.layerStack.width, 4, "the second mouseDown must have cleanly taken over as a move, not resize")
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    // MARK: Light doesNotCrash sweep
+
+    func testCropTool_dragFromNegativeOutOfCanvasCoordinates_doesNotCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        // Window x/y both negative — same "off the top-left of the canvas
+        // entirely" scenario
+        // testMouseUp_magnifierDragFromNegativeOutOfCanvasCoordinates_doesNotCrash
+        // already covers for the magnifier tool — must not crash for the
+        // crop tool's own rubber-band drag either.
+        dragOutCropRect(on: view, fromCol: -8, fromRow: -8, toCol: -4, toRow: -4, zoomScale: zoomScale)
+
+        XCTAssertTrue(view.isCropping, "an out-of-canvas drag must still resolve to a valid pending rectangle, not crash or silently do nothing")
+
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit must not crash either
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    // MARK: Past accident patterns
+
+    /// `cropRect`'s own doc comment describes reusing `LayerTransform` purely
+    /// as a convenient "rectangle in canvas pixel space" value type — this
+    /// locks in that the reuse is genuinely inert: an ordinary layer
+    /// transform (issue #9) run after a completed crop must still round-trip
+    /// byte-exact, proving `cropRect`'s state never leaks into (or shares any
+    /// accidental identity with) `activeTransform`'s.
+    func testCommitCrop_doesNotMutateLayerTransformRoundTripBehavior_forUnrelatedTransformGesture() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        let window = view.window!
+
+        view.activeTool = .crop
+        dragOutCropRect(on: view, fromCol: 1, fromRow: 1, toCol: 4, toRow: 4, zoomScale: zoomScale)
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+        XCTAssertEqual(view.layerStack.width, 4, "precondition: the crop actually committed")
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<4 { for x in 0..<4 { canvas.setPixel(x: x, y: y, color: NSColor(deviceRed: Double(x) / 3, green: Double(y) / 3, blue: 0.5, alpha: 1)) } }
+        var before: [[(r: UInt8, g: UInt8, b: UInt8, a: UInt8)]] = []
+        for y in 0..<4 { before.append((0..<4).map { canvas.rawPixel(x: $0, y: y)! }) }
+
+        view.activeTool = .pencil // leaves the crop tool, same as any ordinary tool switch
+        view.beginLayerTransform()
+        view.commitLayerTransform()
+
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let actual = canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, before[y][x].r, "x=\(x) y=\(y) red drifted on an identity transform run after a crop")
+                XCTAssertEqual(actual?.g, before[y][x].g, "x=\(x) y=\(y) green")
+                XCTAssertEqual(actual?.b, before[y][x].b, "x=\(x) y=\(y) blue")
+                XCTAssertEqual(actual?.a, before[y][x].a, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
+    /// At zoomScale 1, a minimum-size (4 canvas px) pending rectangle is
+    /// only 4 *view* points wide/tall — well inside `transformHandleHitRadius`
+    /// (6 view points) of EVERY one of its 8 handles simultaneously, even
+    /// from its own dead center. `hitTestCropHandle` resolves this by
+    /// checking corners in `TransformCorner.allCases`'s declared order
+    /// (`.topLeft` first) and returning the first one within radius — so a
+    /// drag starting at the rectangle's visual center is actually a
+    /// top-left corner resize, not the `.move` a user would likely expect
+    /// from clicking "the middle".
+    func testCropTool_hitTestAmbiguity_atMinimumSizeAndLowZoom_cornersOverlapWithinHitRadius() {
+        let zoomScale = 1
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+
+        // Drag rect: canvas (0,0)-(4,4) — exactly transformMinimumSize on
+        // both axes, centered at (2,2).
+        dragOutCropRect(on: view, fromCol: 0, fromRow: 0, toCol: 3, toRow: 3, zoomScale: zoomScale)
+        XCTAssertTrue(view.isCropping, "precondition: a 4x4 pending rectangle exists")
+
+        let center = transformWindowPoint(canvasX: 2, canvasY: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let dragTo = transformWindowPoint(canvasX: -1, canvasY: -1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: center, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: dragTo, in: window))
+        view.mouseUp(with: mouseUpEvent(at: dragTo, in: window))
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit
+
+        // A `.move` hit would have kept the rectangle at its original 4x4
+        // size (just translated); this instead grows it to 7x7, with the
+        // bottom-right corner pinned exactly where it started — proof the
+        // dead-center click resolved to a top-left corner resize.
+        XCTAssertEqual(view.layerStack.width, 7, "the click resolved to a top-left corner resize, not a move — see this test's own doc comment")
+        XCTAssertEqual(view.layerStack.height, 7)
     }
 }
