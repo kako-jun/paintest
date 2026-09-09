@@ -176,6 +176,129 @@ final class LayerStack {
         backgroundCompositeCache = nil
     }
 
+    /// Changes a layer's blend mode (issue #37). Same explicit-invalidation
+    /// treatment as `setVisibility`/`setOpacity` above: a blend-mode change
+    /// alters what a non-active layer contributes to the composite, so
+    /// `backgroundCompositeCache` (keyed only to `activeLayerIndex`, not to
+    /// any layer's blend mode) must be dropped every time.
+    func setBlendMode(_ blendMode: LayerBlendMode, at index: Int) {
+        guard layers.indices.contains(index) else { return }
+        layers[index].setBlendMode(blendMode)
+        backgroundCompositeCache = nil
+    }
+
+    // MARK: - Merging (issue #40)
+
+    /// Merges the layer at `index` down into the layer directly beneath it
+    /// (`index - 1`), replacing both with a single new layer positioned
+    /// where the lower one was. No-op if `index` is `0` (there's nothing
+    /// beneath the bottom-most layer) or out of range.
+    ///
+    /// The two layers are drawn bottom-then-top into a fresh, initially
+    /// transparent canvas — each respecting its own `isVisible`/`opacity`/
+    /// `blendMode` (see `mergedCanvas(lower:upper:width:height:)`) — the
+    /// same per-layer draw `renderComposite`'s own loop performs for any
+    /// two adjacent layers. The merged layer's own `opacity`/`blendMode`
+    /// are then reset to `1.0`/`.normal`: every bit of "how transparent" or
+    /// "how blended" the two original layers were has already been baked
+    /// into the resulting canvas's own per-pixel alpha and color by that
+    /// draw, so re-applying either scalar again on top would double it.
+    ///
+    /// This reproduces the original pair's contribution to the rest of the
+    /// stack *exactly* whenever both layers use `.normal` blend mode —
+    /// `compositeImage`'s own doc comment already establishes that plain
+    /// alpha ("over") compositing is associative this way, regardless of
+    /// either layer's opacity. For a non-`.normal` blend mode on either
+    /// layer this is a documented approximation, not an exact merge:
+    /// `multiply`/`screen`/`overlay` compute their result from the *real*
+    /// destination beneath them, which during this isolated two-layer draw
+    /// is an empty/transparent canvas — not whatever actually sits below
+    /// `index - 1` in the full stack. This matches Photoshop-equivalent
+    /// output for the common cases (nothing here uses a non-normal blend
+    /// mode, or the lower layer sits on an effectively opaque backdrop)
+    /// and is out of scope to solve exactly for the fully general case.
+    ///
+    /// The merged layer takes the lower layer's own `name`, matching
+    /// Photoshop's own "merge down" convention of keeping the name of the
+    /// layer that survives in-place.
+    func mergeDown(at index: Int) {
+        guard index >= 1, layers.indices.contains(index) else { return }
+        let lowerIndex = index - 1
+        guard let mergedCanvas = LayerStack.mergedCanvas(lower: layers[lowerIndex], upper: layers[index], width: width, height: height) else { return }
+        let mergedLayer = Layer(canvas: mergedCanvas, name: layers[lowerIndex].name, isVisible: true, opacity: 1, blendMode: .normal)
+        layers.remove(at: index)
+        layers[lowerIndex] = mergedLayer
+        // Always a real change (`index >= 1` above guarantees `lowerIndex
+        // != index`, and `activeLayerIndex` necessarily held one of those
+        // two values or neither before this call), so this always
+        // triggers `activeLayerIndex`'s own `didSet` — same
+        // "unconditional reassignment invalidates the cache on this
+        // method's behalf" reasoning `addLayer`/`removeLayer`/
+        // `duplicateLayer`/`moveLayer` already rely on (see
+        // `backgroundCompositeCache`'s own doc comment).
+        activeLayerIndex = lowerIndex
+    }
+
+    /// Merges every layer into one (issue #40's "画像を統合" / Flatten
+    /// Image): repeatedly merges the topmost layer down until only one
+    /// remains, matching `mergeDown`'s own per-pair rules (and exactness
+    /// caveat) at each step. A hidden layer's contents are discarded
+    /// rather than baked in, matching Photoshop's own Flatten Image —
+    /// `mergeDown`'s own `isVisible` gate already gives this for free at
+    /// every step, since a hidden layer draws nothing into the merge.
+    ///
+    /// The sole remaining layer is always left fully opaque, `.normal`-
+    /// blended, and visible — explicitly, not just as a side effect of
+    /// `mergeDown`'s own output already being that way (issue #37
+    /// integration): a single-layer stack never enters `mergeDown`'s loop
+    /// at all, so a starting document with exactly one, non-default layer
+    /// (partial opacity, non-normal blend, or hidden) still needs this
+    /// normalization applied directly. Keeps the surviving layer's own
+    /// `name`, same as `mergeDown` does for each pair it merges.
+    func flatten() {
+        while layers.count > 1 {
+            mergeDown(at: layers.count - 1)
+        }
+        setVisibility(true, at: 0)
+        setOpacity(1, at: 0)
+        setBlendMode(.normal, at: 0)
+        activeLayerIndex = 0
+    }
+
+    /// Draws `lower` then `upper` (each respecting its own `isVisible`/
+    /// `opacity`/`blendMode`) into a single, fresh transparent canvas —
+    /// the building block `mergeDown` uses to flatten one pair of adjacent
+    /// layers. See `mergeDown`'s own doc comment for the exactness caveat
+    /// around non-`.normal` blend modes.
+    private static func mergedCanvas(lower: Layer, upper: Layer, width: Int, height: Int) -> PixelCanvas? {
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = makeCompositeContext(width: width, height: height, colorSpace: colorSpace)
+        else { return nil }
+
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        if lower.isVisible, let lowerImage = lower.canvas.cgImage {
+            context.setAlpha(CGFloat(lower.opacity))
+            context.setBlendMode(lower.blendMode.cgBlendMode)
+            context.draw(lowerImage, in: rect)
+        }
+        if upper.isVisible, let upperImage = upper.canvas.cgImage {
+            context.setAlpha(CGFloat(upper.opacity))
+            context.setBlendMode(upper.blendMode.cgBlendMode)
+            context.draw(upperImage, in: rect)
+        }
+        guard let mergedImage = context.makeImage() else { return nil }
+
+        // Round-trips through an actual PNG encode/decode (the same
+        // technique `PaintestDocument`'s save/load already relies on)
+        // rather than reading `mergedImage`'s premultiplied bytes
+        // directly: `PixelCanvas` only knows how to ingest actual PNG
+        // data via `load(from:)` — see that method's own doc comment on
+        // why it specifically expects straight, not premultiplied, alpha.
+        let rep = NSBitmapImageRep(cgImage: mergedImage)
+        guard let pngData = rep.representation(using: .png, properties: [:]) else { return nil }
+        return PixelCanvas.load(from: pngData)
+    }
+
     // MARK: - Duplication
 
     /// Returns a fully independent deep copy of this `LayerStack` — every
@@ -192,9 +315,98 @@ final class LayerStack {
     /// re-derivable from `layers`/`activeLayerIndex`), not state.
     func copy() -> LayerStack {
         let copiedLayers = layers.map { layer in
-            Layer(canvas: layer.canvas.copy(), name: layer.name, isVisible: layer.isVisible, opacity: layer.opacity)
+            Layer(
+                canvas: layer.canvas.copy(),
+                name: layer.name,
+                isVisible: layer.isVisible,
+                opacity: layer.opacity,
+                blendMode: layer.blendMode
+            )
         }
         return LayerStack(width: width, height: height, layers: copiedLayers, activeLayerIndex: activeLayerIndex)
+    }
+
+    // MARK: - Resizing (issue #39)
+
+    /// Rebuilds every layer's pixel content at a new pixel resolution —
+    /// "画像解像度": every layer is resampled independently, nearest-neighbor
+    /// (CLAUDE.md's default "ドット単位でぼけない編集" policy — no smoothing),
+    /// from this stack's current `width`/`height` to `newWidth`/`newHeight`.
+    /// Layer order/name/`isVisible`/`opacity`/`blendMode` and
+    /// `activeLayerIndex` all carry over unchanged; only each layer's own
+    /// pixel content and this stack's own `width`/`height` change.
+    ///
+    /// Returns a brand-new `LayerStack` rather than mutating this one in
+    /// place: `width`/`height` are `let` constants (a `LayerStack` can't
+    /// change its own dimensions after construction), so the caller is
+    /// expected to swap this stack out for the returned one — the same
+    /// `LayerStack`-replacement pattern `CanvasView.commitCrop()` already
+    /// uses for issue #21's crop tool.
+    func resampled(toWidth newWidth: Int, toHeight newHeight: Int) -> LayerStack {
+        let clampedWidth = max(1, newWidth)
+        let clampedHeight = max(1, newHeight)
+        let sourceWidth = width
+        let sourceHeight = height
+        let newLayers = layers.map { layer -> Layer in
+            let newCanvas = PixelCanvas(width: clampedWidth, height: clampedHeight, background: .clear)
+            for y in 0..<clampedHeight {
+                // Nearest-neighbor source row: which source pixel a
+                // destination pixel samples from, found by scaling the
+                // destination index back into source space and flooring
+                // (integer division does the flooring here) — the same
+                // "which source pixel does this destination pixel show"
+                // mapping a point-sampled resize always uses.
+                let sourceY = min(sourceHeight - 1, (y * sourceHeight) / clampedHeight)
+                for x in 0..<clampedWidth {
+                    let sourceX = min(sourceWidth - 1, (x * sourceWidth) / clampedWidth)
+                    guard let raw = layer.canvas.rawPixel(x: sourceX, y: sourceY) else { continue }
+                    newCanvas.setPixel(x: x, y: y, color: NSColor(
+                        deviceRed: Double(raw.r) / 255, green: Double(raw.g) / 255,
+                        blue: Double(raw.b) / 255, alpha: Double(raw.a) / 255
+                    ))
+                }
+            }
+            return Layer(canvas: newCanvas, name: layer.name, isVisible: layer.isVisible, opacity: layer.opacity, blendMode: layer.blendMode)
+        }
+        return LayerStack(width: clampedWidth, height: clampedHeight, layers: newLayers, activeLayerIndex: activeLayerIndex)
+    }
+
+    /// Changes this stack's canvas dimensions without resampling any
+    /// existing pixel — "カンバスサイズ": every layer's existing pixels are
+    /// copied as-is into a new, differently-sized canvas at the position
+    /// `anchor` specifies (Photoshop's own 9-point anchor grid — see
+    /// `CanvasAnchor`), with any newly-added area left transparent and any
+    /// pixel that falls outside the new bounds discarded. Unlike
+    /// `resampled(toWidth:toHeight:)` above, nothing is ever scaled: a
+    /// pixel that survives the resize keeps its exact original color.
+    ///
+    /// Same "returns a new `LayerStack`, doesn't mutate in place" shape as
+    /// `resampled(toWidth:toHeight:)`, for the same reason.
+    func resized(toWidth newWidth: Int, toHeight newHeight: Int, anchor: CanvasAnchor) -> LayerStack {
+        let clampedWidth = max(1, newWidth)
+        let clampedHeight = max(1, newHeight)
+        let offsetX = Int((anchor.horizontalFraction * Double(clampedWidth - width)).rounded())
+        let offsetY = Int((anchor.verticalFraction * Double(clampedHeight - height)).rounded())
+        let sourceWidth = width
+        let sourceHeight = height
+        let newLayers = layers.map { layer -> Layer in
+            let newCanvas = PixelCanvas(width: clampedWidth, height: clampedHeight, background: .clear)
+            for y in 0..<sourceHeight {
+                let destY = y + offsetY
+                guard destY >= 0, destY < clampedHeight else { continue }
+                for x in 0..<sourceWidth {
+                    let destX = x + offsetX
+                    guard destX >= 0, destX < clampedWidth else { continue }
+                    guard let raw = layer.canvas.rawPixel(x: x, y: y) else { continue }
+                    newCanvas.setPixel(x: destX, y: destY, color: NSColor(
+                        deviceRed: Double(raw.r) / 255, green: Double(raw.g) / 255,
+                        blue: Double(raw.b) / 255, alpha: Double(raw.a) / 255
+                    ))
+                }
+            }
+            return Layer(canvas: newCanvas, name: layer.name, isVisible: layer.isVisible, opacity: layer.opacity, blendMode: layer.blendMode)
+        }
+        return LayerStack(width: clampedWidth, height: clampedHeight, layers: newLayers, activeLayerIndex: activeLayerIndex)
     }
 
     // MARK: - Compositing
@@ -256,6 +468,25 @@ final class LayerStack {
             return renderComposite(excluding: excludedIndex)
         }
 
+        // Issue #37: unlike opacity, blend modes other than `.normal` are
+        // NOT associative under source-over compositing — `multiply`,
+        // `screen` and `overlay` all compute their result from the *actual*
+        // destination pixels beneath a layer, not from "whatever an
+        // otherwise-empty context happens to hold". The `below`/`above`
+        // split cache pre-flattens each half starting from a blank
+        // context, which is only equivalent to a single sequential pass
+        // when every layer composites with plain alpha blending (see this
+        // method's own doc for that proof). So whenever any layer uses a
+        // non-normal blend mode, skip the cache entirely and always fall
+        // back to the blend-mode-correct single-pass `renderComposite`,
+        // which draws every layer sequentially onto the one real
+        // destination. This trades away issue #17's caching win only for
+        // documents that actually use a non-normal blend mode; an
+        // all-`.normal` document keeps the fast path unchanged.
+        if layers.contains(where: { $0.blendMode != .normal }) {
+            return renderComposite(excluding: excludedIndex)
+        }
+
         let below: CGImage?
         let above: CGImage?
         if let cache = backgroundCompositeCache, cache.excludedIndex == activeLayerIndex {
@@ -297,6 +528,7 @@ final class LayerStack {
         for (index, layer) in layers.enumerated() where layer.isVisible && index != excludedIndex {
             guard let cgImage = layer.canvas.cgImage else { continue }
             context.setAlpha(CGFloat(layer.opacity))
+            context.setBlendMode(layer.blendMode.cgBlendMode)
             context.draw(cgImage, in: rect)
         }
 
@@ -310,6 +542,13 @@ final class LayerStack {
     /// on one side of the active layer never pays for creating a context
     /// and drawing nothing into it. Used to build the `below` and `above`
     /// halves of `backgroundCompositeCache`.
+    ///
+    /// No `setBlendMode` call here (unlike `renderComposite`): `compositeImage`
+    /// only ever reaches the cache-building branch that calls this when
+    /// every layer in the whole stack is `.normal` (issue #37) — a
+    /// non-normal blend mode anywhere bypasses the cache and goes straight
+    /// to `renderComposite` instead, since blend modes aren't associative
+    /// across the below/active/above split the way plain alpha is.
     private func renderRange(_ slice: ArraySlice<Layer>) -> CGImage? {
         guard slice.contains(where: { $0.isVisible }) else { return nil }
 

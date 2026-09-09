@@ -97,6 +97,52 @@ final class PaintestDocumentTests: XCTestCase {
         XCTAssertEqual(loaded.layers[2].opacity, 0.9, accuracy: 0.0001)
     }
 
+    func testRoundTrip_multipleLayers_blendModeIsIndependentPerLayer() {
+        // Issue #37.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer(name: "中")
+        stack.addLayer(name: "上")
+        stack.setBlendMode(.multiply, at: 1)
+        stack.setBlendMode(.overlay, at: 2)
+        let url = makeTempDocumentURL()
+
+        XCTAssertNoThrow(try PaintestDocument.write(stack, to: url))
+        guard let loaded = PaintestDocument.read(from: url) else {
+            XCTFail("read(from:) returned nil")
+            return
+        }
+
+        XCTAssertEqual(loaded.layers[0].blendMode, .normal)
+        XCTAssertEqual(loaded.layers[1].blendMode, .multiply)
+        XCTAssertEqual(loaded.layers[2].blendMode, .overlay)
+    }
+
+    /// A manifest with no `"blendMode"` key at all — exactly what
+    /// `.paintestdoc` packages saved before issue #37 look like — must
+    /// still open, with every layer defaulting to `.normal`.
+    func testRead_manifestWithoutBlendModeKey_defaultsToNormal() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let url = makeTempDocumentURL()
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        guard let pngData = stack.layers[0].canvas.pngData() else {
+            XCTFail("failed to build fixture PNG")
+            return
+        }
+        try? pngData.write(to: url.appendingPathComponent("layer_0.png"))
+        let manifestJSON = """
+        {"width": 2, "height": 2, "layers": [
+            {"name": "レイヤー1", "isVisible": true, "opacity": 1, "order": 0, "fileName": "layer_0.png"}
+        ], "activeLayerIndex": 0}
+        """
+        try? Data(manifestJSON.utf8).write(to: url.appendingPathComponent("manifest.json"))
+
+        guard let loaded = PaintestDocument.read(from: url) else {
+            XCTFail("read(from:) returned nil")
+            return
+        }
+        XCTAssertEqual(loaded.layers[0].blendMode, .normal)
+    }
+
     /// Fixed behavior (was the bug this test locks in): `activeLayerIndex`
     /// used to be dropped on save and always come back as 0. `write`
     /// now includes it in the manifest and `read` restores it.

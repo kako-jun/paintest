@@ -9,6 +9,19 @@ struct LayerManifestEntry: Codable {
     var opacity: Double
     var order: Int
     var fileName: String
+    /// Issue #37. Optional so a `.paintestdoc` package saved before blend
+    /// modes existed still opens cleanly — the synthesized decoder's
+    /// `decodeIfPresent` returns `nil` for a key that's simply absent from
+    /// older JSON, and `PaintestDocument.read` treats `nil` as `.normal`.
+    /// An unrecognized *value* for a key that IS present (a hand-edited or
+    /// corrupted manifest) still fails decoding the same way any other
+    /// malformed manifest field does, matching this type's existing
+    /// "refuse the whole document rather than guess" policy.
+    /// Defaults to `nil` (not just optional) so the many existing
+    /// `LayerManifestEntry(...)` call sites written before this field
+    /// existed — production and test code alike — keep compiling without
+    /// having to name a `blendMode:` argument at every one of them.
+    var blendMode: LayerBlendMode? = nil
 }
 
 /// The full contents of a `.paintestdoc` package's `manifest.json`.
@@ -62,7 +75,8 @@ enum PaintestDocument {
                     isVisible: layer.isVisible,
                     opacity: layer.opacity,
                     order: index,
-                    fileName: fileName
+                    fileName: fileName,
+                    blendMode: layer.blendMode
                 ))
             }
 
@@ -127,7 +141,13 @@ enum PaintestDocument {
             guard canvas.width == manifest.width, canvas.height == manifest.height else {
                 return nil
             }
-            layers.append(Layer(canvas: canvas, name: entry.name, isVisible: entry.isVisible, opacity: entry.opacity))
+            layers.append(Layer(
+                canvas: canvas,
+                name: entry.name,
+                isVisible: entry.isVisible,
+                opacity: entry.opacity,
+                blendMode: entry.blendMode ?? .normal
+            ))
         }
 
         return LayerStack(

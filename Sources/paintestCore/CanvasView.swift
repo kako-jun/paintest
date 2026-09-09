@@ -188,6 +188,16 @@ final class CanvasView: NSView {
     /// particular significance.
     var magicWandTolerance: Int = 32
 
+    /// The bucket fill tool's own color-similarity cutoff (issue #38), kept
+    /// independent of `magicWandTolerance` above even though both feed the
+    /// same `SelectionMask.magicWand(...)` — a user might want a looser
+    /// tolerance for "flood-fill this messy scan's background" than for
+    /// "select this flat-colored shape precisely", so sharing one property
+    /// between the two tools would make adjusting one silently affect the
+    /// other. Same `32` starting default as `magicWandTolerance`, same
+    /// "`AppDelegate` keeps `OptionBarView`'s slider in sync" wiring.
+    var bucketFillTolerance: Int = 32
+
     /// Which handle of `activeTransform`'s rectangle a transform drag grabbed
     /// (issue #9) — `.move` for a drag started inside the rectangle (not on
     /// a handle), `.corner`/`.edge` for the 8 resize handles (round 1), and
@@ -1100,7 +1110,13 @@ final class CanvasView: NSView {
                     newCanvas.setPixel(x: x, y: y, color: color)
                 }
             }
-            return Layer(canvas: newCanvas, name: layer.name, isVisible: layer.isVisible, opacity: layer.opacity)
+            return Layer(
+                canvas: newCanvas,
+                name: layer.name,
+                isVisible: layer.isVisible,
+                opacity: layer.opacity,
+                blendMode: layer.blendMode
+            )
         }
         let newStack = LayerStack(width: newWidth, height: newHeight, layers: newLayers, activeLayerIndex: layerStack.activeLayerIndex)
 
@@ -1521,11 +1537,14 @@ final class CanvasView: NSView {
         case .pencil: return "鉛筆"
         case .eraser: return "消しゴム"
         case .pen: return "ペン"
-        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop:
+        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
             // `.crop`'s own `commitCrop()` fires `onEditCompleted?("切り抜き")`
             // itself (issue #21), the same self-contained shape
             // `flushPenStroke()`/`commitLayerTransform()` use — this lookup
-            // is never actually reached for it either.
+            // is never actually reached for it either. `.bucketFill`'s own
+            // `mouseDown` branch fires `onEditCompleted?("塗りつぶし")` the
+            // same self-contained way (issue #38, mirroring `magicWandSelect`
+            // above, the other single-click tool).
             return nil
         }
     }
@@ -1570,11 +1589,14 @@ final class CanvasView: NSView {
             // before calling `paint(at:)` (issue #13). Kept only to satisfy
             // this switch's exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
             // Same as the magnifier above: these branch to their own
             // drag/combine handling in `mouseDown`/`mouseDragged`/`mouseUp`
             // before calling `paint(at:)` (issue #11; `.crop` under issue
-            // #21). Kept only to satisfy this switch's exhaustiveness.
+            // #21; `.bucketFill` under issue #38 — its whole gesture is a
+            // single click resolved entirely in `mouseDown`, same as
+            // `.magicWandSelect`). Kept only to satisfy this switch's
+            // exhaustiveness.
             return
         }
     }
@@ -1598,9 +1620,10 @@ final class CanvasView: NSView {
             // Same as `paint(at:)` above: the magnifier never drags into a
             // stroke (issue #13), this exists only for exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
             // Same as `paint(at:)` above: these never drag into a stroke
-            // (issue #11; `.crop` under issue #21), this exists only for
+            // (issue #11; `.crop` under issue #21; `.bucketFill` under issue
+            // #38, a single-click-only gesture), this exists only for
             // exhaustiveness.
             return
         }
@@ -2006,6 +2029,51 @@ final class CanvasView: NSView {
             // `Tool.magicWandSelect`), so its `onEditCompleted` fires right
             // here rather than in `mouseUp`.
             onEditCompleted?("選択範囲")
+            return
+        }
+        if activeTool == .bucketFill {
+            // A single click is the whole gesture (issue #38), mirroring
+            // `magicWandSelect` above: the flood-fill region is computed
+            // and painted right here, with no `mouseDragged`/`mouseUp`
+            // handling of its own.
+            //
+            // Flood-fills the active layer's own pixels — same reasoning
+            // as `magicWandSelect` above: this has to look at (and here,
+            // overwrite) the exact pixels `paint(at:)` would, not a
+            // flattened composite that could span other layers.
+            let canvas = layerStack.activeLayer.canvas
+            var fillMask = SelectionMask.magicWand(
+                startX: pixel.x, startY: pixel.y,
+                colorAt: { x, y in canvas.rawPixel(x: x, y: y) },
+                tolerance: bucketFillTolerance,
+                width: layerStack.width, height: layerStack.height
+            )
+            // A selection restricts every editing tool to its own bounds
+            // (same "intersect with the active selection" pattern
+            // `ImageAdjustments.apply`'s `mask` parameter and issue #11's
+            // other tools already follow) — intersecting the flood-fill
+            // region with it here means the fill can never spill paint
+            // outside the selection, even into same-colored pixels that
+            // lie beyond it.
+            if let selection {
+                fillMask = fillMask.intersected(with: selection)
+            }
+            // No anti-aliasing (CLAUDE.md: bucket fill is a classic tool,
+            // dot-exact pixels only) — every pixel in `fillMask` is
+            // overwritten outright with the solid foreground color, same
+            // as `PixelCanvas.setPixel`'s own no-blur contract.
+            for y in 0..<layerStack.height {
+                for x in 0..<layerStack.width {
+                    guard fillMask.contains(x: x, y: y) else { continue }
+                    canvas.setPixel(x: x, y: y, color: foregroundColor)
+                }
+            }
+            onLayerContentChanged?()
+            // Same self-contained shape as `magicWandSelect` above (issue
+            // #19): bucket fill's whole gesture is this one click, so
+            // `onEditCompleted` fires right here rather than in `mouseUp`.
+            onEditCompleted?("塗りつぶし")
+            needsDisplay = true
             return
         }
         if activeTool == .crop {

@@ -56,11 +56,11 @@ final class ToolboxViewTests: XCTestCase {
     }
 
     // Pencil, eraser, pen, the eyedropper, the magnifier, the
-    // rectangle/ellipse/lasso/polygon/magic-wand select tools, and crop are
-    // wired to real behavior (issues #5, #10, #14, #13, #11, #21); every
-    // other button stays a purely visual placeholder with no target/action,
-    // same as before.
-    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド", "切り抜き"]
+    // rectangle/ellipse/lasso/polygon/magic-wand select tools, crop, and
+    // bucket fill are wired to real behavior (issues #5, #10, #14, #13,
+    // #11, #21, #38); every other button stays a purely visual placeholder
+    // with no target/action, same as before.
+    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド", "切り抜き", "塗りつぶし"]
 
     // The one placeholder tool tip that's disabled rather than merely
     // unwired (issue #43); kept alongside `wiredToolTips` since the two
@@ -68,24 +68,43 @@ final class ToolboxViewTests: XCTestCase {
     // buttons into wired / disabled-placeholder / other-placeholder.
     private static let textToolTip = "テキスト"
 
-    func testOnlyPencilEraserPenEyedropperMagnifierSelectToolsAndCrop_haveTargetAndAction() {
+    func testOnlyPencilEraserPenEyedropperMagnifierSelectToolsCropAndBucketFill_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 11)
+        XCTAssertEqual(wired.count, 12)
         for button in wired {
-            XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop must be wired to onToolSelected")
-            XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop must be wired to onToolSelected")
+            XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop/bucket-fill must be wired to onToolSelected")
+            XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop/bucket-fill must be wired to onToolSelected")
         }
     }
 
     func testOtherButtons_haveNoTargetOrAction() {
         let view = makeView()
         let placeholders = allButtons(in: view).filter { !Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(placeholders.count, 9)
+        XCTAssertEqual(placeholders.count, 8)
         for button in placeholders {
             XCTAssertNil(button.target, "non-wired tool buttons are visual placeholders; wiring is out of scope")
             XCTAssertNil(button.action, "non-wired tool buttons are visual placeholders; wiring is out of scope")
         }
+    }
+
+    // MARK: - Bucket fill tool exclusive selection (issue #38)
+
+    func testBucketFillClick_firesOnToolSelectedWithBucketFill_andTogglesPressedStates() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let bucketFill = button(toolTip: "塗りつぶし", in: view) else {
+            XCTFail("could not find pencil/bucket-fill buttons")
+            return
+        }
+        XCTAssertEqual(pencil.state, .on, "precondition: pencil starts pressed by default")
+        var selected: Tool?
+        view.onToolSelected = { selected = $0 }
+
+        bucketFill.performClick(nil)
+
+        XCTAssertEqual(selected, .bucketFill)
+        XCTAssertEqual(bucketFill.state, .on)
+        XCTAssertEqual(pencil.state, .off, "selecting bucket fill must turn the default-on pencil off")
     }
 
     // MARK: - Single-column layout + scroll wrapping (issue #7)
@@ -376,19 +395,19 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertFalse(text.isEnabled, "state and isEnabled are independent; disabling must not stand in for the .off state or vice versa")
     }
 
-    func testOtherEightPlaceholderButtons_remainEnabled() {
+    func testOtherSevenPlaceholderButtons_remainEnabled() {
         let view = makeView()
         let otherPlaceholders = allButtons(in: view).filter { !Self.wiredToolTips.contains($0.toolTip ?? "") && $0.toolTip != Self.textToolTip }
-        XCTAssertEqual(otherPlaceholders.count, 8)
+        XCTAssertEqual(otherPlaceholders.count, 7)
         for button in otherPlaceholders {
             XCTAssertTrue(button.isEnabled, "only テキスト should be disabled; \(button.toolTip ?? "?") must stay enabled like before")
         }
     }
 
-    func testAllElevenWiredButtons_remainEnabled() {
+    func testAllTwelveWiredButtons_remainEnabled() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 11)
+        XCTAssertEqual(wired.count, 12)
         for button in wired {
             XCTAssertTrue(button.isEnabled, "the テキスト-only disable condition must not leak onto wired tools (\(button.toolTip ?? "?"))")
         }

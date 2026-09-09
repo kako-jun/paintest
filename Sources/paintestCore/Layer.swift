@@ -20,12 +20,26 @@ final class Layer {
     private(set) var opacity: Double {
         didSet { opacity = max(0, min(1, opacity)) }
     }
+    /// How this layer blends with everything beneath it (issue #37).
+    /// Same `private(set)` treatment as `isVisible`/`opacity` above and for
+    /// the same reason: it changes what a *non-active* layer contributes to
+    /// the composite, so every change has to go through
+    /// `LayerStack.setBlendMode(_:at:)`, which invalidates
+    /// `backgroundCompositeCache`.
+    private(set) var blendMode: LayerBlendMode
 
-    init(canvas: PixelCanvas, name: String, isVisible: Bool = true, opacity: Double = 1.0) {
+    init(
+        canvas: PixelCanvas,
+        name: String,
+        isVisible: Bool = true,
+        opacity: Double = 1.0,
+        blendMode: LayerBlendMode = .normal
+    ) {
         self.canvas = canvas
         self.name = name
         self.isVisible = isVisible
         self.opacity = max(0, min(1, opacity))
+        self.blendMode = blendMode
     }
 
     /// Changes `isVisible`. Only `LayerStack.setVisibility(_:at:)` calls
@@ -41,5 +55,12 @@ final class Layer {
     /// `LayerStack.backgroundCompositeCache`.
     func setOpacity(_ opacity: Double) {
         self.opacity = opacity
+    }
+
+    /// Changes `blendMode`. Only `LayerStack.setBlendMode(_:at:)` calls
+    /// this, so every blend-mode change is guaranteed to also invalidate
+    /// `LayerStack.backgroundCompositeCache`.
+    func setBlendMode(_ blendMode: LayerBlendMode) {
+        self.blendMode = blendMode
     }
 }
