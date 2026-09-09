@@ -854,9 +854,9 @@ final class CanvasViewTests: XCTestCase {
 
     // MARK: - Pen tool routes through the antialiased dab-stamping path (issue #10, #20)
     //
-    // `PixelCanvas.drawPenDab`/`compositeOverlay` themselves have no unit
-    // coverage of their own yet as of this pair — that's expected to be
-    // picked up by a separate, later test-authoring task, not this one.
+    // `PixelCanvas.drawPenDab`/`compositeOverlay` themselves are covered by
+    // the `testDrawPenDab_*`/`testCompositeOverlay_*` groups in
+    // `PixelCanvasTests.swift`, not here.
     // What these tests below cover instead: before this pair, nothing
     // exercised `.pen` through `CanvasView`'s real `mouseDown`/
     // `mouseDragged`/`mouseUp` entry points at all — the integration wiring
