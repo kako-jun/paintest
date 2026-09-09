@@ -1647,6 +1647,25 @@ final class CanvasView: NSView {
             return
         }
         if activeTool == .pen {
+            // Flushes (never cancels) a leftover `penStrokeBuffer` before
+            // starting the new one. Normally `mouseDown`→`mouseDragged`→
+            // `mouseUp` always pairs up, so `penStrokeBuffer` should already
+            // be `nil` here — but AppKit doesn't guarantee that: a window
+            // deactivation/focus loss mid-stroke can swallow the matching
+            // `mouseUp`, and the next `mouseDown` (possibly after other
+            // gesture-state resets that don't touch `penStrokeBuffer`, e.g.
+            // a later click while `activeTool` never actually changed) would
+            // otherwise silently replace the buffer below, discarding
+            // whatever the previous, never-confirmed stroke had already
+            // drawn. Flushing (not `cancelPenStroke()`) is the safe
+            // direction here — unlike the deliberate `activeTool`
+            // `didSet`/`beginLayerTransform()` cancels (issue #20), this
+            // isn't a user-initiated switch away from the pen tool, so the
+            // right move is to keep the already-drawn pixels rather than
+            // lose them.
+            if penStrokeBuffer != nil {
+                flushPenStroke()
+            }
             // Starts a fresh accumulation buffer for this stroke (issue
             // #20) — nothing is written to the real active layer until
             // `mouseUp`'s `flushPenStroke()`; see `penStrokeBuffer`'s own
