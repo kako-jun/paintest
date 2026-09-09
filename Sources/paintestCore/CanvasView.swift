@@ -1832,7 +1832,13 @@ final class CanvasView: NSView {
         // Crop tool confirm/cancel (issue #21) — same Enter/Escape
         // convention as the polygon tool's own handling just below, but
         // gated on a pending `cropRect` existing rather than a non-empty
-        // vertex list.
+        // vertex list. Known, deliberate gap (issue #21 review nit-1,
+        // locked in by
+        // `testCropTool_escapeDuringInitialRubberBandDragBeforeCropRectExists_isIgnoredByKeyDown`):
+        // Escape pressed *during* the very first rubber-band drag, before
+        // `mouseUp` has promoted it into `cropRect`, falls through to
+        // `super.keyDown(with:)` and does nothing — there is no in-progress
+        // rectangle yet for it to cancel.
         if activeTool == .crop, cropRect != nil {
             switch event.keyCode {
             case 53: // Escape: cancel the pending crop, no canvas change.

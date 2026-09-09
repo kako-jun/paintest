@@ -1288,6 +1288,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// not `undo()`/`redo()`'s auto-*cancel*: unlike undo/redo, opening a
     /// dialog isn't "abandon this in-progress thing", so the stroke should
     /// still land, just before the dialog reads the canvas.
+    ///
+    /// Deliberately does *not* touch a pending crop rectangle (issue #21
+    /// review should-1), unlike every other place in this file that pairs
+    /// `isTransforming`/`isPenStrokeInProgress` with a matching `isCropping`
+    /// check (`activateActiveDocument()`, `undo()`/`redo()`,
+    /// `historyPanelView.onJumpToIndex`, `layerPanelView
+    /// .willChangeActiveLayer`): every one of those guards against
+    /// `layerStack` (or `activeLayerIndex`) getting swapped out from under
+    /// `cropRect`, but nothing this function's own caller,
+    /// `presentAdjustment(label:showDialog:)`, does that — it only ever
+    /// writes into the *existing* `layerStack.activeLayer.canvas` in place.
+    /// `commitCrop()` doesn't read that canvas until it actually runs, at
+    /// which point it picks up whatever the dialog just wrote, the same way
+    /// it already picks up any earlier pencil/pen edit — so there's no
+    /// equivalent "the dialog's writes get silently undone" trap here for
+    /// crop the way there is for an unconfirmed transform or pen stroke.
     private func commitAnyPendingLayerEdits() {
         if canvasView.isTransforming {
             canvasView.commitLayerTransform()
