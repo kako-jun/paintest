@@ -147,6 +147,18 @@ final class CanvasViewTests: XCTestCase {
         if view.isTransforming {
             view.commitLayerTransform()
         }
+        // Same auto-confirm, for the same reason, for an in-progress pen
+        // stroke (issue #20 test-authoring pass) — mirrors the real
+        // `AppDelegate.activateActiveDocument()`'s own ordering (commit any
+        // transform, THEN flush any pen stroke, both before either the
+        // zoom/selection write-back below or `replaceLayerStack` swaps
+        // `view.layerStack` out from under it — see `isPenStrokeInProgress`'s
+        // doc comment). A no-op whenever no pen stroke is in progress, so
+        // this is safe to add unconditionally for every existing caller of
+        // this helper too.
+        if view.isPenStrokeInProgress {
+            view.flushPenStroke()
+        }
         previouslyDisplayed?.zoomScale = view.zoomScale
         // Selection write-back/restore, same pattern as zoom above and in
         // the real `AppDelegate.activateActiveDocument()` (issue #11).
@@ -920,6 +932,449 @@ final class CanvasViewTests: XCTestCase {
             }
         }
         XCTAssertTrue(foundPartialCoverage, "an antialiased stroke's dab rims should show partial coverage — drawLine's hard 1px edge never does this")
+    }
+
+    // MARK: - Pen tool accumulation buffer / gesture-state hardening (issue #20 test-authoring pass)
+    //
+    // The tests immediately above cover the pixels the pen actually paints;
+    // these cover the accumulation-buffer machinery itself —
+    // `isPenStrokeInProgress`, `flushPenStroke()`/`cancelPenStroke()`, and
+    // every place something can interrupt a stroke mid-gesture (tool switch,
+    // beginning a transform, a stray/duplicated mouse event) — none of which
+    // had any test of its own before this pass.
+
+    func testMouseDown_notifiesOnLayerContentChanged_penDoesNotFireUntilMouseUp() {
+        // Unlike the pencil/eraser fallback (`testMouseDown_notifiesOnLayerContentChanged`
+        // above), the pen's `mouseDown`/`mouseDragged` branches only ever
+        // stamp into `penStrokeBuffer` — the real active layer is untouched,
+        // so `onLayerContentChanged` must stay silent until `flushPenStroke()`
+        // actually merges the buffer in.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        var notifiedCount = 0
+        view.onLayerContentChanged = { notifiedCount += 1 }
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        XCTAssertEqual(notifiedCount, 0, "onLayerContentChanged must not fire from mouseDown alone — the pen hasn't touched the real layer yet")
+
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertEqual(notifiedCount, 0, "...nor from mouseDragged — still only buffered")
+
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        XCTAssertEqual(notifiedCount, 1, "flushPenStroke() at mouseUp is the one point the real layer actually changes")
+    }
+
+    func testMouseUp_afterPenStroke_notifiesOnLayerContentChangedExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let startPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: startPoint, in: window))
+        let dragPoint = windowPoint(forPixelCol: 4, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window))
+        var notifiedCount = 0
+        view.onLayerContentChanged = { notifiedCount += 1 }
+
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+
+        XCTAssertEqual(notifiedCount, 1, "a whole pen stroke — however many dabs it stamped — must notify exactly once, at flush")
+    }
+
+    func testIsPenStrokeInProgress_falseInitially_trueAfterMouseDown_falseAfterMouseUp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        let window = view.window!
+        XCTAssertFalse(view.isPenStrokeInProgress, "no stroke has started yet")
+
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "mouseDown starts the accumulation buffer")
+
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        XCTAssertFalse(view.isPenStrokeInProgress, "mouseUp's flushPenStroke() discards the buffer once it's merged")
+    }
+
+    func testCancelPenStroke_discardsBufferWithoutPaintingLayer_leavesLayerUntouched() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke")
+
+        view.cancelPenStroke()
+
+        XCTAssertFalse(view.isPenStrokeInProgress, "cancelPenStroke() must discard the buffer")
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) the real layer must be left completely untouched — the stroke never merged")
+            }
+        }
+    }
+
+    func testFlushPenStroke_withNoPriorMouseDown_isNoOp_doesNotCrash() {
+        let view = makeView()
+        var layerContentChangedCount = 0
+        var editCompletedLabels: [String] = []
+        view.onLayerContentChanged = { layerContentChangedCount += 1 }
+        view.onEditCompleted = { editCompletedLabels.append($0) }
+
+        view.flushPenStroke()
+
+        XCTAssertFalse(view.isPenStrokeInProgress)
+        XCTAssertEqual(layerContentChangedCount, 0, "no buffer existed, so nothing should have merged or notified")
+        XCTAssertTrue(editCompletedLabels.isEmpty, "no buffer existed, so onEditCompleted must not fire either")
+    }
+
+    func testCancelPenStroke_withNoPriorMouseDown_isNoOp_doesNotCrash() {
+        let view = makeView()
+
+        view.cancelPenStroke()
+
+        XCTAssertFalse(view.isPenStrokeInProgress)
+        // Canvas still usable afterward — no crash, no corrupted state.
+        view.layerStack.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 0)
+    }
+
+    func testMouseDragged_penWithoutPriorMouseDown_doesNotCrash_paintsNothing() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        // No mouseDown at all: penStrokeBuffer is nil, exercising
+        // mouseDragged's own defensive `guard penStrokeBuffer != nil else { return }`.
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+
+        XCTAssertFalse(view.isPenStrokeInProgress)
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) a stray mouseDragged with no prior mouseDown must paint nothing")
+            }
+        }
+    }
+
+    func testActiveTool_switchedAwayFromPenMidStroke_discardsBufferWithoutCommitting() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke")
+
+        view.activeTool = .pencil // a user-initiated switch away from the pen mid-gesture
+
+        XCTAssertFalse(view.isPenStrokeInProgress, "switching tools mid-stroke must discard the buffer (activeTool's own didSet)")
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) the discarded stroke must never have reached the real layer")
+            }
+        }
+    }
+
+    func testBeginLayerTransform_calledMidPenStroke_discardsBufferWithoutCommitting() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke")
+
+        view.beginLayerTransform() // transform mode preempts every other gesture
+
+        XCTAssertFalse(view.isPenStrokeInProgress, "beginLayerTransform() must discard the in-progress pen buffer, not carry it over into transform mode")
+        for y in 0..<8 {
+            for x in 0..<8 {
+                XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) the discarded stroke must never have reached the real layer")
+            }
+        }
+        view.cancelLayerTransform() // tidy up: leave transform mode
+    }
+
+    func testMouseDown_calledTwiceWithoutInterveningMouseUp_flushesFirstBufferBeforeStartingNewOne() {
+        // Review fix locked in (issue #20): before, a second mouseDown while
+        // penStrokeBuffer was still non-nil silently replaced it, discarding
+        // whatever the first, never-confirmed stroke had already drawn. The
+        // fix flushes (not cancels) the leftover buffer first — see
+        // mouseDown's `.pen` branch doc comment for why flush (keep the
+        // pixels), not cancel (discard them), is the safe direction for
+        // this specific, AppKit-can-swallow-a-mouseUp scenario.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let pointA = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: pointA, in: window)) // stroke 1 starts, buffered only
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 2, y: 2)?.r, 255, "precondition: stroke 1 hasn't been flushed onto the real layer yet")
+
+        let pointB = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: pointB, in: window)) // no mouseUp for stroke 1 in between
+
+        // Stroke 1's pixels must already be baked into the real layer —
+        // flushed, not lost — the instant the second mouseDown ran.
+        XCTAssertLessThan(view.layerStack.activeLayer.canvas.rawPixel(x: 2, y: 2)?.r ?? 255, 255, "stroke 1 must have been flushed onto the real layer by the second mouseDown")
+        // Stroke 2 must have started a genuinely fresh buffer of its own —
+        // still only buffered, not yet on the real layer.
+        XCTAssertTrue(view.isPenStrokeInProgress, "stroke 2 must be live, buffered, after the flush-then-restart")
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 6, y: 6)?.r, 255, "stroke 2 must not have reached the real layer yet — only stroke 1 was flushed")
+
+        view.mouseUp(with: mouseUpEvent(at: pointB, in: window)) // finish stroke 2 normally
+        XCTAssertLessThan(view.layerStack.activeLayer.canvas.rawPixel(x: 6, y: 6)?.r ?? 255, 255, "stroke 2 must paint normally once it's properly flushed too")
+    }
+
+    func testDraw_livePenStrokePreview_appliesOpacityAndActiveLayerOpacity_matchesPostFlushRender() {
+        // Mirrors `testDraw_liveMovePreview_appliesActiveLayerOpacity_blendsWithLayerBelow`'s
+        // approach, but for the pen's own live preview (`draw(_:)`'s
+        // `penStrokeBuffer` block) instead of the transform preview: the
+        // mid-drag preview draws at `penBrushSettings.opacity *
+        // layerStack.activeLayer.opacity`, which must render the exact same
+        // color the finished, flushed stroke's ordinary composite produces
+        // — see `draw(_:)`'s own doc comment on this block for why.
+        let zoomScale = 4
+        let stack = LayerStack(width: 8, height: 8, background: .white) // L1: bottom, white
+        stack.addLayer() // L2: top, active, starts transparent
+        stack.setOpacity(0.5, at: 1)
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(stack)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        view.penBrushSettings.size = 8 // large enough to fully cover the sample point below
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        guard let midDragRendered = renderOffscreen(view) else {
+            XCTFail("renderOffscreen failed")
+            return
+        }
+        let sampleX = 4 * zoomScale + zoomScale / 2
+        let sampleY = 4 * zoomScale + zoomScale / 2
+        let midRed = midDragRendered.colorAt(x: sampleX, y: sampleY)?.usingColorSpace(.deviceRGB)?.redComponent
+
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        guard let postFlushRendered = renderOffscreen(view) else {
+            XCTFail("renderOffscreen failed")
+            return
+        }
+        let postRed = postFlushRendered.colorAt(x: sampleX, y: sampleY)?.usingColorSpace(.deviceRGB)?.redComponent
+
+        XCTAssertNotNil(midRed)
+        XCTAssertNotNil(postRed)
+        XCTAssertEqual(midRed ?? -1, postRed ?? -2, accuracy: 0.02, "the live pen-stroke preview must render the same color the finished, flushed stroke's ordinary composite produces")
+        XCTAssertGreaterThan(midRed ?? 1, 0.05, "sanity: sample should not be pure black")
+        XCTAssertLessThan(midRed ?? 0, 0.95, "sanity: layer opacity 0.5 must visibly blend, not render fully opaque")
+    }
+
+    func testDraw_livePenStrokePreview_visibleDuringDragBeforeMouseUp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        view.penBrushSettings.size = 8
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+
+        // The real layer canvas itself must still be untouched...
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r, 255, "the real layer must not show the stroke yet — it's still only buffered")
+
+        // ...while what's actually drawn on screen already shows it.
+        guard let rendered = renderOffscreen(view) else {
+            XCTFail("renderOffscreen failed")
+            return
+        }
+        let sampleX = 4 * zoomScale + zoomScale / 2
+        let sampleY = 4 * zoomScale + zoomScale / 2
+        let red = rendered.colorAt(x: sampleX, y: sampleY)?.usingColorSpace(.deviceRGB)?.redComponent
+        XCTAssertLessThan(red ?? 1, 0.9, "the live preview must already show the in-progress stroke on screen, even though the real layer hasn't changed")
+    }
+
+    func testMouseUp_afterPenDrag_withSelectionActive_paintsOnlyInsideSelectionMask() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 3, y1: 7, width: 8, height: 8) // left half only
+        let window = view.window!
+
+        let startPoint = windowPoint(forPixelCol: 1, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let dragPoint = windowPoint(forPixelCol: 6, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: startPoint, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window))
+        view.mouseUp(with: mouseUpEvent(at: dragPoint, in: window))
+
+        XCTAssertLessThan(view.layerStack.activeLayer.canvas.rawPixel(x: 1, y: 4)?.r ?? 255, 255, "inside the selection, the pen stroke must paint normally")
+        XCTAssertEqual(view.layerStack.activeLayer.canvas.rawPixel(x: 6, y: 4)?.r, 255, "outside the selection, even though the dragged stroke passes through here, it must stay untouched")
+    }
+
+    func testPenStroke_activeWhenSwitchingDocuments_autoFlushesOntoTheOriginatingDocument_leavesTheOtherDocumentUntouched() {
+        // Mirrors `testLayerTransform_activeWhenSwitchingDocuments_autoCommitsOntoTheOriginatingDocument_leavesTheOtherDocumentUntouched`
+        // above, but for a pen stroke instead of a layer transform —
+        // exercising the `activate(_:previouslyDisplayed:on:)` helper's own
+        // pen-flush addition (mirroring `AppDelegate.activateActiveDocument()`'s
+        // real `isPenStrokeInProgress` check).
+        let zoomScale = 4
+        let docA = Document(layerStack: LayerStack(width: 8, height: 8, background: .white), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 8, height: 8, background: .white), displayName: "b")
+
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(docA.layerStack)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "precondition: stroke still buffered, not yet confirmed")
+
+        activate(docB, previouslyDisplayed: docA, on: view) // switch tabs WITHOUT ever calling mouseUp
+
+        XCTAssertFalse(view.isPenStrokeInProgress, "switching documents must auto-flush the in-progress pen stroke")
+
+        let paintedPixel = docA.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)
+        XCTAssertLessThan(paintedPixel?.r ?? 255, 255, "the pen stroke must have landed on docA, the document it actually belongs to")
+
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let pixel = docB.layerStack.activeLayer.canvas.rawPixel(x: x, y: y)
+                XCTAssertEqual(pixel?.r, 255, "docB x=\(x) y=\(y) must be completely untouched by a pen stroke that belongs to docA")
+                XCTAssertEqual(pixel?.a, 255, "docB x=\(x) y=\(y) alpha must be completely untouched too")
+            }
+        }
+    }
+
+    // MARK: - Pen stroke auto-flush/cancel call sites (issue #20 test-authoring
+    // pass): undo/redo, history-jump, and the adjustment-dialog route
+    //
+    // `AppDelegate` itself can't be unit tested directly (see
+    // `activate(_:previouslyDisplayed:on:)`'s own doc comment above), so —
+    // same as that helper — these reproduce the exact cancel/flush protocol
+    // each of `AppDelegate.undo()`/`redo()`, `historyPanelView.onJumpToIndex`,
+    // and `commitAnyPendingLayerEdits()` already follows, directly against
+    // `CanvasView` + `HistoryManager`.
+
+    func testUndo_calledMidPenStroke_cancelsStrokeWithoutBakingIntoRestoredSnapshot() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 8, height: 8, background: .white))
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        // A prior, completed edit — the checkpoint undo should actually land on.
+        document.layerStack.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+        document.history.record(document.layerStack, label: "鉛筆")
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke, not yet flushed")
+
+        // Mirrors `AppDelegate.undo()`'s own ordering: CANCEL (never flush)
+        // any in-progress pen stroke before applying the restored snapshot —
+        // see `cancelPenStroke()`'s own doc comment for why undo/redo
+        // specifically cancel rather than flush (the stroke has no history
+        // entry of its own to fall back to).
+        if view.isPenStrokeInProgress { view.cancelPenStroke() }
+        guard let restored = document.history.undo() else {
+            XCTFail("expected an undo checkpoint")
+            return
+        }
+        view.replaceLayerStack(restored.layerStack)
+
+        XCTAssertFalse(view.isPenStrokeInProgress, "undo must cancel the in-progress stroke")
+        // The restored snapshot is "初期状態" (index 0), taken before even
+        // the "鉛筆" edit above — (0,0) must be untouched...
+        XCTAssertEqual(restored.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 255)
+        // ...and nothing from the still-buffered, never-flushed pen stroke
+        // leaked into it either.
+        XCTAssertEqual(restored.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r, 255, "the cancelled pen stroke must not appear anywhere in the restored history snapshot")
+    }
+
+    func testHistoryJump_midPenStroke_cancelsStrokeNotFlush() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 8, height: 8, background: .white))
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke, not yet flushed")
+
+        // Mirrors `AppDelegate`'s `historyPanelView.onJumpToIndex`: a jump
+        // swaps in a whole different, unrelated snapshot, so the
+        // in-progress stroke is cancelled, not flushed.
+        if view.isPenStrokeInProgress { view.cancelPenStroke() }
+        guard let jumped = document.history.jump(to: 0) else {
+            XCTFail("expected the '初期状態' entry at index 0")
+            return
+        }
+        view.replaceLayerStack(jumped.layerStack)
+
+        XCTAssertFalse(view.isPenStrokeInProgress, "a history jump must cancel the in-progress stroke")
+        XCTAssertEqual(jumped.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r, 255, "the cancelled pen stroke must not have been flushed into the jumped-to snapshot")
+    }
+
+    func testAdjustmentDialog_openedMidPenStroke_flushesStrokeFirst_dialogSeesFinishedStroke() {
+        // Mirrors `AppDelegate.commitAnyPendingLayerEdits()` — unlike
+        // undo/redo/history-jump above, opening an adjustment dialog
+        // FLUSHES (not cancels) an in-progress pen stroke: the dialog
+        // reads/writes the active layer's real pixels directly, and — same
+        // asymmetry as `mouseDown`'s own "flush, not cancel" doc comment —
+        // there's no history entry to fall back to if the stroke were
+        // simply discarded.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        view.foregroundColor = .black
+        let window = view.window!
+
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertTrue(view.isPenStrokeInProgress, "precondition: mid-stroke, not yet flushed")
+
+        // Mirrors `AppDelegate.commitAnyPendingLayerEdits()`, called right
+        // before an adjustment dialog reads/writes the active layer.
+        if view.isTransforming { view.commitLayerTransform() }
+        if view.isPenStrokeInProgress { view.flushPenStroke() }
+
+        XCTAssertFalse(view.isPenStrokeInProgress, "opening the dialog must flush (confirm), not cancel, the in-progress stroke")
+        XCTAssertLessThan(view.layerStack.activeLayer.canvas.rawPixel(x: 4, y: 4)?.r ?? 255, 255, "the dialog must see the finished stroke's pixels already baked into the active layer")
     }
 
     // MARK: - Eyedropper tool (issue #14)
@@ -3661,6 +4116,27 @@ final class CanvasViewTests: XCTestCase {
         view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
 
         XCTAssertEqual(labels, ["鉛筆"])
+    }
+
+    func testOnEditCompleted_penStroke_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
+        // Mirrors the pencil test directly above, but for the pen's
+        // accumulation-buffer path (issue #20): `mouseDown`/`mouseDragged`
+        // only ever stamp into `penStrokeBuffer`, so this also confirms
+        // `flushPenStroke()` at `mouseUp` is the sole place `onEditCompleted`
+        // fires for a pen gesture — never once per dab.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .pen
+        let window = view.window!
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 2, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+        view.mouseUp(with: mouseUpEvent(at: windowPoint(forPixelCol: 3, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: window))
+
+        XCTAssertEqual(labels, ["ペン"])
     }
 
     func testOnEditCompleted_rectangleSelect_mouseDownMultipleDraggedMouseUp_firesExactlyOnce() {
