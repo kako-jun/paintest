@@ -61,6 +61,12 @@ final class ToolboxViewTests: XCTestCase {
     // purely visual placeholder with no target/action, same as before.
     private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド"]
 
+    // The one placeholder tool tip that's disabled rather than merely
+    // unwired (issue #43); kept alongside `wiredToolTips` since the two
+    // constants are used together throughout this file to partition all 19
+    // buttons into wired / disabled-placeholder / other-placeholder.
+    private static let textToolTip = "テキスト"
+
     func testOnlyPencilEraserPenEyedropperMagnifierAndSelectTools_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
@@ -329,8 +335,6 @@ final class ToolboxViewTests: XCTestCase {
     // target/action, unchanged and out of scope here), but unlike them it's
     // also disabled now, so it reads as not-yet-implemented instead of a
     // button that silently does nothing when clicked.
-
-    private static let textToolTip = "テキスト"
 
     func testTextButton_isDisabled() {
         let view = makeView()
