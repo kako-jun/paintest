@@ -278,6 +278,25 @@ final class CanvasView: NSView {
     /// already does the equivalent for `isTransforming`.
     var isPenStrokeInProgress: Bool { penStrokeBuffer != nil }
 
+    /// Whether a crop rectangle is currently pending (issue #21 test-design
+    /// review) — `true` exactly when `cropRect` is non-`nil`. Exposed
+    /// read-only, mirroring `isTransforming`/`isPenStrokeInProgress` above,
+    /// for a related but distinct hazard: `cropRect` holds pixel coordinates
+    /// against *this* `layerStack`'s own size, so anything that can swap
+    /// `layerStack` out for a different (possibly differently-sized) one, or
+    /// restore a whole different history snapshot, needs to discard it
+    /// first — unlike `isTransforming`/`isPenStrokeInProgress`, whose callers
+    /// commit/flush the pending edit onto the canvas, every one of these
+    /// callers instead calls `cancelCrop()`: `commitCrop()` is a destructive,
+    /// canvas-resizing operation, and auto-committing it the instant the user
+    /// switches documents/undoes/redoes/jumps history would be surprising and
+    /// unrecoverable in a way flushing a pen stroke or baking in a transform
+    /// isn't. See `AppDelegate.activateActiveDocument()`, `undo()`/`redo()`,
+    /// `historyPanelView.onJumpToIndex`, and `layerPanelView
+    /// .willChangeActiveLayer`, each of which already does the equivalent for
+    /// `isTransforming`/`isPenStrokeInProgress`.
+    var isCropping: Bool { cropRect != nil }
+
     /// A transform handle is hit-testable within this many *view* points of
     /// its exact position (so the hitbox stays a constant on-screen size
     /// regardless of zoom) — mirrors `magnifierClickThreshold`/
@@ -977,9 +996,16 @@ final class CanvasView: NSView {
     /// a fully-formed pending rectangle) — used by `activeTool`'s own
     /// `didSet`, `beginLayerTransform()` (both preempt the crop tool
     /// entirely), `commitCrop()` (to clear its own state once the crop
-    /// lands for real), and the crop tool's own Escape handling in
-    /// `keyDown(with:)`.
-    private func cancelCrop() {
+    /// lands for real), the crop tool's own Escape handling in
+    /// `keyDown(with:)`, and (issue #21 test-design review, via `isCropping`)
+    /// every `AppDelegate` call site that can swap `layerStack` out or
+    /// restore a different history snapshot out from under a pending crop:
+    /// `activateActiveDocument()`, `undo()`/`redo()`, `historyPanelView
+    /// .onJumpToIndex`, and `layerPanelView.willChangeActiveLayer`. Not
+    /// `private` for exactly that reason — `AppDelegate` needs to call it
+    /// directly, the same way it calls `cancelLayerTransform()`/
+    /// `cancelPenStroke()`.
+    func cancelCrop() {
         cropDragStart = nil
         cropDragCurrent = nil
         cropRect = nil
