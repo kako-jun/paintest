@@ -957,6 +957,35 @@ final class CanvasView: NSView {
     /// movement so far, rather than accumulating per-event deltas.
     private var cropDragStartRect: LayerTransform?
 
+    /// Whether the *current* `cropRect` came from an initial drag so short
+    /// it needed floor-clamping to `transformMinimumSize` on either axis —
+    /// i.e. the user never actually dragged out a rectangle, they just
+    /// clicked (issue #21 review must-1). A plain click and the first tap of
+    /// a double-click are indistinguishable to `mouseDown`/`mouseUp` up to
+    /// this point, so without this flag the second tap's `mouseDown` —
+    /// landing well inside the freshly-created minimum-size rectangle, since
+    /// its half-width/half-height comfortably clear
+    /// `transformHandleHitRadius` — reads as an ordinary `.move`-handle
+    /// double-click and `commitCrop()` fires immediately: a destructive,
+    /// unconfirmed crop down to 4x4 pixels with no drag and no rectangle
+    /// ever actually shown to the user.
+    ///
+    /// `mouseUp` sets this the moment it creates `cropRect` from the initial
+    /// drag (see that branch below); `mouseDown`'s double-click check
+    /// refuses to `commitCrop()` while it's `true`, falling through to the
+    /// ordinary single-click handle-drag start instead — so the second tap
+    /// just starts adjusting the rectangle rather than confirming it
+    /// outright. Cleared back to `false` the moment the user actually
+    /// adjusts the rectangle via a handle/move drag (`mouseDragged`'s
+    /// crop-handle branch): from that point on the pending rectangle
+    /// reflects a deliberate choice, so a later double-click confirming it
+    /// is legitimate again, the same way it always safely is for
+    /// `activeTransform`'s own identity-rectangle double-click convention.
+    /// `cancelCrop()` resets this too, for the same "safe to call at any
+    /// point in the gesture" reason it resets every other piece of crop
+    /// state.
+    private var cropRectWasClamped = false
+
     /// Hit-tests a view-space click/drag-start point against `rect`'s
     /// handles and interior, at the current `zoomScale` — the crop tool's
     /// counterpart to `hitTestTransformHandle(at:transform:)`, minus that
@@ -1012,6 +1041,7 @@ final class CanvasView: NSView {
         cropDragHandle = nil
         cropDragStartPoint = nil
         cropDragStartRect = nil
+        cropRectWasClamped = false
         needsDisplay = true
     }
 
@@ -1984,7 +2014,20 @@ final class CanvasView: NSView {
                 // "done adjusting, apply it now" convention `activeTransform`
                 // already uses.
                 let handle = hitTestCropHandle(at: point, rect: cropRect)
-                if event.clickCount == 2, handle == .move {
+                // A double-click confirms outright — but only once the
+                // pending rectangle actually reflects a user-specified
+                // range, not the click-sized default `mouseUp` falls back to
+                // when the initial drag was too short to clear
+                // `transformMinimumSize` (issue #21 review must-1): a
+                // drag-less click immediately followed by the second tap of
+                // a double-click would otherwise land squarely inside that
+                // freshly-created minimum-size rectangle and auto-commit it
+                // with no confirmation ever shown — see
+                // `cropRectWasClamped`'s own doc comment. Falling through to
+                // the ordinary single-click handle-drag start below instead
+                // just lets the user keep adjusting it, exactly as any other
+                // click on the rectangle would.
+                if event.clickCount == 2, handle == .move, !cropRectWasClamped {
                     commitCrop()
                     return
                 }
@@ -2172,6 +2215,14 @@ final class CanvasView: NSView {
             // above, reusing `resizeByCorner`/`resizeByEdge` outright since
             // `cropRect` never carries any rotation for either to correct
             // for (see `cropRect`'s own doc comment).
+            //
+            // Reaching here at all means the user is actively dragging a
+            // handle to adjust the rectangle (issue #21 review must-1) —
+            // even when `cropRect` started out click-sized (see
+            // `cropRectWasClamped`), it no longer counts as an unadjusted
+            // default once a real drag has touched it, so a later
+            // double-click confirming it becomes legitimate again.
+            cropRectWasClamped = false
             let point = convert(event.locationInWindow, from: nil)
             let scale = CGFloat(zoomScale)
             let dx = Double((point.x - startPoint.x) / scale)
@@ -2371,8 +2422,18 @@ final class CanvasView: NSView {
                 let maxX = max(p0.x, p1.x) + 1
                 let minY = min(p0.y, p1.y)
                 let maxY = max(p0.y, p1.y) + 1
-                let width = max(Self.transformMinimumSize, Double(maxX - minX))
-                let height = max(Self.transformMinimumSize, Double(maxY - minY))
+                let rawWidth = Double(maxX - minX)
+                let rawHeight = Double(maxY - minY)
+                let width = max(Self.transformMinimumSize, rawWidth)
+                let height = max(Self.transformMinimumSize, rawHeight)
+                // Recorded from the *raw*, pre-clamp extent (issue #21
+                // review must-1): a drag whose raw width or height already
+                // needed flooring up to `transformMinimumSize` means the
+                // user didn't really drag out a rectangle at all — see
+                // `cropRectWasClamped`'s own doc comment for why that
+                // disqualifies the very next double-click from
+                // auto-confirming.
+                cropRectWasClamped = rawWidth < Self.transformMinimumSize || rawHeight < Self.transformMinimumSize
                 cropRect = LayerTransform(centerX: Double(minX + maxX) / 2, centerY: Double(minY + maxY) / 2, width: width, height: height)
                 return
             }

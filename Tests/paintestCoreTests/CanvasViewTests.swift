@@ -4568,6 +4568,84 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(view.layerStack.height, 4)
     }
 
+    func testCropTool_doubleClickImmediatelyAfterUnadjustedMinimumSizeRect_doesNotAutoCommit() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let before = makeDistinctlyColoredCanvas(view: view, size: 8)
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        // First tap of a double-click: a plain click with no drag between
+        // mouseDown and mouseUp, exactly like
+        // testCropTool_mouseUpWithoutDrag_stillCreatesMinimumSizeRect_doesNotCrash
+        // above — mouseUp still promotes it into a minimum-size (4x4)
+        // pending rectangle centered on the click.
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        XCTAssertTrue(view.isCropping, "precondition: the drag-less click still produced a pending rectangle")
+        XCTAssertEqual(view.layerStack.width, 8, "precondition: nothing has been committed yet")
+
+        // Second tap, landing at essentially the same point: the freshly
+        // created rectangle's half-width/half-height (2 canvas px * 4 zoom
+        // = 8 view points) comfortably clears transformHandleHitRadius (6
+        // view points), so this click unambiguously hits `.move`, not a
+        // corner/edge handle — exactly the geometry issue #21 review
+        // must-1 identified as silently auto-committing before this fix.
+        view.mouseDown(with: mouseDownEvent(at: point, in: window, clickCount: 2))
+
+        XCTAssertTrue(view.isCropping, "an unadjusted, click-sized rectangle must not auto-commit on the very next double-click")
+        XCTAssertEqual(view.layerStack.width, 8, "the canvas must still be completely untouched — no destructive crop happened without the user ever seeing/adjusting a rectangle")
+        XCTAssertEqual(view.layerStack.height, 8)
+        assertCanvas(view, size: 8, matches: before)
+
+        // The pending crop must still be explicitly completable afterward
+        // (Return), proving this isn't stuck — just no longer
+        // auto-confirmed by an accidental double-click.
+        view.mouseUp(with: mouseUpEvent(at: point, in: window)) // resets the second click's own drag state
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+        XCTAssertEqual(view.layerStack.width, 4)
+        XCTAssertEqual(view.layerStack.height, 4)
+    }
+
+    func testCropTool_handleDragAfterUnadjustedMinimumSizeRect_reenablesDoubleClickCommit() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .crop
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        // Same drag-less click as the "does not auto-commit" test above:
+        // produces a click-sized, unadjusted 4x4 pending rectangle centered
+        // on (3.5, 3.5) — canvas corners (1.5,1.5)-(5.5,5.5).
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        XCTAssertTrue(view.isCropping, "precondition: the drag-less click still produced a pending rectangle")
+
+        // A real handle drag — grabs the bottom-right corner and pulls it
+        // out to (7.5, 7.5), pinning the top-left corner at (1.5, 1.5) —
+        // must count as the user actually adjusting the rectangle (issue
+        // #21 review must-1's "ハンドルドラッグで矩形を一度でも調整すれば"
+        // requirement), clearing the "still just an unadjusted click" state
+        // the double-click check above refuses to auto-commit from.
+        let cornerDown = transformWindowPoint(canvasX: 5.5, canvasY: 5.5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let cornerDrag = transformWindowPoint(canvasX: 7.5, canvasY: 7.5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: cornerDown, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: cornerDrag, in: window))
+        view.mouseUp(with: mouseUpEvent(at: cornerDrag, in: window))
+        XCTAssertTrue(view.isCropping, "precondition: the handle drag only adjusts the pending rect, it doesn't commit by itself")
+
+        // A double-click on the now-adjusted rectangle's interior must
+        // confirm it normally, same as any other deliberately-dragged crop
+        // rectangle (testCropTool_dragThenDoubleClickInterior_commitsSameResultAsEnter).
+        let interior = transformWindowPoint(canvasX: 4.5, canvasY: 4.5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: interior, in: window, clickCount: 2))
+
+        XCTAssertFalse(view.isCropping, "a double-click after a real handle adjustment must commit, same as it always could")
+        XCTAssertEqual(view.layerStack.width, 6, "the corner drag (1.5,1.5)-(5.5,5.5) -> (1.5,1.5)-(7.5,7.5) must widen the committed rect to 6")
+        XCTAssertEqual(view.layerStack.height, 6)
+    }
+
     func testCropTool_dragEntirelyOutsideCanvasBounds_commitProducesFullyTransparentLayerStack_doesNotCrash() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
