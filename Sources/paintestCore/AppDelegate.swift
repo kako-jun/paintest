@@ -161,6 +161,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvasView.onEditCompleted = { [weak self] label in
             self?.recordHistoryCheckpoint(label: label)
         }
+        // The crop tool (issue #21) replaces `canvasView.layerStack` with a
+        // brand new instance (its `width`/`height` are `let`, so a crop
+        // can't just mutate the existing one in place) — `displayedDocument`
+        // and `layerPanelView` each hold their own separate reference to
+        // the pre-crop stack that only this delegate can re-point.
+        // `CanvasView.commitCrop()` fires this callback *before*
+        // `onEditCompleted` above, so `document.layerStack` already points
+        // at the cropped stack by the time `recordHistoryCheckpoint(label:)`
+        // reads it — keeping that method's existing "`document.layerStack`
+        // already is the edit being recorded" assumption true for crop too.
+        // See `CanvasView.onLayerStackReplaced`'s own doc comment.
+        canvasView.onLayerStackReplaced = { [weak self] newLayerStack in
+            guard let self, let document = self.displayedDocument else { return }
+            document.layerStack = newLayerStack
+            self.layerPanelView.replaceLayerStack(newLayerStack)
+        }
 
         scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
