@@ -149,6 +149,16 @@ final class ToolboxView: NSView {
         button.imageScaling = .scaleProportionallyDown
         button.toolTip = tool.label
         button.state = isPencil ? .on : .off
+        // "テキスト" (issue #42) has no target/action yet like the other
+        // unwired placeholders, but unlike them it's disabled here so it
+        // reads as not-yet-implemented instead of a button that silently
+        // does nothing when clicked (issue #43). The other placeholders
+        // (airbrush/line/curve/rectangle/polygon/ellipse/rounded-rectangle,
+        // plus gradient which has no icon here yet under issue #41) are
+        // intentionally left alone — out of scope for #43.
+        if tool.label == "テキスト" {
+            button.isEnabled = false
+        }
         NSLayoutConstraint.activate([
             button.widthAnchor.constraint(equalToConstant: Self.buttonSide),
             button.heightAnchor.constraint(equalToConstant: Self.buttonSide)
