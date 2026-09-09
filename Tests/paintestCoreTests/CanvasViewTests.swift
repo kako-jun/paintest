@@ -5354,16 +5354,35 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertTrue(view.isCropping, "precondition: a crop rectangle is pending")
 
         // Unlike undo/redo/history-jump/tab-switch/layer-switch above,
-        // adding a layer never swaps out layerStack itself or changes its
+        // add/remove/reorder never swap out layerStack itself or change its
         // size — only layerStack.layers/activeLayerIndex — so no cancel is
-        // needed here; commitCrop() reads layerStack.layers fresh at commit
-        // time and just picks up whatever is there.
-        view.layerStack.addLayer()
+        // needed for any of them; commitCrop() reads layerStack.layers fresh
+        // at commit time and just picks up whatever is there. (Issue #21
+        // review should-3: this test used to only actually exercise Add,
+        // despite its own name claiming all three — Remove/Reorder are
+        // exercised below too now.)
+        view.layerStack.addLayer(name: "追加1")
+        view.layerStack.addLayer(name: "追加2")
         XCTAssertTrue(view.isCropping, "adding a layer must not cancel the pending crop — no cancel is needed for this call site")
+
+        // Remove: drop the original background layer, leaving only the two
+        // added above — commitCrop() must not choke on a layerStack.layers
+        // shorter than it was when the crop gesture began.
+        view.layerStack.removeLayer(at: 0)
+        XCTAssertTrue(view.isCropping, "removing a layer must not cancel the pending crop — no cancel is needed for this call site")
+        XCTAssertEqual(view.layerStack.layers.map(\.name), ["追加1", "追加2"], "precondition: removal left exactly the two added layers, in their original order")
+
+        // Reorder: swap the two remaining layers — commitCrop() must
+        // preserve whatever order layers is in at commit time, not some
+        // order captured back when the crop gesture started.
+        view.layerStack.moveLayer(from: 0, to: 1)
+        XCTAssertTrue(view.isCropping, "reordering layers must not cancel the pending crop — no cancel is needed for this call site")
+        XCTAssertEqual(view.layerStack.layers.map(\.name), ["追加2", "追加1"], "precondition: the reorder actually swapped the two layers")
 
         view.keyDown(with: keyDownEvent(keyCode: 36, in: window)) // Return: commit must not crash
 
-        XCTAssertEqual(view.layerStack.layers.count, 2, "the layer added mid-crop must survive the commit, itself cropped too")
+        XCTAssertEqual(view.layerStack.layers.count, 2, "the add-then-remove left exactly 2 layers, and both must survive the commit, each cropped too")
+        XCTAssertEqual(view.layerStack.layers.map(\.name), ["追加2", "追加1"], "the committed stack must reflect the post-reorder layer order, proving commitCrop() reads layers fresh at commit time rather than some snapshot from when the crop gesture began")
         XCTAssertEqual(view.layerStack.width, 4)
         XCTAssertEqual(view.layerStack.height, 4)
     }
