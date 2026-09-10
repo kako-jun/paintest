@@ -2060,12 +2060,25 @@ final class CanvasView: NSView {
             }
             // No anti-aliasing (CLAUDE.md: bucket fill is a classic tool,
             // dot-exact pixels only) — every pixel in `fillMask` is
-            // overwritten outright with the solid foreground color, same
-            // as `PixelCanvas.setPixel`'s own no-blur contract.
-            for y in 0..<layerStack.height {
-                for x in 0..<layerStack.width {
-                    guard fillMask.contains(x: x, y: y) else { continue }
-                    canvas.setPixel(x: x, y: y, color: foregroundColor)
+            // overwritten outright with the solid foreground color, via
+            // `PixelCanvas.setPixel(x:y:color:mask:)`'s own mask-restricted
+            // overload (the same selection-masking mechanism issue #11's
+            // other painting tools already use) rather than a bespoke
+            // `fillMask.contains` guard duplicating that check here.
+            //
+            // Scanning only `fillMask.boundingBox` — instead of every pixel
+            // in `0..<layerStack.width` / `0..<layerStack.height`
+            // unconditionally — means a fill on a small flood-filled region
+            // of a large canvas costs proportional to that region's own
+            // extent, not the whole canvas. `boundingBox` is `nil` only
+            // when `fillMask` selected nothing at all (e.g. an empty
+            // intersection with `selection` above), in which case there is
+            // nothing to paint.
+            if let box = fillMask.boundingBox {
+                for y in box.minY...box.maxY {
+                    for x in box.minX...box.maxX {
+                        canvas.setPixel(x: x, y: y, color: foregroundColor, mask: fillMask)
+                    }
                 }
             }
             onLayerContentChanged?()

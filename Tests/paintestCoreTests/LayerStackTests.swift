@@ -170,6 +170,22 @@ final class LayerStackTests: XCTestCase {
         XCTAssertEqual(stack.layers[0].canvas.rawPixel(x: 0, y: 0)?.r, 255, "editing the duplicate's canvas must not mutate the source layer's canvas")
     }
 
+    func testDuplicateLayer_preservesBlendMode() {
+        // Regression test (independent review of issue #40's PR, must-1):
+        // `duplicateLayer` used to build its `Layer(...)` without a
+        // `blendMode:` argument at all, silently defaulting the copy to
+        // `.normal` regardless of the source layer's own blend mode.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setBlendMode(.multiply, at: 0)
+
+        guard let duplicate = stack.duplicateLayer(at: 0) else {
+            XCTFail("duplicateLayer returned nil")
+            return
+        }
+
+        XCTAssertEqual(duplicate.blendMode, .multiply, "duplicating a layer must carry over its blend mode, not silently reset it to .normal")
+    }
+
     // MARK: - moveLayer (test list 13-15)
 
     func testMoveLayer_tracksActiveLayerByObjectIdentityWhenAnotherLayerMoves() {
@@ -407,10 +423,17 @@ final class LayerStackTests: XCTestCase {
         XCTAssertEqual(stack.activeLayerIndex, 1, "the merged layer replaces index 1 (the lower of the merged pair)")
     }
 
-    func testMergeDown_mergedLayer_alwaysHasFullOpacityNormalBlendAndIsVisible() {
-        // Issue #37 integration: opacity/blend mode are baked into the
-        // merged pixels themselves, so the merged layer's own metadata
-        // must reset to the values that apply nothing further.
+    func testMergeDown_mergedLayer_resetsOpacityAndVisibilityButCarriesOverLowerLayersBlendMode() {
+        // Issue #37 integration + issue #40 self-review must-2: opacity is
+        // baked into the merged pixels themselves, so the merged layer's
+        // own opacity must reset to the value (`1.0`) that applies nothing
+        // further, and the merged layer is always visible regardless of
+        // either original layer's own visibility. `blendMode` is NOT baked
+        // in the same way — it describes how the merged layer's *slot*
+        // relates to whatever still sits further below it in the full
+        // stack — so it carries over unchanged from the lower layer
+        // (index 0's original `.multiply`) instead of being forced to
+        // `.normal`. See `LayerStack.mergeDown`'s own doc comment.
         let stack = LayerStack(width: 2, height: 2, background: .white)
         stack.setOpacity(0.4, at: 0)
         stack.setBlendMode(.multiply, at: 0)
@@ -422,7 +445,7 @@ final class LayerStackTests: XCTestCase {
         stack.mergeDown(at: 1)
 
         XCTAssertEqual(stack.layers[0].opacity, 1)
-        XCTAssertEqual(stack.layers[0].blendMode, .normal)
+        XCTAssertEqual(stack.layers[0].blendMode, .multiply, "carries over the lower layer's (index 0) original blend mode, not reset to .normal")
         XCTAssertTrue(stack.layers[0].isVisible)
     }
 
@@ -483,6 +506,102 @@ final class LayerStackTests: XCTestCase {
             return
         }
         XCTAssertEqual(pixel.r, 255, "the hidden upper layer's black must not show through; only the visible white lower layer should")
+    }
+
+    func testMergeDown_bothLayersHidden_mergedLayerIsStillForcedVisible_producingATransparentCanvas() {
+        // nit (independent review of issue #40's PR): NOT a behavior
+        // change — `mergeDown` always forces the merged layer's own
+        // `isVisible` to `true` (see its own doc comment), regardless of
+        // whether either original layer was itself hidden. With BOTH
+        // original layers hidden, `mergedCanvas` draws neither of them
+        // (each draw is behind its own `isVisible` guard), so the merged
+        // layer ends up visible but with a fully transparent canvas. This
+        // test just pins that existing, intentionally-unchanged behavior
+        // — not a claim that it's the "correct" outcome.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setVisibility(false, at: 0)
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: .black)
+        stack.setVisibility(false, at: 1)
+
+        stack.mergeDown(at: 1)
+
+        XCTAssertTrue(stack.layers[0].isVisible, "current behavior: mergeDown always forces the merged layer visible, even when both merged layers were hidden")
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.a, 0, "neither original layer was ever drawn (both hidden), so the merged canvas is fully transparent")
+    }
+
+    func testMergeDown_threeLayerStack_mergedBlendModeCarriesOverAndCompositeMatchesHandComputedApproximation() {
+        // 3-layer stack (issue #40 self-review must-2's own motivating
+        // scenario): L0 normal/opaque gray(200), L1 multiply/opaque
+        // gray(30) — an arbitrary, distinguishable value chosen
+        // specifically to prove it has NO effect on the outcome below —
+        // L2 normal/opaque gray(100). Merging L2 into L1
+        // (`mergeDown(at: 2)`) must carry the merged layer's `blendMode`
+        // over from L1 (`.multiply`), per this fix.
+        //
+        // Hand trace of `mergedCanvas(lower: L1, upper: L2)`:
+        //   - L1 is drawn first (blendMode `.multiply`) onto an initially
+        //     empty (alpha 0) context: a blend mode's backdrop term
+        //     vanishes against zero backdrop alpha, so this just paints
+        //     L1's own color, gray(30), at full opacity — L1's blend mode
+        //     has no observable effect here at all.
+        //   - L2 is then drawn on top (blendMode `.normal`, i.e.
+        //     source-over) at full opacity, fully opaque: source-over
+        //     with source alpha 1 completely overwrites whatever was
+        //     beneath it, regardless of that color. Result: flat
+        //     gray(100) — L2's own color exactly; L1's gray(30) never
+        //     survives into the merged canvas at all.
+        // So the merged layer (now at index 1)'s canvas is a flat
+        // gray(100), same as if L1 had never existed — but its own
+        // `blendMode` metadata is still `.multiply` (carried over from
+        // L1, per this fix), NOT `.normal`.
+        //
+        // `compositeImage()` of [L0 gray(200) normal, merged gray(100)
+        // multiply] therefore retroactively multiply-blends L2's own
+        // color against L0: multiply(200, 100) = 200*100/255 ≈ 78.4 —
+        // the same formula `makeTwoGrayLayerStack`'s own multiply test
+        // above derives and pins to ~78, same ±15 tolerance kept here for
+        // the same sRGB/deviceRGB rounding reasons documented there.
+        //
+        // KNOWN APPROXIMATION EXAMPLE: the *true* pre-merge composite of
+        // all three layers is just gray(100) — L2 sits on top, fully
+        // opaque and `.normal`-blended, so it completely covers
+        // everything beneath it (L0's gray(200) multiplied by L1's
+        // gray(30) included) regardless of any blend mode further down.
+        // After merging, that same visible gray(100) gets
+        // multiply-blended against L0 all over again, producing ~78
+        // instead of the "true" 100 — exactly the kind of case
+        // `mergeDown`'s own doc comment calls out as an unavoidable
+        // approximation once opacity/blend modes are involved. Pinned
+        // here (rather than "fixed") so a future change to this behavior
+        // is caught instead of silently drifting further, per kako-jun's
+        // decision on issue #40 self-review must-2 to keep current
+        // behavior and document it rather than rewrite the merge
+        // algorithm.
+        let bottom = NSColor(deviceRed: 200.0 / 255.0, green: 200.0 / 255.0, blue: 200.0 / 255.0, alpha: 1)
+        let middle = NSColor(deviceRed: 30.0 / 255.0, green: 30.0 / 255.0, blue: 30.0 / 255.0, alpha: 1)
+        let top = NSColor(deviceRed: 100.0 / 255.0, green: 100.0 / 255.0, blue: 100.0 / 255.0, alpha: 1)
+        let stack = LayerStack(width: 2, height: 2, background: bottom) // L0
+        stack.addLayer() // L1
+        stack.activeLayer.canvas.fill(with: middle)
+        stack.setBlendMode(.multiply, at: 1)
+        stack.addLayer() // L2
+        stack.activeLayer.canvas.fill(with: top)
+
+        stack.mergeDown(at: 2)
+
+        XCTAssertEqual(stack.layers.count, 2)
+        XCTAssertEqual(stack.layers[1].blendMode, .multiply, "the merged layer must carry over L1's original blend mode, not reset to .normal")
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(pixel.r), 78, accuracy: 15, "known approximation: L2's own color (which fully covered L1 during the merge) is now retroactively multiply-blended against L0, instead of showing as L2's true un-blended gray(100)")
     }
 
     func testFlatten_singleLayer_isNoOp_layerCountStaysOne() {

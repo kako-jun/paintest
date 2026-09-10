@@ -144,7 +144,8 @@ final class LayerStack {
             canvas: source.canvas.copy(),
             name: "\(source.name) のコピー",
             isVisible: source.isVisible,
-            opacity: source.opacity
+            opacity: source.opacity,
+            blendMode: source.blendMode
         )
         let insertIndex = index + 1
         layers.insert(duplicate, at: insertIndex)
@@ -198,11 +199,23 @@ final class LayerStack {
     /// transparent canvas — each respecting its own `isVisible`/`opacity`/
     /// `blendMode` (see `mergedCanvas(lower:upper:width:height:)`) — the
     /// same per-layer draw `renderComposite`'s own loop performs for any
-    /// two adjacent layers. The merged layer's own `opacity`/`blendMode`
-    /// are then reset to `1.0`/`.normal`: every bit of "how transparent" or
-    /// "how blended" the two original layers were has already been baked
-    /// into the resulting canvas's own per-pixel alpha and color by that
-    /// draw, so re-applying either scalar again on top would double it.
+    /// two adjacent layers. The merged layer's own `opacity` is then reset
+    /// to `1.0`: how transparent the two original layers were *relative to
+    /// each other* has already been baked into the resulting canvas's own
+    /// per-pixel alpha by that draw, so re-applying either original opacity
+    /// again on top would double it.
+    ///
+    /// `blendMode`, unlike `opacity`, is carried over unchanged from the
+    /// *lower* layer, not reset to `.normal`: the merged layer takes over
+    /// the lower layer's own slot in the stack (`layers[lowerIndex] =
+    /// mergedLayer` below), and that slot's blend mode is what describes
+    /// how its contents relate to whatever still sits further beneath it —
+    /// something this isolated two-layer draw never sees or bakes in.
+    /// Force-resetting it to `.normal` here would silently sever that
+    /// relationship: e.g. L0 (`.normal`) / L1 (`.multiply`) / L2
+    /// (`.normal`) — merging L2 into L1 must leave the merged layer still
+    /// `.multiply` against L0, or L0 would stop showing through underneath
+    /// it at all.
     ///
     /// This reproduces the original pair's contribution to the rest of the
     /// stack *exactly* whenever both layers use `.normal` blend mode —
@@ -215,8 +228,17 @@ final class LayerStack {
     /// is an empty/transparent canvas — not whatever actually sits below
     /// `index - 1` in the full stack. This matches Photoshop-equivalent
     /// output for the common cases (nothing here uses a non-normal blend
-    /// mode, or the lower layer sits on an effectively opaque backdrop)
-    /// and is out of scope to solve exactly for the fully general case.
+    /// mode, the upper layer is fully opaque, or the lower layer sits on an
+    /// effectively opaque backdrop) — but when the upper layer is
+    /// semi-transparent *and* a non-normal blend mode is involved, a single
+    /// merged layer plus a single carried-over blend mode cannot always
+    /// reproduce the original pair's exact look against whatever sits
+    /// further below. General-purpose editors like Photoshop carry the same
+    /// kind of limitation for "merge down"/"flatten"; reworking this into an
+    /// exact general-case merge is a deliberately out-of-scope rewrite
+    /// (kako-jun decision, issue #40 self-review must-2) — current
+    /// behavior stays, thoroughly documented, with only the merged layer's
+    /// own carried-forward metadata (this `blendMode` fix) corrected.
     ///
     /// The merged layer takes the lower layer's own `name`, matching
     /// Photoshop's own "merge down" convention of keeping the name of the
@@ -225,7 +247,7 @@ final class LayerStack {
         guard index >= 1, layers.indices.contains(index) else { return }
         let lowerIndex = index - 1
         guard let mergedCanvas = LayerStack.mergedCanvas(lower: layers[lowerIndex], upper: layers[index], width: width, height: height) else { return }
-        let mergedLayer = Layer(canvas: mergedCanvas, name: layers[lowerIndex].name, isVisible: true, opacity: 1, blendMode: .normal)
+        let mergedLayer = Layer(canvas: mergedCanvas, name: layers[lowerIndex].name, isVisible: true, opacity: 1, blendMode: layers[lowerIndex].blendMode)
         layers.remove(at: index)
         layers[lowerIndex] = mergedLayer
         // Always a real change (`index >= 1` above guarantees `lowerIndex
