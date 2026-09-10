@@ -688,15 +688,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // placeholders below — the issue's own plan calls for adding them
         // "「イメージ」相当のメニュー項目として", not a nested "色調補正"
         // submenu the way real Photoshop groups them.
+        // "画像解像度…"/"カンバスサイズ…" (issue #39) replace the previous
+        // "拡大縮小と傾斜" placeholder — that single decorative item covered
+        // both "resample the whole image" and "resize the canvas without
+        // resampling" in name only; #39 splits them into their own real,
+        // wired dialogs (`ImageResolutionDialog`/`CanvasSizeDialog`),
+        // matching Photoshop's own separate "Image Size"/"Canvas Size"
+        // menu items.
         mainMenu.addItem(makeMenuItem(title: "イメージ", items: [
+            ("画像解像度…", #selector(showImageResolutionDialog), ""),
+            ("カンバスサイズ…", #selector(showCanvasSizeDialog), ""),
             ("トーンカーブ…", #selector(showToneCurveDialog), ""),
             ("明るさ・コントラスト…", #selector(showBrightnessContrastDialog), ""),
             ("色相・彩度…", #selector(showHueSaturationDialog), ""),
             ("レベル補正…", #selector(showLevelsDialog), "")
-        ], placeholders: ["反転と回転", "拡大縮小と傾斜", "色の反転", "属性…", "色の編集…"]))
+        ], placeholders: ["反転と回転", "色の反転", "属性…", "色の編集…"]))
+        // "下のレイヤーと結合"/"画像を統合" (issue #40) are real, wired items
+        // now — the former was a decorative placeholder before; the latter
+        // didn't exist on this menu at all. "新規レイヤー"/"レイヤーを複製"/
+        // "レイヤーを削除" stay decorative placeholders: those three already
+        // have real equivalents in `LayerPanelView`'s own button bar (issue
+        // #22), so wiring duplicate menu items for them is out of this
+        // issue's scope.
         mainMenu.addItem(makeMenuItem(title: "レイヤー", items: [
-            ("自由変形", #selector(beginLayerTransform), "t")
-        ], placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除", "下のレイヤーと結合"]))
+            ("自由変形", #selector(beginLayerTransform), "t"),
+            ("下のレイヤーと結合", #selector(mergeLayerDown), "e"),
+            ("画像を統合", #selector(flattenImage), "")
+        ], placeholders: ["新規レイヤー", "レイヤーを複製", "レイヤーを削除"]))
         mainMenu.addItem(makeMenuItem(title: "選択範囲", items: [
             ("すべてを選択", #selector(selectAll), "a"),
             ("選択を解除", #selector(deselectAll), "d"),
@@ -1239,6 +1257,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvasView.beginLayerTransform()
     }
 
+    /// "レイヤー" > "下のレイヤーと結合" (Cmd+E, matching Photoshop's own
+    /// shortcut — issue #40): merges the active layer down into the one
+    /// directly beneath it via `LayerStack.mergeDown(at:)`. A silent no-op
+    /// when the active layer is already the bottom-most one (nothing to
+    /// merge into), same as `LayerPanelView`'s own remove/duplicate/move
+    /// buttons stay silent no-ops at their own boundary conditions —
+    /// `mergeDown(at:)` itself already guards this, so nothing here needs
+    /// its own separate check beyond skipping the side effects below.
+    @objc private func mergeLayerDown() {
+        commitAnyPendingLayerEdits()
+        let index = canvasView.layerStack.activeLayerIndex
+        guard index >= 1 else { return }
+        canvasView.layerStack.mergeDown(at: index)
+        layerPanelView.reload()
+        documentTabBarView.reload()
+        documentManager.activeDocument.isDirty = true
+        canvasView.needsDisplay = true
+        recordHistoryCheckpoint(label: "レイヤーの結合")
+    }
+
+    /// "レイヤー" > "画像を統合" (Flatten Image, issue #40): merges every
+    /// layer into one via `LayerStack.flatten()`. A silent no-op for a
+    /// document that already has just one layer — same "no-op means
+    /// nothing happens, not even a history checkpoint" convention as
+    /// `mergeLayerDown` above.
+    @objc private func flattenImage() {
+        commitAnyPendingLayerEdits()
+        guard canvasView.layerStack.layers.count > 1 else { return }
+        canvasView.layerStack.flatten()
+        layerPanelView.reload()
+        documentTabBarView.reload()
+        documentManager.activeDocument.isDirty = true
+        canvasView.needsDisplay = true
+        recordHistoryCheckpoint(label: "画像を統合")
+    }
+
+    // MARK: - Image resolution / canvas size (issue #39)
+
+    /// "イメージ" > "画像解像度…": resamples every layer to a new pixel
+    /// resolution, nearest-neighbor (`LayerStack.resampled(toWidth:
+    /// toHeight:)`). Guards against the same in-progress-edit hazards
+    /// `undo()`/`redo()` above already document: an in-progress transform/
+    /// pen stroke is committed first (its pixels belong on the *current*
+    /// canvas, about to be replaced wholesale), and a pending crop
+    /// rectangle is cancelled outright, since its coordinates are sized to
+    /// the *old* canvas and would be meaningless against the new one.
+    @objc private func showImageResolutionDialog() {
+        commitAnyPendingLayerEdits()
+        if canvasView.isCropping { canvasView.cancelCrop() }
+        let layerStack = canvasView.layerStack
+        guard let size = ImageResolutionDialog.promptForSize(currentWidth: layerStack.width, currentHeight: layerStack.height) else { return }
+        let newStack = layerStack.resampled(toWidth: size.width, toHeight: size.height)
+        applyResizedLayerStack(newStack, label: "画像解像度")
+    }
+
+    /// "イメージ" > "カンバスサイズ…": resizes the canvas without resampling
+    /// any existing pixel (`LayerStack.resized(toWidth:toHeight:anchor:)`).
+    /// Same in-progress-edit guards as `showImageResolutionDialog` above.
+    @objc private func showCanvasSizeDialog() {
+        commitAnyPendingLayerEdits()
+        if canvasView.isCropping { canvasView.cancelCrop() }
+        let layerStack = canvasView.layerStack
+        guard let size = CanvasSizeDialog.promptForSize(currentWidth: layerStack.width, currentHeight: layerStack.height) else { return }
+        let newStack = layerStack.resized(toWidth: size.width, toHeight: size.height, anchor: size.anchor)
+        applyResizedLayerStack(newStack, label: "カンバスサイズ")
+    }
+
+    /// Shared plumbing for both dialogs above: swaps `newStack` in as the
+    /// active document's live `LayerStack` — the same set of updates
+    /// `applyHistorySnapshot(_:)` makes when replacing the whole stack
+    /// wholesale — and clears the selection (issue #11): a `SelectionMask`
+    /// sized to the *old* canvas dimensions can't meaningfully carry over
+    /// to a differently-sized one, the same reasoning
+    /// `CanvasView.commitCrop()` already applies to its own selection
+    /// reset.
+    private func applyResizedLayerStack(_ newStack: LayerStack, label: String) {
+        guard let document = displayedDocument else { return }
+        document.layerStack = newStack
+        document.selection = nil
+        document.isDirty = true
+        canvasView.replaceLayerStack(newStack)
+        canvasView.selection = nil
+        layerPanelView.replaceLayerStack(newStack)
+        documentTabBarView.reload()
+        canvasView.needsDisplay = true
+        recordHistoryCheckpoint(label: label)
+    }
+
     // MARK: - Image adjustments (issue #12)
 
     @objc private func showToneCurveDialog() {
@@ -1419,10 +1525,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Populates (or clears) the options bar to match the newly selected
     /// tool (issue #13). The magnifier's zoom-level dropdown, the magic
-    /// wand's tolerance slider (issue #11, round 3), and the pen's
-    /// size/hardness/opacity/flow controls (issue #20) are the only tools
-    /// with options of their own so far — every other tool just clears the
-    /// bar back to its empty frame.
+    /// wand's tolerance slider (issue #11, round 3), the bucket fill's own
+    /// tolerance slider (issue #38), and the pen's size/hardness/opacity/
+    /// flow controls (issue #20) are the only tools with options of their
+    /// own so far — every other tool just clears the bar back to its empty
+    /// frame.
     private func updateOptionBar(for tool: Tool) {
         switch tool {
         case .magnifier:
@@ -1432,6 +1539,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case .magicWandSelect:
             optionBarView.showMagicWandOptions(currentTolerance: canvasView.magicWandTolerance) { [weak self] tolerance in
                 self?.canvasView.magicWandTolerance = tolerance
+            }
+        case .bucketFill:
+            // Reuses `showMagicWandOptions`'s exact UI (same "許容誤差"
+            // label + slider over the same `SelectionMask.magicWand(...)`
+            // tolerance range) — the control is generic to "flood-fill
+            // color tolerance", not specific to what the flood-filled
+            // region ends up used for, so bucket fill just points it at
+            // its own independent `bucketFillTolerance` property instead
+            // of `magicWandTolerance`.
+            optionBarView.showMagicWandOptions(currentTolerance: canvasView.bucketFillTolerance) { [weak self] tolerance in
+                self?.canvasView.bucketFillTolerance = tolerance
             }
         case .pen:
             // `canvasView.penBrushSettings` is the single source of truth

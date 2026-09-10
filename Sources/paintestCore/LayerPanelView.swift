@@ -74,6 +74,11 @@ final class LayerPanelView: NSView {
     private let rowsStack = FlippedStackView()
     private let opacitySlider = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
     private let opacityValueLabel = NSTextField(labelWithString: "100%")
+    /// Blend-mode selector for the active layer (issue #37). Populated once
+    /// from `LayerBlendMode.allCases` in `buildLayout()` and never rebuilt —
+    /// only its selection needs to track the active layer, which `reload()`
+    /// updates like it does `opacitySlider`.
+    private let blendModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
 
     private static let thumbnailSide: CGFloat = 28
     private static let selectedRowColor = NSColor.selectedControlColor
@@ -139,12 +144,16 @@ final class LayerPanelView: NSView {
         let buttonBar = makeButtonBar()
         buttonBar.translatesAutoresizingMaskIntoConstraints = false
 
+        let blendModeRow = makeBlendModeRow()
+        blendModeRow.translatesAutoresizingMaskIntoConstraints = false
+
         let opacityRow = makeOpacityRow()
         opacityRow.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(titleLabel)
         addSubview(scrollView)
         addSubview(buttonBar)
+        addSubview(blendModeRow)
         addSubview(opacityRow)
 
         NSLayoutConstraint.activate([
@@ -158,7 +167,11 @@ final class LayerPanelView: NSView {
 
             buttonBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.panelPadding),
             buttonBar.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.panelPadding),
-            buttonBar.bottomAnchor.constraint(equalTo: opacityRow.topAnchor, constant: -4),
+            buttonBar.bottomAnchor.constraint(equalTo: blendModeRow.topAnchor, constant: -4),
+
+            blendModeRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.panelPadding),
+            blendModeRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.panelPadding),
+            blendModeRow.bottomAnchor.constraint(equalTo: opacityRow.topAnchor, constant: -4),
 
             opacityRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.panelPadding),
             opacityRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.panelPadding),
@@ -200,6 +213,30 @@ final class LayerPanelView: NSView {
             button.heightAnchor.constraint(equalToConstant: Self.buttonBarSide)
         ])
         return button
+    }
+
+    // Issue #37: a popup listing every `LayerBlendMode`, showing/changing
+    // the active layer's blend mode. Built once here with a fixed item
+    // list (`LayerBlendMode.allCases` never changes at runtime), same
+    // "build once, only update selection in reload()" split as
+    // `opacitySlider`/`opacityValueLabel` below.
+    private func makeBlendModeRow() -> NSView {
+        let label = NSTextField(labelWithString: "ブレンドモード")
+        label.font = .systemFont(ofSize: 10)
+
+        blendModePopup.removeAllItems()
+        blendModePopup.addItems(withTitles: LayerBlendMode.allCases.map(\.displayName))
+        blendModePopup.target = self
+        blendModePopup.action = #selector(blendModePopupChanged)
+        blendModePopup.translatesAutoresizingMaskIntoConstraints = false
+        blendModePopup.controlSize = .small
+        blendModePopup.font = .systemFont(ofSize: 10)
+
+        let stack = NSStackView(views: [label, blendModePopup])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        return stack
     }
 
     private func makeOpacityRow() -> NSView {
@@ -257,6 +294,9 @@ final class LayerPanelView: NSView {
         let active = layerStack.activeLayer
         opacitySlider.doubleValue = active.opacity * 100
         opacityValueLabel.stringValue = "\(Int((active.opacity * 100).rounded()))%"
+        if let index = LayerBlendMode.allCases.firstIndex(of: active.blendMode) {
+            blendModePopup.selectItem(at: index)
+        }
     }
 
     private func makeRow(for index: Int) -> NSView {
@@ -372,6 +412,17 @@ final class LayerPanelView: NSView {
     @objc private func opacitySliderChanged() {
         layerStack.setOpacity(opacitySlider.doubleValue / 100, at: layerStack.activeLayerIndex)
         opacityValueLabel.stringValue = "\(Int(opacitySlider.doubleValue.rounded()))%"
+        onChange?()
+    }
+
+    // Same "no reload() needed" reasoning as `opacitySliderChanged` above —
+    // blend mode isn't shown anywhere in a row, so only the canvas redraw
+    // `onChange?()` triggers needs to happen.
+    @objc private func blendModePopupChanged() {
+        guard blendModePopup.indexOfSelectedItem >= 0,
+              LayerBlendMode.allCases.indices.contains(blendModePopup.indexOfSelectedItem) else { return }
+        let mode = LayerBlendMode.allCases[blendModePopup.indexOfSelectedItem]
+        layerStack.setBlendMode(mode, at: layerStack.activeLayerIndex)
         onChange?()
     }
 }

@@ -6,9 +6,9 @@ import Foundation
 /// model (issue #5).
 ///
 /// `pencil`, `eraser`, `pen`, `eyedropper`, `magnifier`, the five selection
-/// tools, and `crop` are wired to real behavior so far; `ToolboxView`'s
-/// other 9 buttons stay purely visual placeholders until their own issues
-/// give them real tool implementations.
+/// tools, `crop`, and `bucketFill` are wired to real behavior so far;
+/// `ToolboxView`'s other 8 buttons stay purely visual placeholders until
+/// their own issues give them real tool implementations.
 enum Tool {
     case pencil
     case eraser
@@ -62,4 +62,12 @@ enum Tool {
     /// `mouseDown`/`mouseDragged`/`mouseUp`/`keyDown` handling and
     /// `commitCrop()`.
     case crop
+    /// Clicks a starting pixel and flood-fills the connected, similarly
+    /// colored region with the foreground color instead of selecting it
+    /// (issue #38) — the same connected-region flood fill as
+    /// `magicWandSelect` (`SelectionMask.magicWand(...)`), reused here to
+    /// paint instead of select. Like `magicWandSelect`, a single click is
+    /// the whole gesture: no drag/multi-click state of its own. See
+    /// `CanvasView`'s `mouseDown` handling.
+    case bucketFill
 }

@@ -44,7 +44,7 @@ final class ToolboxView: NSView {
         ToolDescriptor(symbol: "wand.and.rays", label: "マジックワンド", tool: .magicWandSelect),
         ToolDescriptor(symbol: "crop", label: "切り抜き", tool: .crop),
         ToolDescriptor(symbol: "eraser", label: "消しゴム", tool: .eraser),
-        ToolDescriptor(symbol: "drop.fill", label: "塗りつぶし", tool: nil),
+        ToolDescriptor(symbol: "drop.fill", label: "塗りつぶし", tool: .bucketFill),
         ToolDescriptor(symbol: "eyedropper", label: "スポイト", tool: .eyedropper),
         ToolDescriptor(symbol: "magnifyingglass", label: "拡大鏡", tool: .magnifier),
         ToolDescriptor(symbol: "pencil", label: "鉛筆", tool: .pencil),
@@ -159,9 +159,11 @@ final class ToolboxView: NSView {
         // unwired placeholders, but unlike them it's disabled here so it
         // reads as not-yet-implemented instead of a button that silently
         // does nothing when clicked (issue #43). The other placeholders
-        // (bucket-fill/airbrush/line/curve/rectangle/polygon/ellipse/
-        // rounded-rectangle, plus gradient which has no icon here yet under
-        // issue #41) are intentionally left alone — out of scope for #43.
+        // (airbrush/line/curve/rectangle/polygon/ellipse/rounded-rectangle,
+        // plus gradient which has no icon here yet under issue #41) are
+        // intentionally left alone — out of scope for #43. Bucket-fill was
+        // one of these placeholders too, until issue #38 wired it to
+        // `.bucketFill` above.
         //
         // Matched by label rather than a dedicated flag on `ToolDescriptor`
         // (same pattern as `pencilIndex` above): if "テキスト" is ever

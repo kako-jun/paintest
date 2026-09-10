@@ -288,6 +288,33 @@ final class SelectionMask {
         !cells.contains(true)
     }
 
+    /// The smallest pixel-space rectangle (inclusive on all four sides)
+    /// that encloses every selected pixel, or `nil` when the mask is
+    /// entirely empty (mirroring `isEmpty` above rather than returning some
+    /// degenerate zero-size rectangle for that case).
+    ///
+    /// Lets a caller that only cares about the mask's true extent — e.g.
+    /// issue #38's bucket fill, which used to walk every pixel of the
+    /// entire canvas just to find the (often much smaller) flood-filled
+    /// region — scan only this rectangle instead of `0..<width` /
+    /// `0..<height` unconditionally.
+    var boundingBox: (minX: Int, minY: Int, maxX: Int, maxY: Int)? {
+        var minX = width
+        var minY = height
+        var maxX = -1
+        var maxY = -1
+        for y in 0..<height {
+            for x in 0..<width where cells[y * width + x] {
+                if x < minX { minX = x }
+                if y < minY { minY = y }
+                if x > maxX { maxX = x }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard minX <= maxX, minY <= maxY else { return nil }
+        return (minX, minY, maxX, maxY)
+    }
+
     // MARK: - Outline tracing
 
     /// Every edge on the boundary between a selected pixel and an

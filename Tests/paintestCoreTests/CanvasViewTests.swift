@@ -2020,6 +2020,115 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertTrue(view.selection?.contains(x: 3, y: 2) ?? false, "(3,2) shares (2,2)'s raw active-layer RGB and must be selected — if the wand instead sampled the composite, the two pixels' very different blended appearances would exclude it")
     }
 
+    // MARK: - Bucket fill (issue #38)
+
+    func testMouseDown_bucketFill_singleClick_fillsConnectedRegionWithForegroundColor() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
+        view.foregroundColor = .black
+        view.activeTool = .bucketFill
+        view.bucketFillTolerance = 0
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0, "the whole solid-white canvas is one connected region at tolerance 0, so it must all become the foreground color")
+        XCTAssertEqual(canvas.rawPixel(x: 7, y: 7)?.r, 0)
+    }
+
+    func testMouseDown_bucketFill_singleClick_doesNotCreateOrChangeASelection() {
+        // Unlike magicWandSelect, bucket fill paints pixels; it must not
+        // also leave behind a selection (issue #38 vs. issue #11).
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.foregroundColor = .black
+        view.activeTool = .bucketFill
+        view.bucketFillTolerance = 0
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: view.window!))
+
+        XCTAssertNil(view.selection)
+    }
+
+    func testMouseDown_bucketFill_toleranceZero_doesNotCrossIntoADifferentlyColoredRegion() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white
+        // A black column at x=4 splits the canvas into two disconnected
+        // white regions.
+        for y in 0..<8 {
+            view.layerStack.activeLayer.canvas.setPixel(x: 4, y: y, color: .black)
+        }
+        view.foregroundColor = NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)
+        view.activeTool = .bucketFill
+        view.bucketFillTolerance = 0
+        let point = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: view.window!))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.r, 255, "the clicked side must be filled red")
+        XCTAssertEqual(canvas.rawPixel(x: 6, y: 6)?.g, 255, "the far side of the black column must stay untouched white")
+        XCTAssertEqual(canvas.rawPixel(x: 4, y: 4)?.r, 0, "the black dividing column itself must be untouched")
+    }
+
+    func testMouseDown_bucketFill_samplesTheActiveLayersOwnCanvas_notTheComposite() {
+        // Mirrors testMouseDown_magicWandSelect_samplesTheActiveLayersOwn
+        // Canvas_notTheComposite's exact setup: (2,2) and (3,2) share the
+        // same raw active-layer RGB (alpha is excluded from color
+        // distance) but have sharply different *composited* appearances.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.layers[0].canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        view.layerStack.addLayer() // index 1, becomes active; starts fully transparent
+        let activeCanvas = view.layerStack.activeLayer.canvas
+        activeCanvas.setPixel(x: 2, y: 2, color: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 0.5))
+        activeCanvas.setPixel(x: 3, y: 2, color: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+        view.foregroundColor = .black
+        view.activeTool = .bucketFill
+        view.bucketFillTolerance = 0
+
+        let targetPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
+
+        XCTAssertEqual(activeCanvas.rawPixel(x: 3, y: 2)?.r, 0, "(3,2) shares (2,2)'s raw active-layer RGB and must be filled — if bucket fill instead sampled the composite, the two pixels' very different blended appearances would exclude it")
+    }
+
+    func testMouseDown_bucketFill_selectionRestrictsFillToWithinIt() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 3, y1: 7, width: 8, height: 8)
+        view.foregroundColor = .black
+        view.activeTool = .bucketFill
+        view.bucketFillTolerance = 0
+        let point = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: view.window!))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.r, 0, "inside the selection must be filled")
+        XCTAssertEqual(canvas.rawPixel(x: 5, y: 1)?.r, 255, "outside the selection must stay untouched even though it's the same connected white region")
+    }
+
+    func testMouseDown_bucketFill_firesOnLayerContentChangedAndOnEditCompletedExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.foregroundColor = .black
+        view.activeTool = .bucketFill
+        view.bucketFillTolerance = 0
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertEqual(contentChangedCount, 1)
+        XCTAssertEqual(labels, ["塗りつぶし"])
+    }
+
     // MARK: - Selection combine modes: decision table (issue #11 test-authoring pass)
     //
     // Exercised through the rectangle-select tool's drag gesture (mouseDown
@@ -5191,6 +5300,26 @@ final class CanvasViewTests: XCTestCase {
 
         XCTAssertEqual(view.layerStack.layers[0].opacity, 0.5, accuracy: 0.0001, "layer 0's opacity must carry over unchanged")
         XCTAssertEqual(view.layerStack.layers[1].opacity, 0.25, accuracy: 0.0001, "layer 1's opacity must carry over unchanged too")
+    }
+
+    // Issue #37: cropping rebuilds every layer via `Layer(canvas:name:
+    // isVisible:opacity:)`-style copying (see `commitCrop()`), the same
+    // spot that used to silently drop `blendMode` back to `.normal` until
+    // that constructor call was updated to carry it over too.
+    func testCommitCrop_multiLayer_differingBlendMode_blendModePreservedAcrossCrop() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.layerStack.setBlendMode(.multiply, at: 0)
+        view.layerStack.addLayer() // layer 1
+        view.layerStack.setBlendMode(.screen, at: 1)
+        view.activeTool = .crop
+        let window = view.window!
+
+        dragOutCropRect(on: view, fromCol: 6, fromRow: 6, toCol: 9, toRow: 9, zoomScale: zoomScale) // right/bottom overflow
+        view.keyDown(with: keyDownEvent(keyCode: 36, in: window))
+
+        XCTAssertEqual(view.layerStack.layers[0].blendMode, .multiply, "layer 0's blend mode must carry over unchanged")
+        XCTAssertEqual(view.layerStack.layers[1].blendMode, .screen, "layer 1's blend mode must carry over unchanged too")
     }
 
     // MARK: Decision table B: pending crop x interrupting operation, corrected post-fix expectations

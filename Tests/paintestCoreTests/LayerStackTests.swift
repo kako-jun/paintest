@@ -170,6 +170,22 @@ final class LayerStackTests: XCTestCase {
         XCTAssertEqual(stack.layers[0].canvas.rawPixel(x: 0, y: 0)?.r, 255, "editing the duplicate's canvas must not mutate the source layer's canvas")
     }
 
+    func testDuplicateLayer_preservesBlendMode() {
+        // Regression test (independent review of issue #40's PR, must-1):
+        // `duplicateLayer` used to build its `Layer(...)` without a
+        // `blendMode:` argument at all, silently defaulting the copy to
+        // `.normal` regardless of the source layer's own blend mode.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setBlendMode(.multiply, at: 0)
+
+        guard let duplicate = stack.duplicateLayer(at: 0) else {
+            XCTFail("duplicateLayer returned nil")
+            return
+        }
+
+        XCTAssertEqual(duplicate.blendMode, .multiply, "duplicating a layer must carry over its blend mode, not silently reset it to .normal")
+    }
+
     // MARK: - moveLayer (test list 13-15)
 
     func testMoveLayer_tracksActiveLayerByObjectIdentityWhenAnotherLayerMoves() {
@@ -265,6 +281,619 @@ final class LayerStackTests: XCTestCase {
         stack.setVisibility(false, at: -1)
         stack.setVisibility(false, at: stack.layers.count)
         XCTAssertEqual(stack.layers[0].isVisible, visibilityBefore)
+    }
+
+    // MARK: - setBlendMode / blend-mode compositing (issue #37)
+
+    func testNewLayer_defaultsToNormalBlendMode() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        XCTAssertEqual(stack.layers[0].blendMode, .normal)
+        stack.addLayer()
+        XCTAssertEqual(stack.activeLayer.blendMode, .normal)
+    }
+
+    func testSetBlendMode_outOfRangeIndex_isNoOp() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setBlendMode(.multiply, at: -1)
+        stack.setBlendMode(.multiply, at: stack.layers.count)
+        XCTAssertEqual(stack.layers[0].blendMode, .normal)
+    }
+
+    func testSetBlendMode_changesLayerBlendMode() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setBlendMode(.screen, at: 0)
+        XCTAssertEqual(stack.layers[0].blendMode, .screen)
+    }
+
+    /// Bottom layer gray(200) + top layer gray(100) at full opacity, one
+    /// test per blend mode. Values chosen so each mode's textbook per-channel
+    /// formula (with an opaque backdrop, `B(Cb, Cs)` alone determines the
+    /// result — see `LayerStack.compositeImage`'s bypass-cache comment)
+    /// lands on a distinct expected value, well clear of the others and of
+    /// plain source-over's (100): multiply ≈ 78, screen ≈ 222, overlay ≈
+    /// 188. A ±15 tolerance absorbs any sRGB/deviceRGB color-management
+    /// rounding (same reasoning `testCompositeImage_bothVisible_halfOpacity_
+    /// blendsIntoAMiddleColor` above already uses a wide tolerance for)
+    /// without blurring together which mode actually ran.
+    private func makeTwoGrayLayerStack(blendMode: LayerBlendMode) -> LayerStack {
+        // `NSColor(deviceRed:green:blue:alpha:)`, not `.white`-family
+        // convenience initializers, to avoid any calibrated/generic-space
+        // gamma conversion on the way into `PixelCanvas`'s deviceRGB bitmap
+        // (see `PixelCanvas.components(of:)`) — the exact byte values this
+        // test's expected numbers are computed from.
+        let bottom = NSColor(deviceRed: 200.0 / 255.0, green: 200.0 / 255.0, blue: 200.0 / 255.0, alpha: 1)
+        let top = NSColor(deviceRed: 100.0 / 255.0, green: 100.0 / 255.0, blue: 100.0 / 255.0, alpha: 1)
+        let stack = LayerStack(width: 2, height: 2, background: bottom)
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: top)
+        stack.setBlendMode(blendMode, at: 1)
+        return stack
+    }
+
+    func testCompositeImage_multiplyBlendMode_darkensTowardTheirProduct() {
+        let stack = makeTwoGrayLayerStack(blendMode: .multiply)
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(pixel.r), 78, accuracy: 15)
+    }
+
+    func testCompositeImage_screenBlendMode_lightensTowardTheirInverseProduct() {
+        let stack = makeTwoGrayLayerStack(blendMode: .screen)
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(pixel.r), 222, accuracy: 15)
+    }
+
+    func testCompositeImage_overlayBlendMode_combinesMultiplyAndScreen() {
+        let stack = makeTwoGrayLayerStack(blendMode: .overlay)
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(pixel.r), 188, accuracy: 15)
+    }
+
+    func testCompositeImage_afterSetBlendMode_reflectsChangeImmediately() {
+        // Mirrors testCompositeImage_afterSetOpacity_reflectsChangeImmediately
+        // above: a blend-mode change must not serve a stale
+        // backgroundCompositeCache result (issue #17 integration).
+        let stack = makeTwoGrayLayerStack(blendMode: .normal)
+        guard let beforePixel = stack.compositeImage().flatMap({ rawRGBA(of: $0, x: 0, y: 0) }) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(beforePixel.r, 100, "normal blend at full opacity should just show the top layer's own color")
+
+        stack.setBlendMode(.multiply, at: 1)
+        guard let afterPixel = stack.compositeImage().flatMap({ rawRGBA(of: $0, x: 0, y: 0) }) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(afterPixel.r), 78, accuracy: 15)
+    }
+
+    func testCopy_preservesBlendMode() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setBlendMode(.overlay, at: 0)
+        let copied = stack.copy()
+        XCTAssertEqual(copied.layers[0].blendMode, .overlay)
+    }
+
+    // MARK: - mergeDown / flatten (issue #40)
+
+    func testMergeDown_indexZero_isNoOp() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer()
+        let countBefore = stack.layers.count
+        stack.mergeDown(at: 0)
+        XCTAssertEqual(stack.layers.count, countBefore, "there's nothing beneath the bottom-most layer to merge into")
+    }
+
+    func testMergeDown_outOfRangeIndex_isNoOp() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer()
+        let countBefore = stack.layers.count
+        stack.mergeDown(at: -1)
+        stack.mergeDown(at: stack.layers.count)
+        XCTAssertEqual(stack.layers.count, countBefore)
+    }
+
+    func testMergeDown_reducesLayerCountByOne_andKeepsTheLowerLayersName() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.layers[0].name = "背景"
+        stack.addLayer(name: "上")
+
+        stack.mergeDown(at: 1)
+
+        XCTAssertEqual(stack.layers.count, 1)
+        XCTAssertEqual(stack.layers[0].name, "背景")
+    }
+
+    func testMergeDown_makesTheMergedLayerActive() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer() // index 1, active
+        stack.addLayer() // index 2, active
+
+        stack.mergeDown(at: 2)
+
+        XCTAssertEqual(stack.activeLayerIndex, 1, "the merged layer replaces index 1 (the lower of the merged pair)")
+    }
+
+    func testMergeDown_mergedLayer_resetsOpacityAndVisibilityButCarriesOverLowerLayersBlendMode() {
+        // Issue #37 integration + issue #40 self-review must-2: opacity is
+        // baked into the merged pixels themselves, so the merged layer's
+        // own opacity must reset to the value (`1.0`) that applies nothing
+        // further, and the merged layer is always visible regardless of
+        // either original layer's own visibility. `blendMode` is NOT baked
+        // in the same way — it describes how the merged layer's *slot*
+        // relates to whatever still sits further below it in the full
+        // stack — so it carries over unchanged from the lower layer
+        // (index 0's original `.multiply`) instead of being forced to
+        // `.normal`. See `LayerStack.mergeDown`'s own doc comment.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setOpacity(0.4, at: 0)
+        stack.setBlendMode(.multiply, at: 0)
+        stack.setVisibility(false, at: 0)
+        stack.addLayer()
+        stack.setOpacity(0.6, at: 1)
+        stack.setBlendMode(.screen, at: 1)
+
+        stack.mergeDown(at: 1)
+
+        XCTAssertEqual(stack.layers[0].opacity, 1)
+        XCTAssertEqual(stack.layers[0].blendMode, .multiply, "carries over the lower layer's (index 0) original blend mode, not reset to .normal")
+        XCTAssertTrue(stack.layers[0].isVisible)
+    }
+
+    func testMergeDown_twoLayerStack_normalBlend_matchesPreMergeCompositeExactly() {
+        // With exactly two layers, the lower one truly has nothing beneath
+        // it — the same situation `mergeDown`'s isolated two-layer draw
+        // assumes — so for `.normal` blend mode this must reproduce
+        // `compositeImage()`'s own pre-merge result exactly, not just
+        // approximately.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setOpacity(0.5, at: 0)
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 0.7))
+        stack.setOpacity(0.8, at: 1)
+
+        guard let before = stack.compositeImage(), let beforePixel = rawRGBA(of: before, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+
+        stack.mergeDown(at: 1)
+
+        guard let after = stack.compositeImage(), let afterPixel = rawRGBA(of: after, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(afterPixel.r), Double(beforePixel.r), accuracy: 1)
+        XCTAssertEqual(Double(afterPixel.g), Double(beforePixel.g), accuracy: 1)
+        XCTAssertEqual(Double(afterPixel.b), Double(beforePixel.b), accuracy: 1)
+        XCTAssertEqual(Double(afterPixel.a), Double(beforePixel.a), accuracy: 1)
+    }
+
+    func testMergeDown_hiddenLowerLayer_discardsItsContentEntirely() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setVisibility(false, at: 0) // hidden white background
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: .black)
+
+        stack.mergeDown(at: 1)
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 0, "the hidden lower layer's white must not show through; only the visible black upper layer should")
+    }
+
+    func testMergeDown_hiddenUpperLayer_discardsItsContentEntirely() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: .black)
+        stack.setVisibility(false, at: 1) // hidden black top layer
+
+        stack.mergeDown(at: 1)
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 255, "the hidden upper layer's black must not show through; only the visible white lower layer should")
+    }
+
+    func testMergeDown_bothLayersHidden_mergedLayerIsStillForcedVisible_producingATransparentCanvas() {
+        // nit (independent review of issue #40's PR): NOT a behavior
+        // change — `mergeDown` always forces the merged layer's own
+        // `isVisible` to `true` (see its own doc comment), regardless of
+        // whether either original layer was itself hidden. With BOTH
+        // original layers hidden, `mergedCanvas` draws neither of them
+        // (each draw is behind its own `isVisible` guard), so the merged
+        // layer ends up visible but with a fully transparent canvas. This
+        // test just pins that existing, intentionally-unchanged behavior
+        // — not a claim that it's the "correct" outcome.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setVisibility(false, at: 0)
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: .black)
+        stack.setVisibility(false, at: 1)
+
+        stack.mergeDown(at: 1)
+
+        XCTAssertTrue(stack.layers[0].isVisible, "current behavior: mergeDown always forces the merged layer visible, even when both merged layers were hidden")
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.a, 0, "neither original layer was ever drawn (both hidden), so the merged canvas is fully transparent")
+    }
+
+    func testMergeDown_threeLayerStack_mergedBlendModeCarriesOverAndCompositeMatchesHandComputedApproximation() {
+        // 3-layer stack (issue #40 self-review must-2's own motivating
+        // scenario): L0 normal/opaque gray(200), L1 multiply/opaque
+        // gray(30) — an arbitrary, distinguishable value chosen
+        // specifically to prove it has NO effect on the outcome below —
+        // L2 normal/opaque gray(100). Merging L2 into L1
+        // (`mergeDown(at: 2)`) must carry the merged layer's `blendMode`
+        // over from L1 (`.multiply`), per this fix.
+        //
+        // Hand trace of `mergedCanvas(lower: L1, upper: L2)`:
+        //   - L1 is drawn first (blendMode `.multiply`) onto an initially
+        //     empty (alpha 0) context: a blend mode's backdrop term
+        //     vanishes against zero backdrop alpha, so this just paints
+        //     L1's own color, gray(30), at full opacity — L1's blend mode
+        //     has no observable effect here at all.
+        //   - L2 is then drawn on top (blendMode `.normal`, i.e.
+        //     source-over) at full opacity, fully opaque: source-over
+        //     with source alpha 1 completely overwrites whatever was
+        //     beneath it, regardless of that color. Result: flat
+        //     gray(100) — L2's own color exactly; L1's gray(30) never
+        //     survives into the merged canvas at all.
+        // So the merged layer (now at index 1)'s canvas is a flat
+        // gray(100), same as if L1 had never existed — but its own
+        // `blendMode` metadata is still `.multiply` (carried over from
+        // L1, per this fix), NOT `.normal`.
+        //
+        // `compositeImage()` of [L0 gray(200) normal, merged gray(100)
+        // multiply] therefore retroactively multiply-blends L2's own
+        // color against L0: multiply(200, 100) = 200*100/255 ≈ 78.4 —
+        // the same formula `makeTwoGrayLayerStack`'s own multiply test
+        // above derives and pins to ~78, same ±15 tolerance kept here for
+        // the same sRGB/deviceRGB rounding reasons documented there.
+        //
+        // KNOWN APPROXIMATION EXAMPLE: the *true* pre-merge composite of
+        // all three layers is just gray(100) — L2 sits on top, fully
+        // opaque and `.normal`-blended, so it completely covers
+        // everything beneath it (L0's gray(200) multiplied by L1's
+        // gray(30) included) regardless of any blend mode further down.
+        // After merging, that same visible gray(100) gets
+        // multiply-blended against L0 all over again, producing ~78
+        // instead of the "true" 100 — exactly the kind of case
+        // `mergeDown`'s own doc comment calls out as an unavoidable
+        // approximation once opacity/blend modes are involved. Pinned
+        // here (rather than "fixed") so a future change to this behavior
+        // is caught instead of silently drifting further, per kako-jun's
+        // decision on issue #40 self-review must-2 to keep current
+        // behavior and document it rather than rewrite the merge
+        // algorithm.
+        let bottom = NSColor(deviceRed: 200.0 / 255.0, green: 200.0 / 255.0, blue: 200.0 / 255.0, alpha: 1)
+        let middle = NSColor(deviceRed: 30.0 / 255.0, green: 30.0 / 255.0, blue: 30.0 / 255.0, alpha: 1)
+        let top = NSColor(deviceRed: 100.0 / 255.0, green: 100.0 / 255.0, blue: 100.0 / 255.0, alpha: 1)
+        let stack = LayerStack(width: 2, height: 2, background: bottom) // L0
+        stack.addLayer() // L1
+        stack.activeLayer.canvas.fill(with: middle)
+        stack.setBlendMode(.multiply, at: 1)
+        stack.addLayer() // L2
+        stack.activeLayer.canvas.fill(with: top)
+
+        stack.mergeDown(at: 2)
+
+        XCTAssertEqual(stack.layers.count, 2)
+        XCTAssertEqual(stack.layers[1].blendMode, .multiply, "the merged layer must carry over L1's original blend mode, not reset to .normal")
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(pixel.r), 78, accuracy: 15, "known approximation: L2's own color (which fully covered L1 during the merge) is now retroactively multiply-blended against L0, instead of showing as L2's true un-blended gray(100)")
+    }
+
+    func testFlatten_singleLayer_isNoOp_layerCountStaysOne() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.flatten()
+        XCTAssertEqual(stack.layers.count, 1)
+    }
+
+    func testFlatten_singleNonDefaultLayer_stillNormalizesOpacityBlendModeAndVisibility() {
+        // Issue #37 integration: even though `flatten()`'s own loop never
+        // runs for a single-layer stack, the sole remaining layer must
+        // still come out fully opaque / `.normal` / visible.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setOpacity(0.3, at: 0)
+        stack.setBlendMode(.multiply, at: 0)
+        stack.setVisibility(false, at: 0)
+
+        stack.flatten()
+
+        XCTAssertEqual(stack.layers[0].opacity, 1)
+        XCTAssertEqual(stack.layers[0].blendMode, .normal)
+        XCTAssertTrue(stack.layers[0].isVisible)
+    }
+
+    func testFlatten_multipleLayers_reducesToExactlyOneLayer_keepingBottomLayersName() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.layers[0].name = "背景"
+        stack.addLayer(name: "中")
+        stack.addLayer(name: "上")
+
+        stack.flatten()
+
+        XCTAssertEqual(stack.layers.count, 1)
+        XCTAssertEqual(stack.layers[0].name, "背景")
+        XCTAssertEqual(stack.activeLayerIndex, 0)
+    }
+
+    func testFlatten_discardsHiddenLayersContentEntirely() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.addLayer(name: "中")
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        stack.setVisibility(false, at: 1) // hidden red middle layer
+        stack.addLayer(name: "上")
+        stack.activeLayer.canvas.fill(with: .black)
+
+        stack.flatten()
+
+        guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(pixel.r, 0, "the hidden red middle layer must not tint the result; only the visible black top layer should show")
+    }
+
+    func testFlatten_preservesOverallCompositeForAllNormalBlendVisibleLayers() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.setOpacity(0.5, at: 0)
+        stack.addLayer(name: "中")
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        stack.setOpacity(0.5, at: 1)
+        stack.addLayer(name: "上")
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+        stack.setOpacity(0.5, at: 2)
+
+        guard let before = stack.compositeImage(), let beforePixel = rawRGBA(of: before, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+
+        stack.flatten()
+
+        guard let after = stack.compositeImage(), let afterPixel = rawRGBA(of: after, x: 0, y: 0) else {
+            XCTFail("compositeImage() returned nil")
+            return
+        }
+        XCTAssertEqual(Double(afterPixel.r), Double(beforePixel.r), accuracy: 1)
+        XCTAssertEqual(Double(afterPixel.g), Double(beforePixel.g), accuracy: 1)
+        XCTAssertEqual(Double(afterPixel.b), Double(beforePixel.b), accuracy: 1)
+        XCTAssertEqual(Double(afterPixel.a), Double(beforePixel.a), accuracy: 1)
+    }
+
+    // MARK: - resampled(toWidth:toHeight:) (issue #39: 画像解像度)
+
+    func testResampled_upscale_pointSamplesEachSourcePixelIntoABlock() {
+        // 2x2 source, each pixel a distinct solid color, upscaled to 4x4:
+        // nearest-neighbor must duplicate each source pixel into its own
+        // 2x2 block of the destination, not blend/interpolate between them.
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let canvas = stack.layers[0].canvas
+        canvas.setPixel(x: 0, y: 0, color: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // red
+        canvas.setPixel(x: 1, y: 0, color: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1)) // green
+        canvas.setPixel(x: 0, y: 1, color: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1)) // blue
+        canvas.setPixel(x: 1, y: 1, color: .black)
+
+        let resampled = stack.resampled(toWidth: 4, toHeight: 4)
+
+        XCTAssertEqual(resampled.width, 4)
+        XCTAssertEqual(resampled.height, 4)
+        let newCanvas = resampled.layers[0].canvas
+        XCTAssertEqual(newCanvas.rawPixel(x: 0, y: 0)?.r, 255, "top-left block must sample the source's red pixel")
+        XCTAssertEqual(newCanvas.rawPixel(x: 1, y: 1)?.r, 255, "still inside the top-left block")
+        XCTAssertEqual(newCanvas.rawPixel(x: 2, y: 0)?.g, 255, "top-right block must sample the source's green pixel")
+        XCTAssertEqual(newCanvas.rawPixel(x: 0, y: 2)?.b, 255, "bottom-left block must sample the source's blue pixel")
+        XCTAssertEqual(newCanvas.rawPixel(x: 3, y: 3)?.r, 0, "bottom-right block must sample the source's black pixel")
+    }
+
+    func testResampled_downscale_pointSamplesWithoutAveraging() {
+        // 4x1 source with 4 distinct solid colors, downscaled to 2x1:
+        // nearest-neighbor point sampling (not box-filter averaging) must
+        // pick exactly one source column per destination column.
+        let stack = LayerStack(width: 4, height: 1, background: .white)
+        let canvas = stack.layers[0].canvas
+        canvas.setPixel(x: 0, y: 0, color: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        canvas.setPixel(x: 1, y: 0, color: NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1))
+        canvas.setPixel(x: 2, y: 0, color: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+        canvas.setPixel(x: 3, y: 0, color: .black)
+
+        let resampled = stack.resampled(toWidth: 2, toHeight: 1)
+
+        let newCanvas = resampled.layers[0].canvas
+        XCTAssertEqual(newCanvas.rawPixel(x: 0, y: 0)?.r, 255, "destination column 0 must sample source column 0 (red)")
+        XCTAssertEqual(newCanvas.rawPixel(x: 1, y: 0)?.b, 255, "destination column 1 must sample source column 2 (blue)")
+    }
+
+    func testResampled_preservesLayerAttributesAndActiveLayerIndex() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.layers[0].name = "背景"
+        stack.setOpacity(0.4, at: 0)
+        stack.setBlendMode(.multiply, at: 0)
+        stack.setVisibility(false, at: 0)
+        stack.addLayer(name: "上")
+
+        let resampled = stack.resampled(toWidth: 4, toHeight: 4)
+
+        XCTAssertEqual(resampled.layers.count, 2)
+        XCTAssertEqual(resampled.layers[0].name, "背景")
+        XCTAssertEqual(resampled.layers[0].opacity, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(resampled.layers[0].blendMode, .multiply)
+        XCTAssertFalse(resampled.layers[0].isVisible)
+        XCTAssertEqual(resampled.layers[1].name, "上")
+        XCTAssertEqual(resampled.activeLayerIndex, stack.activeLayerIndex)
+    }
+
+    func testResampled_preservesAlpha() {
+        let stack = LayerStack(width: 2, height: 2, background: .clear)
+        stack.layers[0].canvas.setPixel(x: 0, y: 0, color: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 0.5))
+
+        let resampled = stack.resampled(toWidth: 4, toHeight: 4)
+
+        let alpha = resampled.layers[0].canvas.rawPixel(x: 0, y: 0)?.a
+        XCTAssertEqual(Double(alpha ?? 0), 128, accuracy: 1)
+    }
+
+    func testResampled_doesNotMutateTheOriginalStack() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        _ = stack.resampled(toWidth: 4, toHeight: 4)
+        XCTAssertEqual(stack.width, 2)
+        XCTAssertEqual(stack.height, 2)
+    }
+
+    func testResampled_zeroOrNegativeSize_clampsToOne() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        let resampled = stack.resampled(toWidth: 0, toHeight: -5)
+        XCTAssertEqual(resampled.width, 1)
+        XCTAssertEqual(resampled.height, 1)
+    }
+
+    // MARK: - resized(toWidth:toHeight:anchor:) (issue #39: カンバスサイズ)
+
+    func testResized_growingCanvas_topLeftAnchor_keepsOldContentAtOriginAndPadsRightAndBottom() {
+        let stack = LayerStack(width: 2, height: 2, background: .clear)
+        stack.layers[0].canvas.fill(with: .black)
+
+        let resized = stack.resized(toWidth: 4, toHeight: 4, anchor: .topLeft)
+
+        let canvas = resized.layers[0].canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "old content stays at the origin")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.a, 255, "old content stays at the origin")
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.a, 0, "newly added bottom-right area must be transparent")
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.a, 0, "newly added right-side area must be transparent")
+    }
+
+    func testResized_growingCanvas_centerAnchor_padsEquallyOnAllSides() {
+        let stack = LayerStack(width: 2, height: 2, background: .clear)
+        stack.layers[0].canvas.fill(with: .black)
+
+        let resized = stack.resized(toWidth: 6, toHeight: 6, anchor: .center)
+
+        let canvas = resized.layers[0].canvas
+        // (6-2)/2 == 2, so the old 2x2 content should land at (2,2)-(3,3).
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 2)?.a, 255)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.a, 255)
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 0, "padding on all four sides must be transparent")
+        XCTAssertEqual(canvas.rawPixel(x: 5, y: 5)?.a, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.a, 0, "just outside the centered content")
+        XCTAssertEqual(canvas.rawPixel(x: 4, y: 4)?.a, 0)
+    }
+
+    func testResized_growingCanvas_bottomRightAnchor_keepsOldContentFlushToBottomRight() {
+        let stack = LayerStack(width: 2, height: 2, background: .clear)
+        stack.layers[0].canvas.fill(with: .black)
+
+        let resized = stack.resized(toWidth: 4, toHeight: 4, anchor: .bottomRight)
+
+        let canvas = resized.layers[0].canvas
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 2)?.a, 255, "old content is flush against the bottom-right corner")
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 3)?.a, 255)
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 0, "newly added top-left area must be transparent")
+    }
+
+    func testResized_shrinkingCanvas_topLeftAnchor_clipsAwayTheRightAndBottom() {
+        let stack = LayerStack(width: 4, height: 4, background: .clear)
+        stack.layers[0].canvas.fill(with: .black)
+
+        let resized = stack.resized(toWidth: 2, toHeight: 2, anchor: .topLeft)
+
+        let canvas = resized.layers[0].canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "the surviving top-left portion keeps its content")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.a, 255)
+        XCTAssertNil(canvas.rawPixel(x: 2, y: 2), "outside the new, smaller canvas entirely")
+    }
+
+    func testResized_shrinkingCanvas_centerAnchor_keepsACenteredCrop() {
+        // 4x4 source, only the very center 2x2 (x=1..2, y=1..2) is black,
+        // everything else transparent; shrinking to 2x2 with a center
+        // anchor must keep exactly that center crop.
+        let stack = LayerStack(width: 4, height: 4, background: .clear)
+        let canvas = stack.layers[0].canvas
+        canvas.setPixel(x: 1, y: 1, color: .black)
+        canvas.setPixel(x: 2, y: 1, color: .black)
+        canvas.setPixel(x: 1, y: 2, color: .black)
+        canvas.setPixel(x: 2, y: 2, color: .black)
+
+        let resized = stack.resized(toWidth: 2, toHeight: 2, anchor: .center)
+
+        let newCanvas = resized.layers[0].canvas
+        XCTAssertEqual(newCanvas.rawPixel(x: 0, y: 0)?.a, 255)
+        XCTAssertEqual(newCanvas.rawPixel(x: 1, y: 1)?.a, 255)
+    }
+
+    func testResized_preservesExactPixelColor_noResampling() {
+        let stack = LayerStack(width: 2, height: 2, background: .clear)
+        stack.layers[0].canvas.setPixel(x: 0, y: 0, color: NSColor(deviceRed: 0.4, green: 0.2, blue: 0.6, alpha: 0.8))
+
+        let resized = stack.resized(toWidth: 4, toHeight: 4, anchor: .topLeft)
+
+        let original = stack.layers[0].canvas.rawPixel(x: 0, y: 0)
+        let copied = resized.layers[0].canvas.rawPixel(x: 0, y: 0)
+        XCTAssertEqual(copied?.r, original?.r, "resizing must never resample a surviving pixel's exact color")
+        XCTAssertEqual(copied?.g, original?.g)
+        XCTAssertEqual(copied?.b, original?.b)
+        XCTAssertEqual(copied?.a, original?.a)
+    }
+
+    func testResized_preservesLayerAttributesAndActiveLayerIndex() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        stack.layers[0].name = "背景"
+        stack.setOpacity(0.4, at: 0)
+        stack.setBlendMode(.screen, at: 0)
+        stack.setVisibility(false, at: 0)
+        stack.addLayer(name: "上")
+
+        let resized = stack.resized(toWidth: 4, toHeight: 4, anchor: .center)
+
+        XCTAssertEqual(resized.layers.count, 2)
+        XCTAssertEqual(resized.layers[0].name, "背景")
+        XCTAssertEqual(resized.layers[0].opacity, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(resized.layers[0].blendMode, .screen)
+        XCTAssertFalse(resized.layers[0].isVisible)
+        XCTAssertEqual(resized.layers[1].name, "上")
+        XCTAssertEqual(resized.activeLayerIndex, stack.activeLayerIndex)
+    }
+
+    func testResized_multipleLayers_appliesConsistentlyToEveryLayer() {
+        let stack = LayerStack(width: 2, height: 2, background: .clear)
+        stack.layers[0].canvas.fill(with: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1))
+        stack.addLayer()
+        stack.activeLayer.canvas.fill(with: NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1))
+
+        let resized = stack.resized(toWidth: 4, toHeight: 4, anchor: .topLeft)
+
+        XCTAssertEqual(resized.layers[0].canvas.rawPixel(x: 0, y: 0)?.r, 255)
+        XCTAssertEqual(resized.layers[1].canvas.rawPixel(x: 0, y: 0)?.b, 255)
+        XCTAssertEqual(resized.layers[0].canvas.rawPixel(x: 3, y: 3)?.a, 0)
+        XCTAssertEqual(resized.layers[1].canvas.rawPixel(x: 3, y: 3)?.a, 0)
+    }
+
+    func testResized_doesNotMutateTheOriginalStack() {
+        let stack = LayerStack(width: 2, height: 2, background: .white)
+        _ = stack.resized(toWidth: 4, toHeight: 4, anchor: .center)
+        XCTAssertEqual(stack.width, 2)
+        XCTAssertEqual(stack.height, 2)
     }
 
     // MARK: - init(width:height:layers:activeLayerIndex:) (test list 20-21)

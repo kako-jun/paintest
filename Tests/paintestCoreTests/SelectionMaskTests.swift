@@ -488,4 +488,62 @@ final class SelectionMaskTests: XCTestCase {
         // shared edge between them (they aren't adjacent) — 8 total.
         XCTAssertEqual(both.boundaryEdges().count, 8)
     }
+
+    // MARK: - boundingBox (issue #38's bucket fill self-review should-2:
+    // scan only the mask's true extent instead of the whole canvas)
+
+    func testBoundingBox_explicitlyEmptyMask_isNil() {
+        let mask = SelectionMask(width: 5, height: 5)
+        XCTAssertNil(mask.boundingBox)
+    }
+
+    func testBoundingBox_singlePixel_isThatOnePixelOnAllFourSides() {
+        let mask = SelectionMask.rectangle(x0: 2, y0: 3, x1: 2, y1: 3, width: 6, height: 6)
+        guard let box = mask.boundingBox else {
+            XCTFail("expected a non-nil boundingBox")
+            return
+        }
+        XCTAssertEqual(box.minX, 2)
+        XCTAssertEqual(box.maxX, 2)
+        XCTAssertEqual(box.minY, 3)
+        XCTAssertEqual(box.maxY, 3)
+    }
+
+    func testBoundingBox_rectangle_matchesItsOwnCorners() {
+        let mask = SelectionMask.rectangle(x0: 1, y0: 2, x1: 4, y1: 3, width: 8, height: 8)
+        guard let box = mask.boundingBox else {
+            XCTFail("expected a non-nil boundingBox")
+            return
+        }
+        XCTAssertEqual(box.minX, 1)
+        XCTAssertEqual(box.maxX, 4)
+        XCTAssertEqual(box.minY, 2)
+        XCTAssertEqual(box.maxY, 3)
+    }
+
+    func testBoundingBox_twoDisconnectedRegions_spansBothRatherThanEither() {
+        // Not a per-region box — one rectangle enclosing every selected
+        // pixel across the whole mask, disconnected regions included, the
+        // same "smallest enclosing rectangle" contract a bucket-fill caller
+        // needs (a scattered selection still must not be scanned outside
+        // this box).
+        let a = SelectionMask.rectangle(x0: 0, y0: 0, x1: 0, y1: 0, width: 6, height: 6)
+        let b = SelectionMask.rectangle(x0: 4, y0: 5, x1: 4, y1: 5, width: 6, height: 6)
+        let both = a.unioned(with: b)
+        guard let box = both.boundingBox else {
+            XCTFail("expected a non-nil boundingBox")
+            return
+        }
+        XCTAssertEqual(box.minX, 0)
+        XCTAssertEqual(box.maxX, 4)
+        XCTAssertEqual(box.minY, 0)
+        XCTAssertEqual(box.maxY, 5)
+    }
+
+    func testBoundingBox_afterSubtractingToEmpty_isNil() {
+        let full = SelectionMask.rectangle(x0: 0, y0: 0, x1: 2, y1: 2, width: 3, height: 3)
+        let subtracted = full.subtracting(full)
+        XCTAssertTrue(subtracted.isEmpty, "precondition")
+        XCTAssertNil(subtracted.boundingBox)
+    }
 }

@@ -322,4 +322,85 @@ final class LayerPanelViewTests: XCTestCase {
 
         XCTAssertEqual(willChangeCount, 0)
     }
+
+    // MARK: - Blend-mode popup (issue #37)
+
+    private func findPopUpButton(in view: NSView) -> NSPopUpButton? {
+        for subview in view.subviews {
+            if let popup = subview as? NSPopUpButton { return popup }
+            if let found = findPopUpButton(in: subview) { return found }
+        }
+        return nil
+    }
+
+    func testBlendModePopup_isPopulatedWithEveryBlendMode() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        guard let popup = findPopUpButton(in: panel) else {
+            return XCTFail("expected to find the blend-mode popup")
+        }
+        XCTAssertEqual(popup.itemTitles, LayerBlendMode.allCases.map(\.displayName))
+    }
+
+    func testBlendModePopup_selectingAnItem_setsTheActiveLayersBlendMode() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        guard let popup = findPopUpButton(in: panel) else {
+            return XCTFail("expected to find the blend-mode popup")
+        }
+        guard let multiplyIndex = LayerBlendMode.allCases.firstIndex(of: .multiply) else {
+            return XCTFail("LayerBlendMode.allCases should contain .multiply")
+        }
+
+        popup.selectItem(at: multiplyIndex)
+        _ = popup.sendAction(popup.action, to: popup.target)
+
+        XCTAssertEqual(stack.layers[0].blendMode, .multiply)
+    }
+
+    func testBlendModePopup_reflectsTheActiveLayersCurrentBlendMode() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        stack.setBlendMode(.screen, at: 0)
+        let panel = LayerPanelView(layerStack: stack)
+        guard let popup = findPopUpButton(in: panel) else {
+            return XCTFail("expected to find the blend-mode popup")
+        }
+        guard let screenIndex = LayerBlendMode.allCases.firstIndex(of: .screen) else {
+            return XCTFail("LayerBlendMode.allCases should contain .screen")
+        }
+        XCTAssertEqual(popup.indexOfSelectedItem, screenIndex)
+    }
+
+    func testBlendModePopup_selectingAnItem_firesOnChangeNotOnSelectionChanged() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        var onChangeCount = 0
+        var onSelectionChangedCount = 0
+        panel.onChange = { onChangeCount += 1 }
+        panel.onSelectionChanged = { onSelectionChangedCount += 1 }
+
+        guard let popup = findPopUpButton(in: panel) else {
+            return XCTFail("expected to find the blend-mode popup")
+        }
+        popup.selectItem(at: 1)
+        _ = popup.sendAction(popup.action, to: popup.target)
+
+        XCTAssertEqual(onChangeCount, 1)
+        XCTAssertEqual(onSelectionChangedCount, 0)
+    }
+
+    func testBlendModePopup_doesNotFireWillChangeActiveLayer() {
+        let stack = LayerStack(width: 4, height: 4, background: .white)
+        let panel = LayerPanelView(layerStack: stack)
+        var willChangeCount = 0
+        panel.willChangeActiveLayer = { willChangeCount += 1 }
+
+        guard let popup = findPopUpButton(in: panel) else {
+            return XCTFail("expected to find the blend-mode popup")
+        }
+        popup.selectItem(at: 1)
+        _ = popup.sendAction(popup.action, to: popup.target)
+
+        XCTAssertEqual(willChangeCount, 0)
+    }
 }
