@@ -6385,6 +6385,110 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertGreaterThan(verticalHeight, verticalWidth, "vertical writing (isVertical = true) must stack \"AAAA\" taller than it is wide")
     }
 
+    // MARK: - updateTextEditorForZoomChange() (issue #42 review round 2
+    // should-1)
+    //
+    // `zoomIn()`/`zoomOut()`/`setZoomScale(_:)` each call
+    // `updateTextEditorForZoomChange()` to keep an in-progress text edit's
+    // overlay anchored to its original click pixel as the zoom level
+    // changes. No test previously exercised this method directly for either
+    // writing direction — these three fill that gap and pin down the
+    // round-2 review's should-1 fix (resetting `frame.size` back to the
+    // overlay's minimum before handing off to
+    // `resizeTextEditorToFitContent()`).
+
+    func testUpdateTextEditorForZoomChange_horizontal_originMatchesNewZoomPixel() {
+        let initialZoomScale = 4
+        let newZoomScale = 8
+        let pixelCol = 4, pixelRow = 4
+        let view = makeViewInWindow(width: 64, height: 64, zoomScale: initialZoomScale)
+        view.activeTool = .text
+        let window = view.window!
+        let point = windowPoint(forPixelCol: pixelCol, row: pixelRow, zoomScale: initialZoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        view.zoomIn() // initialZoomScale -> newZoomScale
+
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+        XCTAssertEqual(view.zoomScale, newZoomScale, "precondition: zoomIn() actually changed the zoom level")
+        XCTAssertEqual(editor.frame.origin.x, CGFloat(pixelCol * newZoomScale), "the overlay's origin.x must track pixel.x * the new zoomScale after a zoom change")
+        XCTAssertEqual(editor.frame.origin.y, CGFloat(pixelRow * newZoomScale), "the overlay's origin.y must track pixel.y * the new zoomScale after a zoom change")
+    }
+
+    func testUpdateTextEditorForZoomChange_vertical_originMatchesNewZoomPixel() {
+        let initialZoomScale = 4
+        let newZoomScale = 8
+        let pixelCol = 4, pixelRow = 4
+        let view = makeViewInWindow(width: 64, height: 64, zoomScale: initialZoomScale)
+        view.activeTool = .text
+        view.textSettings.isVertical = true
+        let window = view.window!
+        let point = windowPoint(forPixelCol: pixelCol, row: pixelRow, zoomScale: initialZoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        view.zoomIn() // initialZoomScale -> newZoomScale
+
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+        XCTAssertEqual(view.zoomScale, newZoomScale, "precondition: zoomIn() actually changed the zoom level")
+        XCTAssertEqual(editor.frame.origin.x, CGFloat(pixelCol * newZoomScale), "vertical writing's overlay origin.x must also track pixel.x * the new zoomScale after a zoom change")
+        XCTAssertEqual(editor.frame.origin.y, CGFloat(pixelRow * newZoomScale), "vertical writing's overlay origin.y must also track pixel.y * the new zoomScale after a zoom change")
+    }
+
+    func testUpdateTextEditorForZoomChange_verticalAfterAutoExpand_topRightXStaysAtNewZoomBaseline() {
+        // Regression test for the round-2 review's should-1 finding: before
+        // the fix, `updateTextEditorForZoomChange()` only reset `frame
+        // .origin` to the new zoom's pixel position while leaving `frame
+        // .size` at whatever the *old* zoom's auto-expanded content fit —
+        // so the very next `resizeTextEditorToFitContent()` call, in its
+        // vertical-writing branch, computed
+        // `topRightX = frame.origin.x + frame.size.width` by mixing a
+        // new-zoom `origin.x` with an old-zoom `width`, landing the
+        // overlay's top-right corner nowhere near either zoom level's
+        // correct position. Horizontal writing was unaffected (its branch
+        // only overwrites `frame.size`, never reads it first), so this
+        // reproduces the bug's actual precondition: vertical writing, with
+        // the overlay already auto-expanded past its minimum size *before*
+        // the zoom change.
+        //
+        // `40` below mirrors `CanvasView.textEditorMinWidth`, a `private`
+        // constant this test file cannot reference directly.
+        let textEditorMinWidth: CGFloat = 40
+        let initialZoomScale = 4
+        let newZoomScale = 8
+        let pixelCol = 4, pixelRow = 4
+        let view = makeViewInWindow(width: 64, height: 64, zoomScale: initialZoomScale)
+        view.activeTool = .text
+        view.textSettings.isVertical = true
+        let window = view.window!
+        let point = windowPoint(forPixelCol: pixelCol, row: pixelRow, zoomScale: initialZoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("AAAA", into: view)
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+        // `typeText(_:into:)` assigns `.string` directly (not through a real
+        // keystroke), which doesn't itself post `NSText.didChangeNotification`
+        // — drive the same delegate callback `textDidChange(_:)` a real
+        // keystroke would trigger, the same way `testTextDidEndEditing_*`
+        // above calls `textDidEndEditing(_:)` directly to stand in for a
+        // real focus-loss notification.
+        view.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        XCTAssertGreaterThan(editor.frame.size.width, textEditorMinWidth, "precondition: the overlay must already be auto-expanded past its minimum width before the zoom change — this is the bug's actual trigger condition")
+
+        view.zoomIn() // initialZoomScale -> newZoomScale
+
+        let expectedTopRightX = CGFloat(pixelCol * newZoomScale) + textEditorMinWidth
+        let actualTopRightX = editor.frame.origin.x + editor.frame.size.width
+        XCTAssertEqual(actualTopRightX, expectedTopRightX, accuracy: 0.5, "after a zoom change, the vertical overlay's top-right x must be anchored to the NEW zoom's click position + minWidth, not mixed with the OLD zoom's auto-expanded width")
+    }
+
     // MARK: - Text edit auto-commit/cancel call sites mirrors (issue #42
     // test-design review): willChangeActiveLayer, document tab switch,
     // undo/redo, history-jump, and the adjustment-dialog route

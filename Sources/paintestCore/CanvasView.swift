@@ -1967,10 +1967,29 @@ final class CanvasView: NSView {
     /// the same way `beginTextEdit(at:)` does, then defers to
     /// `resizeTextEditorToFitContent()` to grow/shrink the frame size to
     /// match the now-differently-sized text.
+    ///
+    /// Also resets `frame.size` back to `(textEditorMinWidth,
+    /// textEditorMinHeight)` before that hand-off (issue #42 review round 2
+    /// should-1) — not just `frame.origin` — so `resizeTextEditorToFitContent()`
+    /// always starts from the same "just-clicked" state `beginTextEdit(at:)`
+    /// itself leaves the frame in, rather than mixing a freshly-recomputed
+    /// (new-zoom) `origin` with a stale (old-zoom) `size` left over from
+    /// whatever zoom level was active the last time the overlay auto-grew.
+    /// Left unfixed, that mix corrupts the vertical-writing branch of
+    /// `resizeTextEditorToFitContent()` specifically: it derives its new
+    /// `origin.x` from `frame.origin.x + frame.size.width` (the previous
+    /// top-right corner), so an old-zoom `width` added to a new-zoom
+    /// `origin.x` lands the overlay's top-right corner nowhere near either
+    /// zoom level's correct position. The horizontal branch only overwrites
+    /// `frame.size` outright, so it was never affected — but resetting size
+    /// here is harmless for it too, since the following
+    /// `resizeTextEditorToFitContent()` call recomputes `frame.size` from
+    /// the current text content regardless of what it started at.
     private func updateTextEditorForZoomChange() {
         guard let editor = textEditor, let pixel = textInsertionPixel else { return }
         var frame = editor.frame
         frame.origin = NSPoint(x: CGFloat(pixel.x) * CGFloat(zoomScale), y: CGFloat(pixel.y) * CGFloat(zoomScale))
+        frame.size = NSSize(width: Self.textEditorMinWidth, height: Self.textEditorMinHeight)
         editor.frame = frame
         editor.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize * CGFloat(zoomScale))
         resizeTextEditorToFitContent()
