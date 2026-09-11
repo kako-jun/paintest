@@ -31,6 +31,11 @@ final class OptionBarView: NSView {
     private static let penSizeSliderWidth: CGFloat = 90
     private static let penUnitSliderWidth: CGFloat = 70
     private static let penValueLabelWidth: CGFloat = 36
+    /// The text tool's font-family popup width (issue #42) — wider than
+    /// `popUpWidth` (the zoom presets popup's own width) since font family
+    /// names run much longer than "3200%".
+    private static let textFontPopUpWidth: CGFloat = 160
+    private static let textSizeSliderWidth: CGFloat = 90
 
     /// The magic wand's current-value readout (issue #11, round 3) — kept as
     /// a stored reference (unlike the zoom popup, which reads its own
@@ -46,6 +51,24 @@ final class OptionBarView: NSView {
     private var penHardnessValueLabel: NSTextField?
     private var penOpacityValueLabel: NSTextField?
     private var penFlowValueLabel: NSTextField?
+
+    /// The text tool's size readout (issue #42) — same "stored reference,
+    /// updated directly by its own control's action method" pattern as
+    /// `penSizeValueLabel` above.
+    private var textSizeValueLabel: NSTextField?
+
+    /// Fired when the text tool's font-family popup selection changes
+    /// (issue #42). `AppDelegate` forwards the picked family straight into
+    /// `CanvasView.textSettings.fontFamily`.
+    private var onTextFontChanged: ((String) -> Void)?
+    /// Fired when the text tool's size slider moves (issue #42).
+    /// `AppDelegate` forwards the new value into
+    /// `CanvasView.textSettings.fontSize`.
+    private var onTextSizeChanged: ((CGFloat) -> Void)?
+    /// Fired when the text tool's 横書き/縦書き segmented control changes
+    /// (issue #42): `true` selects 縦書き (vertical). `AppDelegate`
+    /// forwards this into `CanvasView.textSettings.isVertical`.
+    private var onTextOrientationChanged: ((Bool) -> Void)?
 
     /// Fired when the zoom presets popup's selection changes (issue #13).
     /// `AppDelegate` forwards the picked level straight into
@@ -252,6 +275,92 @@ final class OptionBarView: NSView {
         return (label, slider, valueLabel, sliderWidth)
     }
 
+    /// Populates the bar with the text tool's font/size/writing-direction
+    /// controls (issue #42): a font-family popup (every installed family,
+    /// via `NSFontManager.shared.availableFontFamilies`), a "サイズ" label
+    /// + slider + numeric readout over `TextToolSettings.fontSizeRange`
+    /// (same shape as `showPenOptions`'s own size group), and a 横書き/
+    /// 縦書き `NSSegmentedControl`. Color is deliberately not duplicated
+    /// here: the text tool paints with the existing foreground-color state
+    /// the same way the pencil/pen do, so it gets no swatch of its own in
+    /// this bar, matching how neither of those two tools gets one either.
+    /// Same "rebuilt from scratch on every call" pattern as
+    /// `showZoomPresets`/`showMagicWandOptions`/`showPenOptions` above.
+    func showTextOptions(
+        settings: TextToolSettings,
+        onFontChanged: @escaping (String) -> Void,
+        onSizeChanged: @escaping (CGFloat) -> Void,
+        onOrientationChanged: @escaping (Bool) -> Void
+    ) {
+        clear()
+        onTextFontChanged = onFontChanged
+        onTextSizeChanged = onSizeChanged
+        onTextOrientationChanged = onOrientationChanged
+
+        let fontPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+        fontPopUp.translatesAutoresizingMaskIntoConstraints = false
+        fontPopUp.target = self
+        fontPopUp.action = #selector(textFontChanged(_:))
+        let families = NSFontManager.shared.availableFontFamilies.sorted()
+        for family in families {
+            fontPopUp.addItem(withTitle: family)
+        }
+        if let matchIndex = families.firstIndex(of: settings.fontFamily) {
+            fontPopUp.selectItem(at: matchIndex)
+        }
+
+        let sizeLabel = NSTextField(labelWithString: "サイズ")
+        sizeLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let sizeSlider = NSSlider(
+            value: Double(settings.fontSize),
+            minValue: Double(TextToolSettings.fontSizeRange.lowerBound),
+            maxValue: Double(TextToolSettings.fontSizeRange.upperBound),
+            target: self,
+            action: #selector(textSizeSliderChanged(_:))
+        )
+        sizeSlider.translatesAutoresizingMaskIntoConstraints = false
+        sizeSlider.isContinuous = true
+
+        let sizeValueLabel = NSTextField(labelWithString: "\(Int(settings.fontSize.rounded()))")
+        sizeValueLabel.translatesAutoresizingMaskIntoConstraints = false
+        textSizeValueLabel = sizeValueLabel
+
+        let orientationControl = NSSegmentedControl(
+            labels: ["横書き", "縦書き"],
+            trackingMode: .selectOne,
+            target: self,
+            action: #selector(textOrientationChanged(_:))
+        )
+        orientationControl.translatesAutoresizingMaskIntoConstraints = false
+        orientationControl.selectedSegment = settings.isVertical ? 1 : 0
+
+        addSubview(fontPopUp)
+        addSubview(sizeLabel)
+        addSubview(sizeSlider)
+        addSubview(sizeValueLabel)
+        addSubview(orientationControl)
+        NSLayoutConstraint.activate([
+            fontPopUp.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalPadding),
+            fontPopUp.centerYAnchor.constraint(equalTo: centerYAnchor),
+            fontPopUp.widthAnchor.constraint(equalToConstant: Self.textFontPopUpWidth),
+
+            sizeLabel.leadingAnchor.constraint(equalTo: fontPopUp.trailingAnchor, constant: Self.penGroupSpacing),
+            sizeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            sizeSlider.leadingAnchor.constraint(equalTo: sizeLabel.trailingAnchor, constant: Self.controlSpacing),
+            sizeSlider.centerYAnchor.constraint(equalTo: centerYAnchor),
+            sizeSlider.widthAnchor.constraint(equalToConstant: Self.textSizeSliderWidth),
+
+            sizeValueLabel.leadingAnchor.constraint(equalTo: sizeSlider.trailingAnchor, constant: Self.controlSpacing),
+            sizeValueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            sizeValueLabel.widthAnchor.constraint(equalToConstant: Self.penValueLabelWidth),
+
+            orientationControl.leadingAnchor.constraint(equalTo: sizeValueLabel.trailingAnchor, constant: Self.penGroupSpacing),
+            orientationControl.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
     /// Formats a `0...1` setting as a rounded percentage (issue #20) —
     /// matches `LayerPanelView`'s own opacity-slider readout convention
     /// (e.g. "100%").
@@ -275,6 +384,10 @@ final class OptionBarView: NSView {
         penHardnessValueLabel = nil
         penOpacityValueLabel = nil
         penFlowValueLabel = nil
+        onTextFontChanged = nil
+        onTextSizeChanged = nil
+        onTextOrientationChanged = nil
+        textSizeValueLabel = nil
     }
 
     @objc private func toleranceSliderChanged(_ sender: NSSlider) {
@@ -305,6 +418,21 @@ final class OptionBarView: NSView {
         let flow = sender.doubleValue
         penFlowValueLabel?.stringValue = Self.percentString(flow)
         onPenFlowChanged?(flow)
+    }
+
+    @objc private func textFontChanged(_ sender: NSPopUpButton) {
+        guard let family = sender.selectedItem?.title else { return }
+        onTextFontChanged?(family)
+    }
+
+    @objc private func textSizeSliderChanged(_ sender: NSSlider) {
+        let size = CGFloat(sender.doubleValue)
+        textSizeValueLabel?.stringValue = "\(Int(size.rounded()))"
+        onTextSizeChanged?(size)
+    }
+
+    @objc private func textOrientationChanged(_ sender: NSSegmentedControl) {
+        onTextOrientationChanged?(sender.selectedSegment == 1)
     }
 
     @objc private func zoomPresetChanged(_ sender: NSPopUpButton) {

@@ -466,6 +466,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if self.canvasView.isPenStrokeInProgress {
                 self.canvasView.flushPenStroke()
             }
+            // Same auto-flush, for the same reason, for an in-progress text
+            // edit (issue #42) — see `isTextEditing`'s own doc comment.
+            if self.canvasView.isTextEditing {
+                self.canvasView.commitTextEdit()
+            }
             // A pending crop rectangle (issue #21 test-design review):
             // `layerStack` itself doesn't get swapped out by any of
             // `willChangeActiveLayer`'s callers (select/add/duplicate/remove
@@ -510,6 +515,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // entry of its own yet either. See `cancelPenStroke()`'s doc
             // comment.
             if self.canvasView.isPenStrokeInProgress { self.canvasView.cancelPenStroke() }
+            // Same cancel — not commit — for an in-progress text edit
+            // (issue #42), for the identical reason: it has no history
+            // entry of its own yet either. See `cancelTextEdit()`'s doc
+            // comment.
+            if self.canvasView.isTextEditing { self.canvasView.cancelTextEdit() }
             // Same cancel for a pending crop rectangle (issue #21
             // test-design review) — same reasoning as `undo()`/`redo()`'s
             // own crop handling: `jump(to:)` below replaces `layerStack`
@@ -790,6 +800,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if canvasView.isPenStrokeInProgress {
             canvasView.flushPenStroke()
         }
+        // Same auto-confirm, for the same reason, for an in-progress text
+        // edit (issue #42): `textEditor`'s typed text is likewise a pending
+        // edit against the *outgoing* document's `layerStack.activeLayer
+        // .canvas` — see `isTextEditing`'s own doc comment.
+        if canvasView.isTextEditing {
+            canvasView.commitTextEdit()
+        }
         // A pending crop rectangle (issue #21 test-design review) is a
         // hazard of the same shape as the two checks just above — it too is
         // a pending edit against the *outgoing* document's `layerStack` —
@@ -916,17 +933,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func undo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         if canvasView.isPenStrokeInProgress { canvasView.cancelPenStroke() }
+        // Same cancel — not commit — for an in-progress text edit (issue
+        // #42), for the identical reason: it has no history entry of its
+        // own yet either. See `cancelTextEdit()`'s doc comment.
+        if canvasView.isTextEditing { canvasView.cancelTextEdit() }
         if canvasView.isCropping { canvasView.cancelCrop() }
         guard let restored = documentManager.activeDocument.history.undo() else { return }
         applyHistorySnapshot(restored)
         refreshHistoryPanel()
     }
 
-    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform/pen-stroke/crop
-    /// handling as `undo()` above.
+    /// "やり直す" (Shift+Cmd+Z). Same in-progress-transform/pen-stroke/text-
+    /// edit/crop handling as `undo()` above.
     @objc private func redo() {
         if canvasView.isTransforming { canvasView.cancelLayerTransform() }
         if canvasView.isPenStrokeInProgress { canvasView.cancelPenStroke() }
+        if canvasView.isTextEditing { canvasView.cancelTextEdit() }
         if canvasView.isCropping { canvasView.cancelCrop() }
         guard let restored = documentManager.activeDocument.history.redo() else { return }
         applyHistorySnapshot(restored)
@@ -1417,6 +1439,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if canvasView.isPenStrokeInProgress {
             canvasView.flushPenStroke()
         }
+        // Same "in-place edit against the existing canvas" shape as the pen
+        // stroke above (issue #42) — see `isTextEditing`'s own doc comment.
+        if canvasView.isTextEditing {
+            canvasView.commitTextEdit()
+        }
     }
 
     /// Shared plumbing for all four "イメージ" adjustment dialogs above:
@@ -1526,10 +1553,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Populates (or clears) the options bar to match the newly selected
     /// tool (issue #13). The magnifier's zoom-level dropdown, the magic
     /// wand's tolerance slider (issue #11, round 3), the bucket fill's own
-    /// tolerance slider (issue #38), and the pen's size/hardness/opacity/
-    /// flow controls (issue #20) are the only tools with options of their
-    /// own so far — every other tool just clears the bar back to its empty
-    /// frame.
+    /// tolerance slider (issue #38), the pen's size/hardness/opacity/
+    /// flow controls (issue #20), and the text tool's font/size/writing-
+    /// direction controls (issue #42) are the only tools with options of
+    /// their own so far — every other tool just clears the bar back to its
+    /// empty frame.
     private func updateOptionBar(for tool: Tool) {
         switch tool {
         case .magnifier:
@@ -1569,6 +1597,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 },
                 onFlowChanged: { [weak self] flow in
                     self?.canvasView.penBrushSettings.flow = flow
+                }
+            )
+        case .text:
+            // `canvasView.textSettings` is the single source of truth
+            // (issue #42 — no separate `AppDelegate` copy, same pattern as
+            // `.pen`'s `penBrushSettings` above); each callback just writes
+            // the one field its own control owns straight back into it.
+            optionBarView.showTextOptions(
+                settings: canvasView.textSettings,
+                onFontChanged: { [weak self] family in
+                    self?.canvasView.textSettings.fontFamily = family
+                },
+                onSizeChanged: { [weak self] size in
+                    self?.canvasView.textSettings.fontSize = size
+                },
+                onOrientationChanged: { [weak self] isVertical in
+                    self?.canvasView.textSettings.isVertical = isVertical
                 }
             )
         default:
