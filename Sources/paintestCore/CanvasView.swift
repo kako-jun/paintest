@@ -472,6 +472,7 @@ final class CanvasView: NSView {
     func zoomIn() {
         if let next = CanvasView.zoomLevels.first(where: { $0 > zoomScale }) {
             zoomScale = next
+            updateTextEditorForZoomChange()
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
@@ -480,6 +481,7 @@ final class CanvasView: NSView {
     func zoomOut() {
         if let next = CanvasView.zoomLevels.last(where: { $0 < zoomScale }) {
             zoomScale = next
+            updateTextEditorForZoomChange()
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
@@ -493,6 +495,7 @@ final class CanvasView: NSView {
     func setZoomScale(_ newZoomScale: Int) {
         guard CanvasView.zoomLevels.contains(newZoomScale) else { return }
         zoomScale = newZoomScale
+        updateTextEditorForZoomChange()
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -1909,6 +1912,30 @@ final class CanvasView: NSView {
         frame.size = NSSize(width: width, height: height)
         editor.frame = frame
         needsDisplay = true
+    }
+
+    /// Re-anchors `textEditor`'s on-screen frame origin and font size to
+    /// the current `zoomScale` (issue #42 review should-2) — called from
+    /// every call site that assigns to `zoomScale` (`zoomIn()`/
+    /// `zoomOut()`/`setZoomScale(_:)`). Without this, an in-progress text
+    /// edit's overlay stays pinned to whatever `zoomScale` was in effect
+    /// when `beginTextEdit(at:)` ran, drifting out of alignment with the
+    /// canvas's own on-screen scale as soon as the user zooms mid-edit.
+    ///
+    /// A no-op if no text edit is in progress. Recomputes the frame origin
+    /// with the exact same "canvas pixel * zoomScale" formula
+    /// `beginTextEdit(at:)` uses (from `textInsertionPixel`, the original
+    /// click location), re-resolves `editor.font` at the new zoomed size
+    /// the same way `beginTextEdit(at:)` does, then defers to
+    /// `resizeTextEditorToFitContent()` to grow/shrink the frame size to
+    /// match the now-differently-sized text.
+    private func updateTextEditorForZoomChange() {
+        guard let editor = textEditor, let pixel = textInsertionPixel else { return }
+        var frame = editor.frame
+        frame.origin = NSPoint(x: CGFloat(pixel.x) * CGFloat(zoomScale), y: CGFloat(pixel.y) * CGFloat(zoomScale))
+        editor.frame = frame
+        editor.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize * CGFloat(zoomScale))
+        resizeTextEditorToFitContent()
     }
 
     /// Ends the current text-edit gesture and bakes what was typed into the
