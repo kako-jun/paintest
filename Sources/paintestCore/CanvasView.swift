@@ -1902,6 +1902,38 @@ final class CanvasView: NSView {
     /// Grows `textEditor`'s frame to fit its current content (issue #42),
     /// capped at `textEditorMaxSize` on each axis — called from
     /// `textDidChange(_:)` every time the typed text changes.
+    ///
+    /// For horizontal text (`textSettings.isVertical == false`) this keeps
+    /// the frame's top-left corner fixed and grows right/down, matching
+    /// `beginTextEdit(at:)`'s initial placement (click point = top-left).
+    ///
+    /// For vertical text (review should-1), traditional Japanese tategaki
+    /// adds new columns to the *left* of the first one, not the right — so
+    /// anchoring at top-left like the horizontal case would grow the
+    /// overlay the wrong way as more columns appear. Anchoring at top-right
+    /// instead (fixed `origin.x + width`, `origin.y` unchanged) keeps the
+    /// first column's on-screen position stable and lets the frame expand
+    /// leftward, which is why only `origin.x` — not `origin.y` — is
+    /// recomputed below.
+    ///
+    /// Caveats (unverified — no macOS machine in this dev environment):
+    /// 1. This top-right anchoring is based on the general convention that
+    ///    tategaki columns run right-to-left; whether AppKit's
+    ///    `NSTextView.layoutOrientation = .vertical` (set in
+    ///    `beginTextEdit(at:)`) actually lays out new columns in that
+    ///    direction, or the opposite, has **not** been confirmed by running
+    ///    this on real macOS/AppKit.
+    /// 2. If AppKit's actual column direction turns out to be the reverse
+    ///    of what's assumed here, the only consequence is a cosmetic one:
+    ///    the *live editing overlay* would grow the wrong way on screen.
+    ///    The committed result is unaffected — `rasterizeText(_:at:)` bakes
+    ///    the final text using its own independent offscreen `NSTextView`,
+    ///    a separate code path from this overlay, so the actual pixels
+    ///    written to the layer do not depend on this method at all.
+    /// 3. kako-jun: if vertical editing on real macOS shows the overlay
+    ///    growing in a visually wrong direction, this `if
+    ///    textSettings.isVertical` branch is the only place to look —
+    ///    nothing else in the text tool depends on this assumption.
     private func resizeTextEditorToFitContent() {
         guard let editor = textEditor, let layoutManager = editor.layoutManager, let textContainer = editor.textContainer else { return }
         layoutManager.ensureLayout(for: textContainer)
@@ -1909,7 +1941,13 @@ final class CanvasView: NSView {
         let width = min(Self.textEditorMaxSize, max(Self.textEditorMinWidth, usedRect.width + editor.textContainerInset.width * 2))
         let height = min(Self.textEditorMaxSize, max(Self.textEditorMinHeight, usedRect.height + editor.textContainerInset.height * 2))
         var frame = editor.frame
-        frame.size = NSSize(width: width, height: height)
+        if textSettings.isVertical {
+            let topRightX = frame.origin.x + frame.size.width
+            frame.size = NSSize(width: width, height: height)
+            frame.origin.x = topRightX - width
+        } else {
+            frame.size = NSSize(width: width, height: height)
+        }
         editor.frame = frame
         needsDisplay = true
     }
