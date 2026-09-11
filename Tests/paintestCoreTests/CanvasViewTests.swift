@@ -5909,6 +5909,30 @@ final class CanvasViewTests: XCTestCase {
         return false
     }
 
+    /// The smallest rectangle (inclusive canvas-pixel bounds) containing
+    /// every non-white pixel in the `width`x`height` region, or `nil` if
+    /// the region is entirely white — same "not still all-white" signal
+    /// `hasNonWhitePixel(_:width:height:)` above already relies on, just
+    /// also keeping *where* those pixels are so callers can compare the
+    /// painted footprint's overall shape (e.g. wide-and-short vs. narrow-
+    /// and-tall) rather than only whether anything painted at all.
+    private func nonWhiteBoundingBox(_ canvas: PixelCanvas, width: Int, height: Int) -> (minX: Int, minY: Int, maxX: Int, maxY: Int)? {
+        var minX = Int.max, minY = Int.max, maxX = Int.min, maxY = Int.min
+        for y in 0..<height {
+            for x in 0..<width {
+                guard let pixel = canvas.rawPixel(x: x, y: y) else { continue }
+                if pixel.r != 255 || pixel.g != 255 || pixel.b != 255 {
+                    minX = min(minX, x)
+                    minY = min(minY, y)
+                    maxX = max(maxX, x)
+                    maxY = max(maxY, y)
+                }
+            }
+        }
+        guard minX <= maxX, minY <= maxY else { return nil }
+        return (minX, minY, maxX, maxY)
+    }
+
     func testMouseDown_withTextActive_beginsEditing_addsEditorSubview_doesNotPaintAnyPixelDirectly() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
@@ -6277,6 +6301,88 @@ final class CanvasViewTests: XCTestCase {
 
         XCTAssertFalse(view.isTextEditing)
         XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32), "resolvedFont(family:size:) must fall back to the system font and still rasterize something, rather than silently painting nothing")
+    }
+
+    func testCommitTextEdit_withIsVerticalTrue_rasterizesWithoutCrashing_paintsSomething() {
+        // `TextToolSettings.isVertical = true` switches `rasterizeText(_:
+        // at:)`'s `NSTextView.layoutOrientation` to `.vertical` (issue
+        // #42) — a minimal smoke test that this path actually rasterizes
+        // something and doesn't crash, mirroring `testCommitTextEdit_
+        // withTypedText_rasterizesAndFiresCallbacksOnce` above but with
+        // vertical writing switched on. `testCommitTextEdit_isVertical_
+        // boundingBoxIsTallerThanWide_comparedToHorizontalWriting` below is
+        // what actually proves the orientation took effect on the
+        // rasterized shape, not just "didn't crash".
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        view.textSettings.isVertical = true
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+
+        view.commitTextEdit()
+
+        XCTAssertEqual(contentChangedCount, 1, "a vertical-writing commit must still rasterize and fire onLayerContentChanged exactly once, same as horizontal writing")
+        XCTAssertEqual(labels, ["テキスト"])
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32), "isVertical = true must still rasterize something onto the active layer, not silently no-op")
+    }
+
+    func testCommitTextEdit_isVertical_boundingBoxIsTallerThanWide_comparedToHorizontalWriting() {
+        // The same multi-character text, at the same font size and click
+        // position, rasterized once with `textSettings.isVertical = false`
+        // and once with `true` — only that one setting differs between the
+        // two runs. Horizontal writing lays repeated glyphs out side by
+        // side (a wide, short painted footprint); vertical writing stacks
+        // them top to bottom (a narrow, tall one) — see `TextToolSettings
+        // .isVertical`'s own doc comment ("top to bottom"). This is the
+        // should-4 gap the review flagged: `OptionBarViewTests` already
+        // covers the segmented-control UI state, but nothing previously
+        // verified that `isVertical` actually reaches `CanvasView
+        // .rasterizeText(_:at:)`'s rasterized pixels. Deliberately a
+        // qualitative shape check (aspect ratio flips), not an exact pixel
+        // count — same spirit as `hasNonWhitePixel`/`nonWhiteBoundingBox`
+        // being glyph-shape-agnostic.
+        func paint(isVertical: Bool) -> PixelCanvas {
+            let zoomScale = 4
+            let view = makeViewInWindow(width: 64, height: 64, zoomScale: zoomScale)
+            view.activeTool = .text
+            view.foregroundColor = .black
+            view.textSettings.fontSize = 12
+            view.textSettings.isVertical = isVertical
+            let window = view.window!
+            let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: point, in: window))
+            typeText("AAAA", into: view)
+            view.commitTextEdit()
+            return view.layerStack.activeLayer.canvas
+        }
+
+        let horizontalCanvas = paint(isVertical: false)
+        let verticalCanvas = paint(isVertical: true)
+
+        guard let horizontalBox = nonWhiteBoundingBox(horizontalCanvas, width: 64, height: 64) else {
+            XCTFail("precondition: horizontal writing (isVertical = false) must paint something")
+            return
+        }
+        guard let verticalBox = nonWhiteBoundingBox(verticalCanvas, width: 64, height: 64) else {
+            XCTFail("precondition: vertical writing (isVertical = true) must paint something")
+            return
+        }
+
+        let horizontalWidth = horizontalBox.maxX - horizontalBox.minX + 1
+        let horizontalHeight = horizontalBox.maxY - horizontalBox.minY + 1
+        let verticalWidth = verticalBox.maxX - verticalBox.minX + 1
+        let verticalHeight = verticalBox.maxY - verticalBox.minY + 1
+
+        XCTAssertGreaterThan(horizontalWidth, horizontalHeight, "horizontal writing (isVertical = false) must lay \"AAAA\" out wider than it is tall")
+        XCTAssertGreaterThan(verticalHeight, verticalWidth, "vertical writing (isVertical = true) must stack \"AAAA\" taller than it is wide")
     }
 
     // MARK: - Text edit auto-commit/cancel call sites mirrors (issue #42
