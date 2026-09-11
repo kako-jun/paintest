@@ -573,6 +573,142 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertEqual(target.rawPixel(x: 7, y: 5)?.r, 255, "outside the mask, even though this point is well within the dab's unmasked circle, the target must stay untouched — masking happens at dab time, and compositeOverlay itself carries no mask of its own")
     }
 
+    // MARK: - compositeImage (text tool rasterization, issue #42)
+    //
+    // Unlike `compositeOverlay` above (always the same size as its target,
+    // and every existing test's own overlay content is a radially symmetric
+    // dab that could never expose a vertical/horizontal flip), `compositeImage`
+    // draws an arbitrary already-rendered `CGImage` (`CanvasView
+    // .rasterizeText(_:at:)`'s offscreen `NSTextView` capture) at an
+    // arbitrary `origin` — a genuinely new code path (`context.draw(image,
+    // in: rect)` against a rect built from `origin`, rather than a fixed
+    // `CGRect(x: 0, y: 0, width: width, height: height)`), so it gets its
+    // own dedicated coverage here rather than being assumed to inherit
+    // `compositeOverlay`'s.
+
+    /// Builds a small, already-rendered "source image" the same way
+    /// `compositeImage`'s own doc comment describes `CanvasView
+    /// .rasterizeText(_:at:)`'s `image` argument: an offscreen bitmap with
+    /// known, per-pixel RGBA content. A `PixelCanvas`'s own `cgImage` is the
+    /// simplest way to build one with byte-exact, individually addressable
+    /// pixels for a test to assert against afterward.
+    private func makeSourceImage(width: Int, height: Int, pixel: (Int, Int) -> NSColor) -> CGImage {
+        let source = PixelCanvas(width: width, height: height, background: .white)
+        for y in 0..<height {
+            for x in 0..<width {
+                source.setPixel(x: x, y: y, color: pixel(x, y))
+            }
+        }
+        return source.cgImage!
+    }
+
+    func testCompositeImage_fourQuadrantColors_notVerticallyOrHorizontallyFlipped() {
+        // The single most important test in this section: a naive/wrong
+        // `context.draw` call could easily land the source image upside
+        // down or mirrored (unlike the radially symmetric dabs every
+        // `compositeOverlay` test above uses, which could never expose a
+        // flip bug like this one) — four distinctly colored quadrants make
+        // any such flip immediately visible as colors swapping corners.
+        let topLeft = NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1) // red
+        let topRight = NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1) // green
+        let bottomLeft = NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1) // blue
+        let bottomRight = NSColor(deviceRed: 1, green: 1, blue: 0, alpha: 1) // yellow
+
+        let image = makeSourceImage(width: 4, height: 4) { x, y in
+            switch (x < 2, y < 2) {
+            case (true, true): return topLeft
+            case (false, true): return topRight
+            case (true, false): return bottomLeft
+            case (false, false): return bottomRight
+            }
+        }
+
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+        target.compositeImage(image, at: (x: 2, y: 2))
+
+        let actualTopLeft = target.rawPixel(x: 2, y: 2)
+        XCTAssertEqual(actualTopLeft?.r, 255, "top-left quadrant (red) must land at the top-left of the composited region")
+        XCTAssertEqual(actualTopLeft?.g, 0)
+        XCTAssertEqual(actualTopLeft?.b, 0)
+
+        let actualTopRight = target.rawPixel(x: 5, y: 2)
+        XCTAssertEqual(actualTopRight?.r, 0, "top-right quadrant (green) must land at the top-right, not swapped to another corner")
+        XCTAssertEqual(actualTopRight?.g, 255)
+        XCTAssertEqual(actualTopRight?.b, 0)
+
+        let actualBottomLeft = target.rawPixel(x: 2, y: 5)
+        XCTAssertEqual(actualBottomLeft?.r, 0, "bottom-left quadrant (blue) must land at the bottom-left, not flipped up to the top")
+        XCTAssertEqual(actualBottomLeft?.g, 0)
+        XCTAssertEqual(actualBottomLeft?.b, 255)
+
+        let actualBottomRight = target.rawPixel(x: 5, y: 5)
+        XCTAssertEqual(actualBottomRight?.r, 255, "bottom-right quadrant (yellow) must land at the bottom-right")
+        XCTAssertEqual(actualBottomRight?.g, 255)
+        XCTAssertEqual(actualBottomRight?.b, 0)
+    }
+
+    func testCompositeImage_opaquePixel_overwritesDestination() {
+        let image = makeSourceImage(width: 2, height: 2) { _, _ in .black }
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+
+        target.compositeImage(image, at: (x: 3, y: 3))
+
+        XCTAssertEqual(target.rawPixel(x: 3, y: 3)?.r, 0, "an opaque source pixel must overwrite the destination")
+        XCTAssertEqual(target.rawPixel(x: 3, y: 3)?.a, 255)
+    }
+
+    func testCompositeImage_transparentPixel_leavesDestinationUnchanged() {
+        let image = makeSourceImage(width: 2, height: 2) { _, _ in NSColor(deviceWhite: 0, alpha: 0) } // fully transparent black
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+
+        target.compositeImage(image, at: (x: 3, y: 3))
+
+        for y in 3...4 {
+            for x in 3...4 {
+                XCTAssertEqual(target.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) a fully transparent source pixel (srcAlphaByte == 0) must leave the destination untouched, same as drawAntialiased(mask:_:)'s own `guard srcAlphaByte > 0` for every other draw path")
+            }
+        }
+    }
+
+    func testCompositeImage_maskInsideSelection_isPainted() {
+        let image = makeSourceImage(width: 2, height: 2) { _, _ in .black }
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+        let mask = leftHalfMask(width: 8, height: 8) // columns 0...3 selected
+
+        target.compositeImage(image, at: (x: 1, y: 1), mask: mask) // fully inside the mask
+
+        XCTAssertEqual(target.rawPixel(x: 1, y: 1)?.r, 0, "a source pixel inside the mask must be painted, same as with no mask at all")
+    }
+
+    func testCompositeImage_maskOutsideSelection_isSkipped() {
+        let image = makeSourceImage(width: 2, height: 2) { _, _ in .black }
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+        let mask = leftHalfMask(width: 8, height: 8) // columns 0...3 selected
+
+        target.compositeImage(image, at: (x: 6, y: 1), mask: mask) // fully outside the mask
+
+        XCTAssertEqual(target.rawPixel(x: 6, y: 1)?.r, 255, "a source pixel outside the mask must be skipped, even though it's fully opaque and would otherwise paint")
+    }
+
+    func testCompositeImage_originPartiallyOffCanvasEdge_clipsCleanly_doesNotCrash() {
+        let image = makeSourceImage(width: 4, height: 4) { _, _ in .black }
+        let target = PixelCanvas(width: 8, height: 8, background: .white)
+
+        // Origin is off the top-left corner by (2, 2): only the bottom-right
+        // 2x2 portion of the 4x4 source (canvas (0,0)-(1,1)) actually
+        // overlaps the canvas.
+        target.compositeImage(image, at: (x: -2, y: -2))
+
+        XCTAssertEqual(target.rawPixel(x: 0, y: 0)?.r, 0, "the overlapping part of the off-canvas image must still paint the corner it reaches")
+        XCTAssertEqual(target.rawPixel(x: 1, y: 1)?.r, 0)
+        XCTAssertEqual(target.rawPixel(x: 5, y: 5)?.r, 255, "well outside the image's reach, the canvas must stay untouched")
+
+        // No crash reaching here is itself part of the assertion; canvas is
+        // still usable afterward.
+        target.setPixel(x: 7, y: 7, color: .black)
+        XCTAssertEqual(target.rawPixel(x: 7, y: 7)?.r, 0)
+    }
+
     // MARK: - drawLine
 
     func testDrawLine_horizontal_fillsExactRunAndNothingElse() {

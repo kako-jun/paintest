@@ -348,4 +348,203 @@ final class OptionBarViewTests: XCTestCase {
         XCTAssertEqual(penSliders(in: view).count, 4, "a second call must not leave the first call's 4 sliders behind")
         XCTAssertEqual(view.subviews.count, 12, "no other stray subviews should accumulate either (4 groups x 3 views each)")
     }
+
+    // MARK: - showTextOptions(settings:onFontChanged:onSizeChanged:onOrientationChanged:) / clear() (issue #42)
+    //
+    // Same "previously zero coverage" situation as `showPenOptions` above:
+    // the text tool's font-family popup, サイズ slider, and 横書き/縦書き
+    // segmented control had no test of their own.
+
+    private func textFontPopUp(in view: OptionBarView) -> NSPopUpButton? {
+        view.subviews.compactMap { $0 as? NSPopUpButton }.first
+    }
+
+    private func textSizeSlider(in view: OptionBarView) -> NSSlider? {
+        view.subviews.compactMap { $0 as? NSSlider }.first
+    }
+
+    private func textOrientationControl(in view: OptionBarView) -> NSSegmentedControl? {
+        view.subviews.compactMap { $0 as? NSSegmentedControl }.first
+    }
+
+    private func textSizeValueLabel(in view: OptionBarView) -> NSTextField? {
+        // Two `NSTextField`s are added ("サイズ" label, then the numeric
+        // readout) — the value readout is added last, same "title-then-
+        // value" ordering `showPenOptions`' own `penValueLabels(in:)`
+        // comment describes.
+        view.subviews.compactMap { $0 as? NSTextField }.last
+    }
+
+    func testShowTextOptions_fontPopUp_listsAllAvailableFontFamiliesSorted() {
+        let view = makeView()
+
+        view.showTextOptions(settings: TextToolSettings(), onFontChanged: { _ in }, onSizeChanged: { _ in }, onOrientationChanged: { _ in })
+
+        guard let popUp = textFontPopUp(in: view) else {
+            XCTFail("showTextOptions should add an NSPopUpButton for font family")
+            return
+        }
+        let expectedFamilies = NSFontManager.shared.availableFontFamilies.sorted()
+        XCTAssertEqual(popUp.itemTitles, expectedFamilies, "the font popup must list every installed family, sorted")
+    }
+
+    func testShowTextOptions_fontPopUp_selectsMatchingFamily() {
+        let view = makeView()
+        var settings = TextToolSettings()
+        let families = NSFontManager.shared.availableFontFamilies.sorted()
+        guard let anyFamily = families.first else {
+            XCTFail("this test environment must have at least one installed font family")
+            return
+        }
+        settings.fontFamily = anyFamily
+
+        view.showTextOptions(settings: settings, onFontChanged: { _ in }, onSizeChanged: { _ in }, onOrientationChanged: { _ in })
+
+        guard let popUp = textFontPopUp(in: view) else {
+            XCTFail("showTextOptions should add an NSPopUpButton for font family")
+            return
+        }
+        XCTAssertEqual(popUp.titleOfSelectedItem, anyFamily, "the popup must pre-select the settings' own font family")
+    }
+
+    func testShowTextOptions_changingFontPopUp_firesOnFontChangedWithSelectedFamily() {
+        let view = makeView()
+        var receivedFamilies: [String] = []
+        view.showTextOptions(settings: TextToolSettings(), onFontChanged: { receivedFamilies.append($0) }, onSizeChanged: { _ in }, onOrientationChanged: { _ in })
+
+        guard let popUp = textFontPopUp(in: view) else {
+            XCTFail("showTextOptions should add an NSPopUpButton for font family")
+            return
+        }
+        guard popUp.numberOfItems > 1 else {
+            XCTFail("this test environment must have at least two installed font families to pick a different one")
+            return
+        }
+        popUp.selectItem(at: 1)
+        _ = popUp.sendAction(popUp.action, to: popUp.target)
+
+        XCTAssertEqual(receivedFamilies, [popUp.itemTitles[1]], "onFontChanged must receive the picked family's own title string")
+    }
+
+    func testShowTextOptions_sizeSlider_minMaxAreExactly6And200() {
+        let view = makeView()
+
+        view.showTextOptions(settings: TextToolSettings(), onFontChanged: { _ in }, onSizeChanged: { _ in }, onOrientationChanged: { _ in })
+
+        guard let slider = textSizeSlider(in: view) else {
+            XCTFail("showTextOptions should add an NSSlider for font size")
+            return
+        }
+        XCTAssertEqual(slider.minValue, 6, "must be exactly 6, not 5")
+        XCTAssertEqual(slider.maxValue, 200, "must be exactly 200, not 201")
+    }
+
+    func testShowTextOptions_sizeSlider_initialValueMatchesSettings() {
+        let view = makeView()
+        var settings = TextToolSettings()
+        settings.fontSize = 48
+
+        view.showTextOptions(settings: settings, onFontChanged: { _ in }, onSizeChanged: { _ in }, onOrientationChanged: { _ in })
+
+        guard let slider = textSizeSlider(in: view) else {
+            XCTFail("showTextOptions should add an NSSlider for font size")
+            return
+        }
+        XCTAssertEqual(slider.doubleValue, 48, accuracy: 0.001)
+    }
+
+    func testShowTextOptions_changingSizeSlider_firesOnSizeChangedWithCGFloatValue_andUpdatesValueLabel() {
+        let view = makeView()
+        var receivedValues: [CGFloat] = []
+        view.showTextOptions(settings: TextToolSettings(), onFontChanged: { _ in }, onSizeChanged: { receivedValues.append($0) }, onOrientationChanged: { _ in })
+
+        guard let slider = textSizeSlider(in: view) else {
+            XCTFail("showTextOptions should add an NSSlider for font size")
+            return
+        }
+        slider.doubleValue = 72
+        _ = slider.sendAction(slider.action, to: slider.target)
+
+        XCTAssertEqual(receivedValues, [72], "onSizeChanged must receive the CGFloat size the user dragged to")
+        XCTAssertEqual(textSizeValueLabel(in: view)?.stringValue, "72", "the size readout is a plain rounded point value, not a percentage")
+    }
+
+    func testShowTextOptions_orientationControl_reflectsIsVertical_false() {
+        let view = makeView()
+        var settings = TextToolSettings()
+        settings.isVertical = false
+
+        view.showTextOptions(settings: settings, onFontChanged: { _ in }, onSizeChanged: { _ in }, onOrientationChanged: { _ in })
+
+        guard let control = textOrientationControl(in: view) else {
+            XCTFail("showTextOptions should add an NSSegmentedControl for writing direction")
+            return
+        }
+        XCTAssertEqual(control.selectedSegment, 0, "横書き (segment 0) must be selected when isVertical is false")
+    }
+
+    func testShowTextOptions_orientationControl_reflectsIsVertical_true() {
+        let view = makeView()
+        var settings = TextToolSettings()
+        settings.isVertical = true
+
+        view.showTextOptions(settings: settings, onFontChanged: { _ in }, onSizeChanged: { _ in }, onOrientationChanged: { _ in })
+
+        guard let control = textOrientationControl(in: view) else {
+            XCTFail("showTextOptions should add an NSSegmentedControl for writing direction")
+            return
+        }
+        XCTAssertEqual(control.selectedSegment, 1, "縦書き (segment 1) must be selected when isVertical is true")
+    }
+
+    func testShowTextOptions_changingOrientationControl_firesOnOrientationChangedWithBoolean() {
+        let view = makeView()
+        var receivedValues: [Bool] = []
+        view.showTextOptions(settings: TextToolSettings(), onFontChanged: { _ in }, onSizeChanged: { _ in }, onOrientationChanged: { receivedValues.append($0) })
+
+        guard let control = textOrientationControl(in: view) else {
+            XCTFail("showTextOptions should add an NSSegmentedControl for writing direction")
+            return
+        }
+        control.selectedSegment = 1 // 縦書き
+        _ = control.sendAction(control.action, to: control.target)
+
+        XCTAssertEqual(receivedValues, [true], "onOrientationChanged must receive true for 縦書き")
+
+        control.selectedSegment = 0 // 横書き
+        _ = control.sendAction(control.action, to: control.target)
+
+        XCTAssertEqual(receivedValues, [true, false], "...and false for 横書き")
+    }
+
+    func testClear_afterShowTextOptions_removesAllControlsAndDetachesCallbacks() {
+        let view = makeView()
+        var fontValues: [String] = []
+        var sizeValues: [CGFloat] = []
+        var orientationValues: [Bool] = []
+        view.showTextOptions(
+            settings: TextToolSettings(),
+            onFontChanged: { fontValues.append($0) },
+            onSizeChanged: { sizeValues.append($0) },
+            onOrientationChanged: { orientationValues.append($0) }
+        )
+        guard let popUp = textFontPopUp(in: view), let slider = textSizeSlider(in: view), let control = textOrientationControl(in: view) else {
+            XCTFail("precondition: showTextOptions should add its three controls")
+            return
+        }
+
+        view.clear()
+
+        XCTAssertTrue(view.subviews.isEmpty, "clear() must remove every text-tool control, label, and value readout")
+        popUp.selectItem(at: 0)
+        _ = popUp.sendAction(popUp.action, to: popUp.target)
+        slider.doubleValue = 100
+        _ = slider.sendAction(slider.action, to: slider.target)
+        control.selectedSegment = 1
+        _ = control.sendAction(control.action, to: control.target)
+
+        XCTAssertTrue(fontValues.isEmpty, "firing the old, now-detached font popup after clear() must not reach the stale onFontChanged closure")
+        XCTAssertTrue(sizeValues.isEmpty, "...nor the stale onSizeChanged closure")
+        XCTAssertTrue(orientationValues.isEmpty, "...nor the stale onOrientationChanged closure")
+    }
 }

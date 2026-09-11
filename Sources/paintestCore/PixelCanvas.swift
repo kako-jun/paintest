@@ -405,6 +405,29 @@ final class PixelCanvas {
         }
     }
 
+    /// Composites an already-rendered image onto this canvas at `origin`
+    /// (top-left corner, in `setPixel`'s pixel-space coordinates) — the
+    /// text tool's rasterization step (issue #42:
+    /// `CanvasView.rasterizeText(_:at:)`, which builds `image` from an
+    /// offscreen `NSTextView`'s `cacheDisplay(in:to:)` output). Reuses
+    /// `drawAntialiased(mask:_:)`'s same premultiplied-scratch-overlay
+    /// alpha-compositing technique as `compositeOverlay`/`drawPenDab`
+    /// above, so `image`'s own per-pixel alpha (an anti-aliased glyph edge,
+    /// for instance) blends onto the canvas the same "source over"
+    /// straight-alpha way those do, rather than `setPixel`'s
+    /// fully-opaque-only write.
+    ///
+    /// `origin` is not clamped or bounds-checked up front — a rectangle
+    /// partially or fully outside `0..<width`/`0..<height` is simply
+    /// clipped by the loop in `drawAntialiased(mask:_:)`, which already
+    /// only ever visits `0..<width`/`0..<height`.
+    func compositeImage(_ image: CGImage, at origin: (x: Int, y: Int), mask: SelectionMask? = nil) {
+        drawAntialiased(mask: mask) { context in
+            let rect = CGRect(x: origin.x, y: origin.y, width: image.width, height: image.height)
+            context.draw(image, in: rect)
+        }
+    }
+
     // MARK: - Rendering
 
     var cgImage: CGImage? {

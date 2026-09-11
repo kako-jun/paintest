@@ -159,6 +159,17 @@ final class CanvasViewTests: XCTestCase {
         if view.isPenStrokeInProgress {
             view.flushPenStroke()
         }
+        // Same auto-confirm, for the same reason, for an in-progress text
+        // edit (issue #42) — mirrors the real
+        // `AppDelegate.activateActiveDocument()`'s own `isTextEditing`
+        // check, which likewise runs before `replaceLayerStack` swaps
+        // `view.layerStack` out from under it. See `isTextEditing`'s own
+        // doc comment. A no-op whenever no text edit is in progress, so —
+        // same reasoning as the pen-stroke addition above — safe to add
+        // unconditionally for every existing caller of this helper too.
+        if view.isTextEditing {
+            view.commitTextEdit()
+        }
         // Same discard (not auto-commit) for a pending crop rectangle
         // (issue #21 test-design review) — mirrors the real
         // `AppDelegate.activateActiveDocument()`'s own `isCropping` check,
@@ -5855,5 +5866,806 @@ final class CanvasViewTests: XCTestCase {
         // dead-center click resolved to a top-left corner resize.
         XCTAssertEqual(view.layerStack.width, 7, "the click resolved to a top-left corner resize, not a move — see this test's own doc comment")
         XCTAssertEqual(view.layerStack.height, 7)
+    }
+
+    // MARK: - Text tool (issue #42)
+    //
+    // `mouseDown`'s `.text` branch starts a text-edit gesture
+    // (`beginTextEdit(at:)`) instead of painting directly; the actual
+    // rasterization only happens later, from `commitTextEdit()` (Cmd+
+    // Return, focus loss, a fresh click elsewhere, or a tool/document/layer
+    // switch) — see `CanvasView`'s own "MARK: - Text tool (issue #42)"
+    // section and `isTextEditing`'s doc comment for the full call-site
+    // list this section's mirror tests reproduce.
+
+    /// Types `text` directly into the currently active overlay editor
+    /// (`CanvasView.beginTextEdit(at:)` adds it as a real, findable
+    /// subview) — stands in for what a real keystroke would type through
+    /// AppKit's normal responder chain, the same "skip the real input
+    /// mechanics, drive the model directly" shortcut every other gesture
+    /// helper in this file already takes (e.g. `dragRectangleSelect`
+    /// synthesizing mouse events instead of relying on real hardware).
+    private func typeText(_ text: String, into view: CanvasView) {
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+        editor.string = text
+    }
+
+    /// `true` if any pixel in the `width`x`height` region differs from
+    /// plain opaque white — every text-tool test below paints onto a
+    /// solid-white `background: .white` canvas (`makeViewInWindow`'s own
+    /// default), so "not still all-white" is a reliable, glyph-shape-
+    /// agnostic stand-in for "something was rasterized here", without
+    /// hard-coding exactly which pixels a given font/string paints.
+    private func hasNonWhitePixel(_ canvas: PixelCanvas, width: Int, height: Int) -> Bool {
+        for y in 0..<height {
+            for x in 0..<width {
+                guard let pixel = canvas.rawPixel(x: x, y: y) else { continue }
+                if pixel.r != 255 || pixel.g != 255 || pixel.b != 255 { return true }
+            }
+        }
+        return false
+    }
+
+    /// The smallest rectangle (inclusive canvas-pixel bounds) containing
+    /// every non-white pixel in the `width`x`height` region, or `nil` if
+    /// the region is entirely white — same "not still all-white" signal
+    /// `hasNonWhitePixel(_:width:height:)` above already relies on, just
+    /// also keeping *where* those pixels are so callers can compare the
+    /// painted footprint's overall shape (e.g. wide-and-short vs. narrow-
+    /// and-tall) rather than only whether anything painted at all.
+    private func nonWhiteBoundingBox(_ canvas: PixelCanvas, width: Int, height: Int) -> (minX: Int, minY: Int, maxX: Int, maxY: Int)? {
+        var minX = Int.max, minY = Int.max, maxX = Int.min, maxY = Int.min
+        for y in 0..<height {
+            for x in 0..<width {
+                guard let pixel = canvas.rawPixel(x: x, y: y) else { continue }
+                if pixel.r != 255 || pixel.g != 255 || pixel.b != 255 {
+                    minX = min(minX, x)
+                    minY = min(minY, y)
+                    maxX = max(maxX, x)
+                    maxY = max(maxY, y)
+                }
+            }
+        }
+        guard minX <= maxX, minY <= maxY else { return nil }
+        return (minX, minY, maxX, maxY)
+    }
+
+    func testMouseDown_withTextActive_beginsEditing_addsEditorSubview_doesNotPaintAnyPixelDirectly() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
+        view.activeTool = .text
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        XCTAssertTrue(view.subviews.contains(where: { $0 is TextToolEditorView }), "a click with the text tool active must add an overlay editor subview")
+        XCTAssertFalse(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 8, height: 8), "mouseDown only opens the overlay editor — it must never paint directly, unlike every pixel-painting tool")
+    }
+
+    func testIsTextEditing_falseInitially_trueAfterMouseDown() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .text
+        let window = view.window!
+        XCTAssertFalse(view.isTextEditing, "precondition: no text edit in progress yet")
+
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        XCTAssertTrue(view.isTextEditing)
+    }
+
+    func testMouseDown_withTextActive_doesNotFireOnLayerContentChanged() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .text
+        var contentChangedCount = 0
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 3, row: 3, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        XCTAssertEqual(contentChangedCount, 0, "opening the overlay editor is not itself a layer edit — only commitTextEdit() rasterizes into the layer")
+    }
+
+    func testCommitTextEdit_withTypedText_rasterizesAndFiresCallbacksOnce() {
+        // A generous 32x32 canvas (not e.g. 16x16) with the click well away
+        // from the edges: the default 24-canvas-pixel font size's full line
+        // height can run noticeably taller than its own cap height, and
+        // this test only cares that *something* rasterized, not any exact
+        // shape — a small canvas risks clipping away the one visible pixel
+        // this assertion depends on before it's ever painted.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+
+        view.commitTextEdit()
+
+        XCTAssertEqual(contentChangedCount, 1, "onLayerContentChanged must fire exactly once for the commit")
+        XCTAssertEqual(labels, ["テキスト"])
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32), "committing typed text must rasterize something onto the active layer")
+    }
+
+    func testCommitTextEdit_removesEditorSubview_setsIsTextEditingFalse() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .text
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit")
+
+        view.commitTextEdit()
+
+        XCTAssertFalse(view.isTextEditing)
+        XCTAssertFalse(view.subviews.contains(where: { $0 is TextToolEditorView }), "the overlay editor subview must be removed once committed")
+    }
+
+    func testCommitTextEdit_emptyString_doesNotRasterize_doesNotFireCallbacks() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        // No typing: the editor is left at its default empty string.
+
+        view.commitTextEdit()
+
+        XCTAssertEqual(contentChangedCount, 0, "an empty typed string has nothing to rasterize")
+        XCTAssertTrue(labels.isEmpty, "onEditCompleted must not fire for an empty commit")
+        XCTAssertFalse(view.isTextEditing, "the editor must still be dismissed even though nothing was rasterized")
+        XCTAssertFalse(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 8, height: 8))
+    }
+
+    func testCancelTextEdit_discardsTypedText_leavesLayerUntouched_noCallbacks() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("discard me", into: view)
+
+        view.cancelTextEdit()
+
+        XCTAssertFalse(view.isTextEditing)
+        XCTAssertFalse(view.subviews.contains(where: { $0 is TextToolEditorView }))
+        XCTAssertEqual(contentChangedCount, 0, "Escape must discard the typed text, not bake it")
+        XCTAssertTrue(labels.isEmpty)
+        XCTAssertFalse(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 8, height: 8))
+    }
+
+    func testCommitTextEdit_calledTwiceInSuccession_secondCallIsNoOp_noDoublePaintNoDoubleCallback() {
+        // The reentrancy guard `commitTextEdit()`'s own doc comment warns
+        // about by name: `textEditor`/`textInsertionPixel` are cleared
+        // BEFORE `editor.removeFromSuperview()` runs, specifically so a
+        // second, reentrant call (here: a direct duplicate call, standing
+        // in for the real reentrant path via `textDidEndEditing(_:)`
+        // firing off that same `removeFromSuperview()`) bails out via its
+        // own `guard let editor = textEditor` instead of rasterizing the
+        // same text a second time.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 16, height: 16, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+
+        view.commitTextEdit()
+        view.commitTextEdit() // reentrant/duplicate call — must be a no-op
+
+        XCTAssertEqual(contentChangedCount, 1, "a second commitTextEdit() call must not rasterize a second time")
+        XCTAssertEqual(labels, ["テキスト"], "onEditCompleted must fire exactly once, not twice")
+    }
+
+    func testTextDidEndEditing_matchingObject_commits() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+
+        view.textDidEndEditing(Notification(name: NSText.didEndEditingNotification, object: editor))
+
+        XCTAssertFalse(view.isTextEditing, "focus loss on the matching editor must commit the edit")
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32))
+    }
+
+    func testTextDidEndEditing_unrelatedObject_isIgnored_editStaysInProgress() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 16, height: 16, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        let unrelatedTextView = NSTextView()
+
+        view.textDidEndEditing(Notification(name: NSText.didEndEditingNotification, object: unrelatedTextView))
+
+        XCTAssertTrue(view.isTextEditing, "a notification from an unrelated NSTextView must be ignored, not commit this edit")
+        XCTAssertTrue(view.subviews.contains(where: { $0 is TextToolEditorView }), "the overlay editor must still be present")
+    }
+
+    func testMouseDown_secondClickWhileTextEditing_commitsPreviousEdit_beginsNewOneAtNewPixel_editCompletedFiresExactlyOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        var labels: [String] = []
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let firstPoint = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let secondPoint = windowPoint(forPixelCol: 20, row: 20, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: firstPoint, in: window))
+        typeText("A", into: view)
+        // Clicks elsewhere WITHOUT ever calling commitTextEdit()/
+        // cancelTextEdit() directly — this is the defensive fallback path
+        // `mouseDown`'s own `.text` branch doc comment describes.
+        view.mouseDown(with: mouseDownEvent(at: secondPoint, in: window))
+
+        XCTAssertTrue(view.isTextEditing, "the second click must have started a brand new edit")
+        XCTAssertEqual(labels, ["テキスト"], "the first click's commit must fire onEditCompleted exactly once — the second click's own beginTextEdit() doesn't fire it again")
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32), "the first edit's typed text must have been rasterized before the new edit began")
+    }
+
+    func testActiveTool_switchedAwayFromTextMidEdit_commitsPendingText() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit")
+
+        view.activeTool = .pencil
+
+        XCTAssertFalse(view.isTextEditing, "switching tools away from .text must auto-commit the pending edit")
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32))
+    }
+
+    func testMouseDragged_withTextActive_isNoOp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .text
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let dragPoint = windowPoint(forPixelCol: 5, row: 5, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        view.mouseDragged(with: mouseDraggedEvent(at: dragPoint, in: window))
+
+        XCTAssertTrue(view.isTextEditing, "a drag must not disturb the in-progress text edit")
+        XCTAssertFalse(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 8, height: 8), "a drag must never paint pixels directly for the text tool")
+    }
+
+    func testMouseUp_withTextActive_isNoOp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .text
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+
+        XCTAssertTrue(view.isTextEditing, "mouseUp must not commit or cancel the in-progress text edit — that only happens via Cmd+Return, Escape, focus loss, or the next gesture")
+        XCTAssertFalse(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 8, height: 8))
+    }
+
+    func testCommitTextEdit_rasterizesAtClickedPixel_topLeftAnchored() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        view.textSettings.fontSize = 12
+        let window = view.window!
+        let clickCol = 10, clickRow = 10
+        let point = windowPoint(forPixelCol: clickCol, row: clickRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+
+        view.commitTextEdit()
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<clickRow {
+            for x in 0..<32 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) is above the clicked row — the rasterized text must be top-anchored at the click, not centered or bottom-anchored above it")
+            }
+        }
+        for y in 0..<32 {
+            for x in 0..<clickCol {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 255, "(\(x),\(y)) is left of the clicked column — the rasterized text must be left-anchored at the click, not centered or right-anchored left of it")
+            }
+        }
+        XCTAssertTrue(hasNonWhitePixel(canvas, width: 32, height: 32), "precondition: something was actually painted")
+    }
+
+    func testCommitTextEdit_paintedSize_isIndependentOfZoomScale() {
+        // Same text/fontSize/click position, rendered once at zoomScale 1
+        // and once at 4 — `rasterizeText(_:at:)` always renders at
+        // `textSettings.fontSize`'s literal canvas-pixel size (see its own
+        // doc comment), never `zoomScale`-multiplied, so the two results
+        // must be pixel-for-pixel identical despite the wildly different
+        // on-screen overlay-editor sizes that produced them.
+        func paint(zoomScale: Int) -> PixelCanvas {
+            let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+            view.activeTool = .text
+            view.foregroundColor = .black
+            view.textSettings.fontSize = 12
+            let window = view.window!
+            let point = windowPoint(forPixelCol: 8, row: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: point, in: window))
+            typeText("Ag", into: view)
+            view.commitTextEdit()
+            return view.layerStack.activeLayer.canvas
+        }
+
+        let canvasAtScale1 = paint(zoomScale: 1)
+        let canvasAtScale4 = paint(zoomScale: 4)
+
+        for y in 0..<32 {
+            for x in 0..<32 {
+                XCTAssertEqual(canvasAtScale1.rawPixel(x: x, y: y)?.r, canvasAtScale4.rawPixel(x: x, y: y)?.r, "(\(x),\(y)) red must match between zoom levels")
+                XCTAssertEqual(canvasAtScale1.rawPixel(x: x, y: y)?.a, canvasAtScale4.rawPixel(x: x, y: y)?.a, "(\(x),\(y)) alpha must match between zoom levels")
+            }
+        }
+        XCTAssertTrue(hasNonWhitePixel(canvasAtScale1, width: 32, height: 32), "precondition: something was actually painted")
+    }
+
+    func testCommitTextEdit_withActiveSelection_onlyPaintsInsideSelectionMask() {
+        let zoomScale = 4
+        let size = 32
+
+        let unmaskedView = makeViewInWindow(width: size, height: size, zoomScale: zoomScale)
+        unmaskedView.activeTool = .text
+        unmaskedView.foregroundColor = .black
+        let unmaskedWindow = unmaskedView.window!
+        let clickPoint1 = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: unmaskedView.frame.height)
+        unmaskedView.mouseDown(with: mouseDownEvent(at: clickPoint1, in: unmaskedWindow))
+        typeText("A", into: unmaskedView)
+        unmaskedView.commitTextEdit()
+        XCTAssertTrue(hasNonWhitePixel(unmaskedView.layerStack.activeLayer.canvas, width: size, height: size), "precondition/control: without a selection, the same text at the same spot must actually paint something")
+
+        let maskedView = makeViewInWindow(width: size, height: size, zoomScale: zoomScale)
+        maskedView.activeTool = .text
+        maskedView.foregroundColor = .black
+        // Selects only a single pixel nowhere near the click — the
+        // rasterized text's whole bounding box falls entirely outside this
+        // mask.
+        maskedView.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 0, y1: 0, width: size, height: size)
+        let maskedWindow = maskedView.window!
+        let clickPoint2 = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: maskedView.frame.height)
+        maskedView.mouseDown(with: mouseDownEvent(at: clickPoint2, in: maskedWindow))
+        typeText("A", into: maskedView)
+        maskedView.commitTextEdit()
+
+        XCTAssertFalse(hasNonWhitePixel(maskedView.layerStack.activeLayer.canvas, width: size, height: size), "an active selection that excludes the whole rasterized region must suppress the paint entirely — compositeImage's mask parameter must actually be `selection`, not always nil")
+    }
+
+    func testCommitTextEdit_withUnknownFontFamily_fallsBackGracefully_stillPaints_noCrash() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        view.textSettings.fontFamily = "ThisFontFamilyDoesNotExist-Issue42"
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+
+        view.commitTextEdit() // must not crash despite the unresolvable font family
+
+        XCTAssertFalse(view.isTextEditing)
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32), "resolvedFont(family:size:) must fall back to the system font and still rasterize something, rather than silently painting nothing")
+    }
+
+    func testCommitTextEdit_withIsVerticalTrue_rasterizesWithoutCrashing_paintsSomething() {
+        // `TextToolSettings.isVertical = true` switches `rasterizeText(_:
+        // at:)`'s `NSTextView.layoutOrientation` to `.vertical` (issue
+        // #42) — a minimal smoke test that this path actually rasterizes
+        // something and doesn't crash, mirroring `testCommitTextEdit_
+        // withTypedText_rasterizesAndFiresCallbacksOnce` above but with
+        // vertical writing switched on. `testCommitTextEdit_isVertical_
+        // boundingBoxIsTallerThanWide_comparedToHorizontalWriting` below is
+        // what actually proves the orientation took effect on the
+        // rasterized shape, not just "didn't crash".
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        view.textSettings.isVertical = true
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+
+        view.commitTextEdit()
+
+        XCTAssertEqual(contentChangedCount, 1, "a vertical-writing commit must still rasterize and fire onLayerContentChanged exactly once, same as horizontal writing")
+        XCTAssertEqual(labels, ["テキスト"])
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32), "isVertical = true must still rasterize something onto the active layer, not silently no-op")
+    }
+
+    func testCommitTextEdit_isVertical_boundingBoxIsTallerThanWide_comparedToHorizontalWriting() {
+        // The same multi-character text, at the same font size and click
+        // position, rasterized once with `textSettings.isVertical = false`
+        // and once with `true` — only that one setting differs between the
+        // two runs. Horizontal writing lays repeated glyphs out side by
+        // side (a wide, short painted footprint); vertical writing stacks
+        // them top to bottom (a narrow, tall one) — see `TextToolSettings
+        // .isVertical`'s own doc comment ("top to bottom"). This is the
+        // should-4 gap the review flagged: `OptionBarViewTests` already
+        // covers the segmented-control UI state, but nothing previously
+        // verified that `isVertical` actually reaches `CanvasView
+        // .rasterizeText(_:at:)`'s rasterized pixels. Deliberately a
+        // qualitative shape check (aspect ratio flips), not an exact pixel
+        // count — same spirit as `hasNonWhitePixel`/`nonWhiteBoundingBox`
+        // being glyph-shape-agnostic.
+        func paint(isVertical: Bool) -> PixelCanvas {
+            let zoomScale = 4
+            let view = makeViewInWindow(width: 64, height: 64, zoomScale: zoomScale)
+            view.activeTool = .text
+            view.foregroundColor = .black
+            view.textSettings.fontSize = 12
+            view.textSettings.isVertical = isVertical
+            let window = view.window!
+            let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: point, in: window))
+            typeText("AAAA", into: view)
+            view.commitTextEdit()
+            return view.layerStack.activeLayer.canvas
+        }
+
+        let horizontalCanvas = paint(isVertical: false)
+        let verticalCanvas = paint(isVertical: true)
+
+        guard let horizontalBox = nonWhiteBoundingBox(horizontalCanvas, width: 64, height: 64) else {
+            XCTFail("precondition: horizontal writing (isVertical = false) must paint something")
+            return
+        }
+        guard let verticalBox = nonWhiteBoundingBox(verticalCanvas, width: 64, height: 64) else {
+            XCTFail("precondition: vertical writing (isVertical = true) must paint something")
+            return
+        }
+
+        let horizontalWidth = horizontalBox.maxX - horizontalBox.minX + 1
+        let horizontalHeight = horizontalBox.maxY - horizontalBox.minY + 1
+        let verticalWidth = verticalBox.maxX - verticalBox.minX + 1
+        let verticalHeight = verticalBox.maxY - verticalBox.minY + 1
+
+        XCTAssertGreaterThan(horizontalWidth, horizontalHeight, "horizontal writing (isVertical = false) must lay \"AAAA\" out wider than it is tall")
+        XCTAssertGreaterThan(verticalHeight, verticalWidth, "vertical writing (isVertical = true) must stack \"AAAA\" taller than it is wide")
+    }
+
+    // MARK: - updateTextEditorForZoomChange() (issue #42 review round 2
+    // should-1)
+    //
+    // `zoomIn()`/`zoomOut()`/`setZoomScale(_:)` each call
+    // `updateTextEditorForZoomChange()` to keep an in-progress text edit's
+    // overlay anchored to its original click pixel as the zoom level
+    // changes. No test previously exercised this method directly for either
+    // writing direction — these three fill that gap and pin down the
+    // round-2 review's should-1 fix (resetting `frame.size` back to the
+    // overlay's minimum before handing off to
+    // `resizeTextEditorToFitContent()`).
+
+    func testUpdateTextEditorForZoomChange_horizontal_originMatchesNewZoomPixel() {
+        let initialZoomScale = 4
+        let newZoomScale = 8
+        let pixelCol = 4, pixelRow = 4
+        let view = makeViewInWindow(width: 64, height: 64, zoomScale: initialZoomScale)
+        view.activeTool = .text
+        let window = view.window!
+        let point = windowPoint(forPixelCol: pixelCol, row: pixelRow, zoomScale: initialZoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        view.zoomIn() // initialZoomScale -> newZoomScale
+
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+        XCTAssertEqual(view.zoomScale, newZoomScale, "precondition: zoomIn() actually changed the zoom level")
+        XCTAssertEqual(editor.frame.origin.x, CGFloat(pixelCol * newZoomScale), "the overlay's origin.x must track pixel.x * the new zoomScale after a zoom change")
+        XCTAssertEqual(editor.frame.origin.y, CGFloat(pixelRow * newZoomScale), "the overlay's origin.y must track pixel.y * the new zoomScale after a zoom change")
+    }
+
+    func testUpdateTextEditorForZoomChange_vertical_originMatchesNewZoomPixel() {
+        let initialZoomScale = 4
+        let newZoomScale = 8
+        let pixelCol = 4, pixelRow = 4
+        let view = makeViewInWindow(width: 64, height: 64, zoomScale: initialZoomScale)
+        view.activeTool = .text
+        view.textSettings.isVertical = true
+        let window = view.window!
+        let point = windowPoint(forPixelCol: pixelCol, row: pixelRow, zoomScale: initialZoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+
+        view.zoomIn() // initialZoomScale -> newZoomScale
+
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+        XCTAssertEqual(view.zoomScale, newZoomScale, "precondition: zoomIn() actually changed the zoom level")
+        XCTAssertEqual(editor.frame.origin.x, CGFloat(pixelCol * newZoomScale), "vertical writing's overlay origin.x must also track pixel.x * the new zoomScale after a zoom change")
+        XCTAssertEqual(editor.frame.origin.y, CGFloat(pixelRow * newZoomScale), "vertical writing's overlay origin.y must also track pixel.y * the new zoomScale after a zoom change")
+    }
+
+    func testUpdateTextEditorForZoomChange_verticalAfterAutoExpand_topRightXStaysAtNewZoomBaseline() {
+        // Regression test for the round-2 review's should-1 finding: before
+        // the fix, `updateTextEditorForZoomChange()` only reset `frame
+        // .origin` to the new zoom's pixel position while leaving `frame
+        // .size` at whatever the *old* zoom's auto-expanded content fit —
+        // so the very next `resizeTextEditorToFitContent()` call, in its
+        // vertical-writing branch, computed
+        // `topRightX = frame.origin.x + frame.size.width` by mixing a
+        // new-zoom `origin.x` with an old-zoom `width`, landing the
+        // overlay's top-right corner nowhere near either zoom level's
+        // correct position. Horizontal writing was unaffected (its branch
+        // only overwrites `frame.size`, never reads it first), so this
+        // reproduces the bug's actual precondition: vertical writing, with
+        // the overlay already auto-expanded past its minimum size *before*
+        // the zoom change.
+        //
+        // `40` below mirrors `CanvasView.textEditorMinWidth`, a `private`
+        // constant this test file cannot reference directly.
+        let textEditorMinWidth: CGFloat = 40
+        let initialZoomScale = 4
+        let newZoomScale = 8
+        let pixelCol = 4, pixelRow = 4
+        let view = makeViewInWindow(width: 64, height: 64, zoomScale: initialZoomScale)
+        view.activeTool = .text
+        view.textSettings.isVertical = true
+        let window = view.window!
+        let point = windowPoint(forPixelCol: pixelCol, row: pixelRow, zoomScale: initialZoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("AAAA", into: view)
+        guard let editor = view.subviews.compactMap({ $0 as? TextToolEditorView }).first else {
+            XCTFail("expected an active TextToolEditorView subview")
+            return
+        }
+        // `typeText(_:into:)` assigns `.string` directly (not through a real
+        // keystroke), which doesn't itself post `NSText.didChangeNotification`
+        // — drive the same delegate callback `textDidChange(_:)` a real
+        // keystroke would trigger, the same way `testTextDidEndEditing_*`
+        // above calls `textDidEndEditing(_:)` directly to stand in for a
+        // real focus-loss notification.
+        view.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        XCTAssertGreaterThan(editor.frame.size.width, textEditorMinWidth, "precondition: the overlay must already be auto-expanded past its minimum width before the zoom change — this is the bug's actual trigger condition")
+
+        view.zoomIn() // initialZoomScale -> newZoomScale
+
+        let expectedTopRightX = CGFloat(pixelCol * newZoomScale) + textEditorMinWidth
+        let actualTopRightX = editor.frame.origin.x + editor.frame.size.width
+        XCTAssertEqual(actualTopRightX, expectedTopRightX, accuracy: 0.5, "after a zoom change, the vertical overlay's top-right x must be anchored to the NEW zoom's click position + minWidth, not mixed with the OLD zoom's auto-expanded width")
+    }
+
+    // MARK: - Text edit auto-commit/cancel call sites mirrors (issue #42
+    // test-design review): willChangeActiveLayer, document tab switch,
+    // undo/redo, history-jump, and the adjustment-dialog route
+    //
+    // Same "AppDelegate can't be unit tested directly" situation as the pen
+    // stroke's own mirror tests above (see their shared MARK comment) —
+    // these reproduce the exact commit/cancel protocol each of
+    // `AppDelegate`'s `layerPanelView.willChangeActiveLayer`,
+    // `activateActiveDocument()` (via `activate(...)`), `undo()`/`redo()`,
+    // `historyPanelView.onJumpToIndex`, and `commitAnyPendingLayerEdits()`
+    // already follows, directly against `CanvasView` + `HistoryManager`.
+
+    func testWillChangeActiveLayerMirror_midTextEdit_commits() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.layerStack.addLayer() // a second layer to switch to
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit")
+        let editingLayerIndex = view.layerStack.activeLayerIndex
+
+        // Mirrors AppDelegate's layerPanelView.willChangeActiveLayer
+        // closure: commits any pending text edit before the active layer
+        // actually changes.
+        if view.isTextEditing { view.commitTextEdit() }
+        view.layerStack.activeLayerIndex = editingLayerIndex == 0 ? 1 : 0
+
+        XCTAssertFalse(view.isTextEditing, "switching the active layer must commit the pending text edit")
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.layers[editingLayerIndex].canvas, width: 32, height: 32), "the committed text must have landed on the layer it was actually being typed onto")
+    }
+
+    func testActivateActiveDocumentMirror_midTextEdit_commits() {
+        // Mirrors `testPenStroke_activeWhenSwitchingDocuments_autoFlushesOntoTheOriginatingDocument_leavesTheOtherDocumentUntouched`
+        // above, but for a text edit instead of a pen stroke — exercising
+        // the `activate(_:previouslyDisplayed:on:)` helper's own
+        // text-commit addition (mirroring
+        // `AppDelegate.activateActiveDocument()`'s real `isTextEditing`
+        // check).
+        let zoomScale = 4
+        let docA = Document(layerStack: LayerStack(width: 32, height: 32, background: .white), displayName: "a")
+        let docB = Document(layerStack: LayerStack(width: 32, height: 32, background: .white), displayName: "b")
+
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.replaceLayerStack(docA.layerStack)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit on docA")
+
+        activate(docB, previouslyDisplayed: docA, on: view) // switch tabs WITHOUT ever committing
+
+        XCTAssertFalse(view.isTextEditing, "switching documents must auto-commit the in-progress text edit")
+        XCTAssertTrue(hasNonWhitePixel(docA.layerStack.activeLayer.canvas, width: 32, height: 32), "the text must have landed on docA, the document it actually belongs to")
+        XCTAssertFalse(hasNonWhitePixel(docB.layerStack.activeLayer.canvas, width: 32, height: 32), "docB must be completely untouched by a text edit that belongs to docA")
+    }
+
+    func testUndoMirror_midTextEdit_cancels() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 16, height: 16, background: .white))
+        let view = makeViewInWindow(width: 16, height: 16, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+
+        // A prior, completed edit — the checkpoint undo should actually land on.
+        document.layerStack.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+        document.history.record(document.layerStack, label: "鉛筆")
+
+        let point = windowPoint(forPixelCol: 8, row: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit, not yet committed")
+
+        // Mirrors AppDelegate.undo()'s own ordering: CANCEL (never commit)
+        // any in-progress text edit before applying the restored snapshot —
+        // it has no history entry of its own to fall back to.
+        if view.isTextEditing { view.cancelTextEdit() }
+        guard let restored = document.history.undo() else {
+            XCTFail("expected an undo checkpoint")
+            return
+        }
+        view.replaceLayerStack(restored.layerStack)
+
+        XCTAssertFalse(view.isTextEditing, "undo must cancel the in-progress text edit")
+        XCTAssertEqual(restored.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 255, "the restored snapshot is the pre-\"鉛筆\" \"初期状態\" entry — untouched by the \"鉛筆\" edit")
+        XCTAssertFalse(hasNonWhitePixel(restored.layerStack.activeLayer.canvas, width: 16, height: 16), "the cancelled text edit must not appear anywhere in the restored history snapshot")
+    }
+
+    func testRedoMirror_midTextEdit_cancels() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 16, height: 16, background: .white))
+        let view = makeViewInWindow(width: 16, height: 16, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+
+        document.layerStack.activeLayer.canvas.setPixel(x: 0, y: 0, color: .black)
+        document.history.record(document.layerStack, label: "鉛筆")
+        _ = document.history.undo() // so there's something left to redo
+
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 8, row: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit, not yet committed")
+
+        if view.isTextEditing { view.cancelTextEdit() }
+        guard let restored = document.history.redo() else {
+            XCTFail("expected a redo checkpoint")
+            return
+        }
+        view.replaceLayerStack(restored.layerStack)
+
+        XCTAssertFalse(view.isTextEditing, "redo must cancel the in-progress text edit")
+        XCTAssertEqual(restored.layerStack.activeLayer.canvas.rawPixel(x: 0, y: 0)?.r, 0, "the redone snapshot is the \"鉛筆\" entry, with its pixel actually painted")
+    }
+
+    func testHistoryJumpMirror_midTextEdit_cancelsNotCommit() {
+        let zoomScale = 4
+        let document = Document(layerStack: LayerStack(width: 16, height: 16, background: .white))
+        let view = makeViewInWindow(width: 16, height: 16, zoomScale: zoomScale)
+        view.replaceLayerStack(document.layerStack)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 8, row: 8, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit, not yet committed")
+
+        // Mirrors AppDelegate's historyPanelView.onJumpToIndex: a jump
+        // swaps in a whole different, unrelated snapshot, so the
+        // in-progress text edit is cancelled, not committed.
+        if view.isTextEditing { view.cancelTextEdit() }
+        guard let jumped = document.history.jump(to: 0) else {
+            XCTFail("expected the \"初期状態\" entry at index 0")
+            return
+        }
+        view.replaceLayerStack(jumped.layerStack)
+
+        XCTAssertFalse(view.isTextEditing, "a history jump must cancel the in-progress text edit")
+        XCTAssertFalse(hasNonWhitePixel(jumped.layerStack.activeLayer.canvas, width: 16, height: 16), "the cancelled text edit must not have been committed into the jumped-to snapshot")
+    }
+
+    func testAdjustmentDialogMirror_openedMidTextEdit_commitsFirst() {
+        // Mirrors `AppDelegate.commitAnyPendingLayerEdits()` — unlike
+        // undo/redo/history-jump above, opening an adjustment dialog
+        // COMMITS (not cancels) an in-progress text edit: the dialog
+        // reads/writes the active layer's real pixels directly, and — same
+        // asymmetry as the pen stroke's own equivalent mirror test above —
+        // there's no history entry to fall back to if the typed text were
+        // simply discarded.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 32, height: 32, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A", into: view)
+        XCTAssertTrue(view.isTextEditing, "precondition: mid-edit, not yet committed")
+
+        // Mirrors AppDelegate.commitAnyPendingLayerEdits(), called right
+        // before an adjustment dialog reads/writes the active layer.
+        if view.isTransforming { view.commitLayerTransform() }
+        if view.isPenStrokeInProgress { view.flushPenStroke() }
+        if view.isTextEditing { view.commitTextEdit() }
+
+        XCTAssertFalse(view.isTextEditing, "opening the dialog must commit, not cancel, the in-progress text edit")
+        XCTAssertTrue(hasNonWhitePixel(view.layerStack.activeLayer.canvas, width: 32, height: 32), "the dialog must see the finished text's pixels already baked into the active layer")
     }
 }

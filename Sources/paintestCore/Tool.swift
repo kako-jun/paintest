@@ -6,8 +6,8 @@ import Foundation
 /// model (issue #5).
 ///
 /// `pencil`, `eraser`, `pen`, `eyedropper`, `magnifier`, the five selection
-/// tools, `crop`, and `bucketFill` are wired to real behavior so far;
-/// `ToolboxView`'s other 8 buttons stay purely visual placeholders until
+/// tools, `crop`, `bucketFill`, and `text` are wired to real behavior so far;
+/// `ToolboxView`'s other 7 buttons stay purely visual placeholders until
 /// their own issues give them real tool implementations.
 enum Tool {
     case pencil
@@ -70,4 +70,19 @@ enum Tool {
     /// the whole gesture: no drag/multi-click state of its own. See
     /// `CanvasView`'s `mouseDown` handling.
     case bucketFill
+    /// Clicks a canvas position and opens an editable text overlay there
+    /// instead of painting (issue #42; was `nil`/disabled-placeholder under
+    /// issue #43) — `TextToolSettings` on `CanvasView` holds the font/size/
+    /// writing-direction (horizontal or vertical, via `NSTextView
+    /// .layoutOrientation`) the overlay is built with, and the existing
+    /// foreground color is reused for the text color (same pattern the
+    /// pencil/pen already follow, no dedicated swatch of its own). Unlike
+    /// every other tool here, committing this one doesn't write pixels
+    /// directly from `mouseDown`/`mouseDragged` — it rasterizes the
+    /// overlay's text into the active layer only once editing ends (Cmd+
+    /// Return, focus loss, or starting a new text edit elsewhere), and
+    /// Escape cancels with no pixels touched at all. See `CanvasView`'s
+    /// `mouseDown`/`beginTextEdit(at:)`/`commitTextEdit()`/
+    /// `cancelTextEdit()`.
+    case text
 }

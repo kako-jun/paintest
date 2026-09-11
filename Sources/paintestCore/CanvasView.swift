@@ -37,6 +37,12 @@ final class CanvasView: NSView {
     /// also need to mirror). `AppDelegate.updateOptionBar(for:)`'s `.pen`
     /// case reads/writes this directly through `OptionBarView`'s sliders.
     var penBrushSettings = PenBrushSettings()
+    /// The text tool's own font/size/writing-direction settings (issue
+    /// #42) — same "one tool's own adjustable setting, no separate
+    /// `AppDelegate` copy" pattern as `penBrushSettings` above.
+    /// `AppDelegate.updateOptionBar(for:)`'s `.text` case reads/writes this
+    /// directly through `OptionBarView`'s controls.
+    var textSettings = TextToolSettings()
     var onZoomChanged: ((Int) -> Void)?
     /// Fired after a pixel-editing gesture (`mouseDown`/`mouseDragged`)
     /// writes to the active layer's canvas, so `AppDelegate` can refresh
@@ -113,6 +119,29 @@ final class CanvasView: NSView {
     /// whether to fire `onEditCompleted`. Reset at the start of every new
     /// `mouseDown` gesture.
     private var paintedDuringGesture = false
+
+    /// The text tool's in-progress overlay editor (issue #42) — a real
+    /// `NSTextView` subclass placed as a direct subview of `CanvasView`,
+    /// positioned over the clicked canvas pixel, `nil` outside of an
+    /// active text-edit gesture. Unlike the pen's `penStrokeBuffer` (an
+    /// offscreen scratch `PixelCanvas`), this is a live, visible AppKit
+    /// control the user types directly into — added as a subview here
+    /// (rather than a separate window/panel) so it scrolls/zooms along
+    /// with `CanvasView` for free.
+    private var textEditor: TextToolEditorView?
+    /// The canvas-pixel coordinate the text tool was clicked at (issue
+    /// #42) — where `commitTextEdit()`/`rasterizeText(_:at:)` anchor the
+    /// rasterized text's top-left corner. `nil` exactly when `textEditor`
+    /// is (the two are always set/cleared together).
+    private var textInsertionPixel: (x: Int, y: Int)?
+
+    private static let textEditorMinWidth: CGFloat = 40
+    private static let textEditorMinHeight: CGFloat = 24
+    /// A generous cap on the overlay editor's own auto-growing size (issue
+    /// #42), in view points — large enough for a normal sentence or two at
+    /// typical zoom levels without letting a runaway paste balloon the
+    /// overlay past the window.
+    private static let textEditorMaxSize: CGFloat = 600
 
     /// A drag gesture below this distance (in view points) counts as a
     /// "click" for the magnifier tool rather than a rectangle drag (issue
@@ -307,6 +336,20 @@ final class CanvasView: NSView {
     /// `isTransforming`/`isPenStrokeInProgress`.
     var isCropping: Bool { cropRect != nil }
 
+    /// Whether the text tool's overlay editor is currently live (issue #42)
+    /// — `true` exactly when `textEditor` is non-`nil`. Exposed read-only,
+    /// mirroring `isPenStrokeInProgress` above for the identical reason and
+    /// with the identical commit-not-cancel treatment: the overlay's typed
+    /// text is a *pending* edit against `layerStack.activeLayer.canvas` that
+    /// doesn't land for real until `commitTextEdit()` runs, so anything that
+    /// can swap out `layerStack`, change `activeLayerIndex`, or restore a
+    /// whole different history snapshot out from under it needs to commit or
+    /// cancel it first — see `AppDelegate`'s `activateActiveDocument()`,
+    /// `layerPanelView.willChangeActiveLayer`, `undo()`/`redo()`,
+    /// `historyPanelView.onJumpToIndex`, and `commitAnyPendingLayerEdits()`,
+    /// each of which already does the equivalent for `isPenStrokeInProgress`.
+    var isTextEditing: Bool { textEditor != nil }
+
     /// A transform handle is hit-testable within this many *view* points of
     /// its exact position (so the hitbox stays a constant on-screen size
     /// regardless of zoom) — mirrors `magnifierClickThreshold`/
@@ -368,6 +411,21 @@ final class CanvasView: NSView {
             if isPenStrokeInProgress {
                 flushPenStroke()
             }
+            // A stale in-progress text edit (issue #42) must not survive a
+            // tool switch either, same "flush, don't discard" rule as the
+            // pen stroke just above — `commitTextEdit()` bakes whatever was
+            // already typed into the active layer rather than silently
+            // dropping it. Losing focus when another tool's button is
+            // clicked usually triggers this already via
+            // `textDidEndEditing(_:)` below, but that relies on AppKit
+            // actually reassigning first responder away from the editor,
+            // which isn't guaranteed for every path that can change
+            // `activeTool` (e.g. a future keyboard-shortcut tool switch) —
+            // this is the same defensive belt-and-suspenders reasoning the
+            // pen's own `isPenStrokeInProgress` check follows.
+            if isTextEditing {
+                commitTextEdit()
+            }
             needsDisplay = true
         }
     }
@@ -391,6 +449,19 @@ final class CanvasView: NSView {
     /// that references the old `LayerStack` (e.g. `LayerPanelView`) at the
     /// new one too.
     func replaceLayerStack(_ newLayerStack: LayerStack) {
+        // Deliberately does *not* auto-commit/cancel `isTextEditing` here
+        // (issue #42), unlike `activeTool`'s own `didSet` — this is a shared
+        // low-level primitive called from several different `AppDelegate`
+        // call sites that each want different treatment for a pending text
+        // edit (`activateActiveDocument()`/`layerPanelView
+        // .willChangeActiveLayer` commit it, the same as
+        // `isPenStrokeInProgress`; `undo()`/`redo()`/`historyPanelView
+        // .onJumpToIndex` cancel it instead, since it was never itself
+        // recorded as a history entry) — see `isTextEditing`'s own doc
+        // comment. Each of those callers is responsible for calling
+        // `commitTextEdit()`/`cancelTextEdit()` *before* it calls this
+        // method, mirroring exactly how they already handle
+        // `isPenStrokeInProgress`/`isTransforming`.
         layerStack = newLayerStack
         invalidateIntrinsicContentSize()
         needsDisplay = true
@@ -401,6 +472,7 @@ final class CanvasView: NSView {
     func zoomIn() {
         if let next = CanvasView.zoomLevels.first(where: { $0 > zoomScale }) {
             zoomScale = next
+            updateTextEditorForZoomChange()
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
@@ -409,6 +481,7 @@ final class CanvasView: NSView {
     func zoomOut() {
         if let next = CanvasView.zoomLevels.last(where: { $0 < zoomScale }) {
             zoomScale = next
+            updateTextEditorForZoomChange()
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
@@ -422,6 +495,7 @@ final class CanvasView: NSView {
     func setZoomScale(_ newZoomScale: Int) {
         guard CanvasView.zoomLevels.contains(newZoomScale) else { return }
         zoomScale = newZoomScale
+        updateTextEditorForZoomChange()
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -1537,14 +1611,18 @@ final class CanvasView: NSView {
         case .pencil: return "鉛筆"
         case .eraser: return "消しゴム"
         case .pen: return "ペン"
-        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
+        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .text:
             // `.crop`'s own `commitCrop()` fires `onEditCompleted?("切り抜き")`
             // itself (issue #21), the same self-contained shape
             // `flushPenStroke()`/`commitLayerTransform()` use — this lookup
             // is never actually reached for it either. `.bucketFill`'s own
             // `mouseDown` branch fires `onEditCompleted?("塗りつぶし")` the
             // same self-contained way (issue #38, mirroring `magicWandSelect`
-            // above, the other single-click tool).
+            // above, the other single-click tool). `.text`'s own
+            // `commitTextEdit()` fires `onEditCompleted?("テキスト")` the same
+            // self-contained way too (issue #42), from wherever the edit
+            // actually ends (Cmd+Return, focus loss, or a fresh click
+            // elsewhere) rather than from `mouseUp`.
             return nil
         }
     }
@@ -1598,6 +1676,14 @@ final class CanvasView: NSView {
             // `.magicWandSelect`). Kept only to satisfy this switch's
             // exhaustiveness.
             return
+        case .text:
+            // The text tool never reaches here either (issue #42):
+            // `mouseDown`/`mouseDragged` branch to `beginTextEdit(at:)`/an
+            // early return before calling `paint(at:)` — rasterization
+            // happens later, from `commitTextEdit()`, not from a
+            // pixel-by-pixel paint call. Kept only to satisfy this switch's
+            // exhaustiveness.
+            return
         }
     }
 
@@ -1625,6 +1711,10 @@ final class CanvasView: NSView {
             // (issue #11; `.crop` under issue #21; `.bucketFill` under issue
             // #38, a single-click-only gesture), this exists only for
             // exhaustiveness.
+            return
+        case .text:
+            // Same as `paint(at:)` above: the text tool never drags into a
+            // stroke (issue #42), this exists only for exhaustiveness.
             return
         }
     }
@@ -1748,6 +1838,313 @@ final class CanvasView: NSView {
         paintedDuringGesture = false
         lastPixel = nil
         needsDisplay = true
+    }
+
+    // MARK: - Text tool (issue #42)
+
+    /// Starts a new text-edit gesture at `pixel`: drops a fresh, empty
+    /// `TextToolEditorView` onto the canvas at that position and makes it
+    /// first responder so typing starts immediately.
+    ///
+    /// The editor's on-screen font size is `textSettings.fontSize *
+    /// zoomScale`, not the literal `fontSize` — it needs to visually match
+    /// how big the baked-in text will look once `rasterizeText(_:at:)`
+    /// renders it back down to its true canvas-pixel size, the same
+    /// "screen point = canvas pixel * zoomScale" relationship every other
+    /// tool's click already goes through via `pixelCoordinate(for:)`, just
+    /// applied in the opposite direction here (canvas-pixel setting → view
+    /// point size, rather than view point click → canvas pixel).
+    private func beginTextEdit(at pixel: (x: Int, y: Int)) {
+        let editor = TextToolEditorView(frame: .zero)
+        editor.isEditable = true
+        editor.isSelectable = true
+        editor.isRichText = false
+        editor.allowsUndo = true
+        editor.drawsBackground = true
+        editor.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.85)
+        editor.textColor = foregroundColor
+        editor.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize * CGFloat(zoomScale))
+        editor.layoutOrientation = textSettings.isVertical ? .vertical : .horizontal
+        // "What you type is what gets baked" (issue #42) — matches the
+        // rest of this app's dot-exact philosophy more closely than a word
+        // processor's helpful-but-surprising auto-substitutions would.
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false
+        editor.isContinuousSpellCheckingEnabled = false
+        editor.isGrammarCheckingEnabled = false
+        // Auto-grows with typed content instead of scrolling/clipping (no
+        // enclosing `NSScrollView` here, unlike `ToolboxView`/
+        // `DocumentTabBarView`) — `textDidChange(_:)` below drives the
+        // actual resize once layout catches up with each edit.
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = true
+        editor.textContainer?.widthTracksTextView = false
+        editor.textContainer?.heightTracksTextView = false
+        editor.textContainer?.containerSize = NSSize(width: Self.textEditorMaxSize, height: Self.textEditorMaxSize)
+        editor.minSize = NSSize(width: Self.textEditorMinWidth, height: Self.textEditorMinHeight)
+        editor.maxSize = NSSize(width: Self.textEditorMaxSize, height: Self.textEditorMaxSize)
+        editor.delegate = self
+        editor.onCancel = { [weak self] in self?.cancelTextEdit() }
+        editor.onCommit = { [weak self] in self?.commitTextEdit() }
+
+        let origin = NSPoint(x: CGFloat(pixel.x) * CGFloat(zoomScale), y: CGFloat(pixel.y) * CGFloat(zoomScale))
+        editor.frame = NSRect(origin: origin, size: NSSize(width: Self.textEditorMinWidth, height: Self.textEditorMinHeight))
+
+        addSubview(editor)
+        window?.makeFirstResponder(editor)
+
+        textEditor = editor
+        textInsertionPixel = pixel
+        needsDisplay = true
+    }
+
+    /// Grows `textEditor`'s frame to fit its current content (issue #42),
+    /// capped at `textEditorMaxSize` on each axis — called from
+    /// `textDidChange(_:)` every time the typed text changes.
+    ///
+    /// For horizontal text (`textSettings.isVertical == false`) this keeps
+    /// the frame's top-left corner fixed and grows right/down, matching
+    /// `beginTextEdit(at:)`'s initial placement (click point = top-left).
+    ///
+    /// For vertical text (review should-1), traditional Japanese tategaki
+    /// adds new columns to the *left* of the first one, not the right — so
+    /// anchoring at top-left like the horizontal case would grow the
+    /// overlay the wrong way as more columns appear. Anchoring at top-right
+    /// instead (fixed `origin.x + width`, `origin.y` unchanged) keeps the
+    /// first column's on-screen position stable and lets the frame expand
+    /// leftward, which is why only `origin.x` — not `origin.y` — is
+    /// recomputed below.
+    ///
+    /// Caveats (unverified — no macOS machine in this dev environment):
+    /// 1. This top-right anchoring is based on the general convention that
+    ///    tategaki columns run right-to-left; whether AppKit's
+    ///    `NSTextView.layoutOrientation = .vertical` (set in
+    ///    `beginTextEdit(at:)`) actually lays out new columns in that
+    ///    direction, or the opposite, has **not** been confirmed by running
+    ///    this on real macOS/AppKit.
+    /// 2. If AppKit's actual column direction turns out to be the reverse
+    ///    of what's assumed here, the only consequence is a cosmetic one:
+    ///    the *live editing overlay* would grow the wrong way on screen.
+    ///    The committed result is unaffected — `rasterizeText(_:at:)` bakes
+    ///    the final text using its own independent offscreen `NSTextView`,
+    ///    a separate code path from this overlay, so the actual pixels
+    ///    written to the layer do not depend on this method at all.
+    /// 3. kako-jun: if vertical editing on real macOS shows the overlay
+    ///    growing in a visually wrong direction, this `if
+    ///    textSettings.isVertical` branch is the only place to look —
+    ///    nothing else in the text tool depends on this assumption.
+    private func resizeTextEditorToFitContent() {
+        guard let editor = textEditor, let layoutManager = editor.layoutManager, let textContainer = editor.textContainer else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        let width = min(Self.textEditorMaxSize, max(Self.textEditorMinWidth, usedRect.width + editor.textContainerInset.width * 2))
+        let height = min(Self.textEditorMaxSize, max(Self.textEditorMinHeight, usedRect.height + editor.textContainerInset.height * 2))
+        var frame = editor.frame
+        if textSettings.isVertical {
+            let topRightX = frame.origin.x + frame.size.width
+            frame.size = NSSize(width: width, height: height)
+            frame.origin.x = topRightX - width
+        } else {
+            frame.size = NSSize(width: width, height: height)
+        }
+        editor.frame = frame
+        needsDisplay = true
+    }
+
+    /// Re-anchors `textEditor`'s on-screen frame origin and font size to
+    /// the current `zoomScale` (issue #42 review should-2) — called from
+    /// every call site that assigns to `zoomScale` (`zoomIn()`/
+    /// `zoomOut()`/`setZoomScale(_:)`). Without this, an in-progress text
+    /// edit's overlay stays pinned to whatever `zoomScale` was in effect
+    /// when `beginTextEdit(at:)` ran, drifting out of alignment with the
+    /// canvas's own on-screen scale as soon as the user zooms mid-edit.
+    ///
+    /// A no-op if no text edit is in progress. Recomputes the frame origin
+    /// with the exact same "canvas pixel * zoomScale" formula
+    /// `beginTextEdit(at:)` uses (from `textInsertionPixel`, the original
+    /// click location), re-resolves `editor.font` at the new zoomed size
+    /// the same way `beginTextEdit(at:)` does, then defers to
+    /// `resizeTextEditorToFitContent()` to grow/shrink the frame size to
+    /// match the now-differently-sized text.
+    ///
+    /// Also resets `frame.size` back to `(textEditorMinWidth,
+    /// textEditorMinHeight)` before that hand-off (issue #42 review round 2
+    /// should-1) — not just `frame.origin` — so `resizeTextEditorToFitContent()`
+    /// always starts from the same "just-clicked" state `beginTextEdit(at:)`
+    /// itself leaves the frame in, rather than mixing a freshly-recomputed
+    /// (new-zoom) `origin` with a stale (old-zoom) `size` left over from
+    /// whatever zoom level was active the last time the overlay auto-grew.
+    /// Left unfixed, that mix corrupts the vertical-writing branch of
+    /// `resizeTextEditorToFitContent()` specifically: it derives its new
+    /// `origin.x` from `frame.origin.x + frame.size.width` (the previous
+    /// top-right corner), so an old-zoom `width` added to a new-zoom
+    /// `origin.x` lands the overlay's top-right corner nowhere near either
+    /// zoom level's correct position. The horizontal branch only overwrites
+    /// `frame.size` outright, so it was never affected — but resetting size
+    /// here is harmless for it too, since the following
+    /// `resizeTextEditorToFitContent()` call recomputes `frame.size` from
+    /// the current text content regardless of what it started at.
+    private func updateTextEditorForZoomChange() {
+        guard let editor = textEditor, let pixel = textInsertionPixel else { return }
+        var frame = editor.frame
+        frame.origin = NSPoint(x: CGFloat(pixel.x) * CGFloat(zoomScale), y: CGFloat(pixel.y) * CGFloat(zoomScale))
+        frame.size = NSSize(width: Self.textEditorMinWidth, height: Self.textEditorMinHeight)
+        editor.frame = frame
+        editor.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize * CGFloat(zoomScale))
+        resizeTextEditorToFitContent()
+    }
+
+    /// Ends the current text-edit gesture and bakes what was typed into the
+    /// active layer's pixels (issue #42) — the text tool's equivalent of
+    /// `flushPenStroke()`. A no-op if nothing is being edited, or if the
+    /// editor was left empty (an empty string has nothing to rasterize and
+    /// leaves the layer untouched, same as `cancelTextEdit()`).
+    ///
+    /// Clears `textEditor`/`textInsertionPixel` *before* touching the view
+    /// hierarchy: `editor.removeFromSuperview()` below can itself trigger
+    /// `textDidEndEditing(_:)` (first-responder resignation as part of
+    /// removal), which calls straight back into this same method — with
+    /// `textEditor` already `nil` by then, that reentrant call's own `guard
+    /// let editor = textEditor` bails out immediately instead of
+    /// rasterizing the same text a second time.
+    ///
+    /// Called from `activeTool`'s own `didSet`, `mouseDown`'s `.text`
+    /// branch, `TextToolEditorView.onCommit` (Cmd+Return), and
+    /// `textDidEndEditing(_:)` (focus loss) — and, mirroring
+    /// `flushPenStroke()`, from every `AppDelegate` call site that already
+    /// commits an in-progress pen stroke before swapping `layerStack` out
+    /// from under it (see `isTextEditing`'s own doc comment for the full
+    /// list). Not `private`, for the same reason `flushPenStroke()` isn't.
+    func commitTextEdit() {
+        guard let editor = textEditor, let pixel = textInsertionPixel else { return }
+        textEditor = nil
+        textInsertionPixel = nil
+        editor.delegate = nil
+        let text = editor.string
+        editor.removeFromSuperview()
+        needsDisplay = true
+
+        guard !text.isEmpty else { return }
+
+        rasterizeText(text, at: pixel)
+        onLayerContentChanged?()
+        onEditCompleted?("テキスト")
+        needsDisplay = true
+    }
+
+    /// Ends the current text-edit gesture without touching any layer
+    /// pixels (issue #42, Escape) — same reentrancy guard as
+    /// `commitTextEdit()` above, for the same reason.
+    ///
+    /// Also called, mirroring `cancelPenStroke()`, from every `AppDelegate`
+    /// call site that already cancels an in-progress pen stroke rather than
+    /// committing it — `undo()`/`redo()`/`historyPanelView.onJumpToIndex` —
+    /// since a not-yet-committed text edit was never itself recorded as a
+    /// history entry either. Not `private`, for the same reason
+    /// `cancelPenStroke()` isn't.
+    func cancelTextEdit() {
+        guard let editor = textEditor else { return }
+        textEditor = nil
+        textInsertionPixel = nil
+        editor.delegate = nil
+        editor.removeFromSuperview()
+        needsDisplay = true
+    }
+
+    /// Renders `text` at `textSettings`' own literal canvas-pixel font size
+    /// (not multiplied by `zoomScale`, unlike `textEditor`'s on-screen
+    /// font — see `beginTextEdit(at:)`) and composites it onto the active
+    /// layer with its top-left corner at `pixel` (issue #42).
+    ///
+    /// Builds a second, throwaway `NSTextView` rather than rasterizing
+    /// `textEditor` itself: `textEditor`'s own on-screen size reflects the
+    /// current `zoomScale`, and downsampling *that* rendering back down to
+    /// canvas-pixel resolution would either blur (interpolated) or
+    /// alias/moiré (nearest-neighbor) an antialiased glyph edge, depending
+    /// on which resampling `interpolationQuality` was used — rendering
+    /// fresh, directly at the true 1-canvas-pixel-per-point size, avoids
+    /// that resampling step entirely and produces the same crisp result
+    /// regardless of what zoom level the user happened to be editing at.
+    ///
+    /// Font rendering can't be made fully non-anti-aliased the way the
+    /// pencil/bucket-fill's `setPixel`/`drawLine` are (CLAUDE.md's classic-
+    /// tool "no anti-aliasing" policy) — `NSTextView`'s own glyph
+    /// rendering always anti-aliases — so this leaves that default
+    /// smoothing alone rather than fighting it into a jagged, harder-to-
+    /// read result; `PixelCanvas.compositeImage(_:at:mask:)` draws the
+    /// glyph bitmap into a `rect` sized directly from the image's own
+    /// `width`/`height` — a 1:1 pixel correspondence, so no scaling
+    /// happens there and `interpolationQuality`'s value (this path never
+    /// actually sets it) has no effect on the result — the glyph bitmap is
+    /// composited onto the layer pixel-for-pixel, with no additional
+    /// scaling blur layered on top of its own anti-aliasing.
+    private func rasterizeText(_ text: String, at pixel: (x: Int, y: Int)) {
+        let rasterView = NSTextView(frame: .zero)
+        rasterView.isRichText = false
+        rasterView.string = text
+        rasterView.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize)
+        rasterView.textColor = foregroundColor
+        rasterView.drawsBackground = false
+        rasterView.layoutOrientation = textSettings.isVertical ? .vertical : .horizontal
+        rasterView.textContainerInset = .zero
+        rasterView.textContainer?.lineFragmentPadding = 0
+        rasterView.isVerticallyResizable = true
+        rasterView.isHorizontallyResizable = true
+        rasterView.textContainer?.widthTracksTextView = false
+        rasterView.textContainer?.heightTracksTextView = false
+        rasterView.textContainer?.containerSize = NSSize(width: 10_000, height: 10_000)
+
+        guard let layoutManager = rasterView.layoutManager, let textContainer = rasterView.textContainer else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        let width = max(1, Int(usedRect.width.rounded(.up)))
+        let height = max(1, Int(usedRect.height.rounded(.up)))
+        let viewRect = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
+        rasterView.frame = viewRect
+
+        // Built by hand — not `bitmapImageRepForCachingDisplay(in:)` — at
+        // exactly `width`x`height` *pixels*: that convenience constructor
+        // sizes its bitmap using the view's own backing scale factor,
+        // which would be `2.0` were this view ever attached to a Retina
+        // window, silently doubling the baked-in text's pixel size
+        // relative to what `textSettings.fontSize` says. `rasterView` here
+        // is never attached to any window, so pinning the bitmap's pixel
+        // dimensions explicitly (matching `viewRect`'s point size 1:1, via
+        // `bitmap.size` below) is what actually guarantees "this many
+        // canvas pixels tall" — not an incidental default.
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return }
+        bitmap.size = viewRect.size
+        rasterView.cacheDisplay(in: viewRect, to: bitmap)
+        guard let cgImage = bitmap.cgImage else { return }
+
+        layerStack.activeLayer.canvas.compositeImage(cgImage, at: pixel, mask: selection)
+    }
+
+    /// Resolves `family` (a font *family* name, e.g. what
+    /// `OptionBarView.showTextOptions`' popup lists via `NSFontManager
+    /// .shared.availableFontFamilies`) into a concrete `NSFont`, falling
+    /// back to the system font at the same size if the family doesn't
+    /// resolve to an installed font — defensive against a `TextToolSettings
+    /// .fontFamily` value that no longer matches anything installed (a
+    /// font removed since it was picked, or state loaded from a different
+    /// machine).
+    private static func resolvedFont(family: String, size: CGFloat) -> NSFont {
+        NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: size)
+            ?? NSFont(name: family, size: size)
+            ?? NSFont.systemFont(ofSize: size)
     }
 
     /// Reads the color at a pixel out of the currently displayed
@@ -2131,6 +2528,26 @@ final class CanvasView: NSView {
             cropDragCurrent = point
             return
         }
+        if activeTool == .text {
+            // A click while already editing text (issue #42) commits the
+            // current edit first — same "flush before starting the next
+            // one" rule the pen tool's leftover-buffer check above follows
+            // — then starts a brand new one at the freshly clicked
+            // position. In practice this branch rarely finds `textEditor`
+            // still non-nil: `window?.makeFirstResponder(self)` at the very
+            // top of this method already resigns the editor's first-
+            // responder status for any click that lands outside of it
+            // (clicks *inside* it are delivered straight to the editor
+            // subview instead, never reaching `CanvasView.mouseDown` at
+            // all), which fires `textDidEndEditing(_:)` and commits it
+            // before this line ever runs — this check is a defensive
+            // fallback for whenever that doesn't hold.
+            if isTextEditing {
+                commitTextEdit()
+            }
+            beginTextEdit(at: pixel)
+            return
+        }
         if activeTool == .pen {
             // Flushes (never cancels) a leftover `penStrokeBuffer` before
             // starting the new one. Normally `mouseDown`→`mouseDragged`→
@@ -2343,6 +2760,18 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if activeTool == .text {
+            // The text tool has no drag gesture of its own (issue #42): a
+            // click starts editing (`mouseDown`) and everything after that
+            // is handled by the overlay `textEditor` subview itself, which
+            // — being a real `NSTextView` — receives its own mouse events
+            // directly and never routes them through `CanvasView` at all.
+            // This branch only exists to keep a drag that started on
+            // `CanvasView` (i.e. outside the editor, before any editor
+            // exists yet) from falling through to the generic pencil/eraser
+            // paint fallback below.
+            return
+        }
         if activeTool == .pen {
             // Stamps more dabs into `penStrokeBuffer` (issue #20); the real
             // active layer stays untouched until `mouseUp`'s
@@ -2462,6 +2891,17 @@ final class CanvasView: NSView {
             let newMask = SelectionMask.polygon(vertices: lassoVertices, width: layerStack.width, height: layerStack.height)
             applyCombinedSelection(newMask, mode: lassoCombineMode)
             onEditCompleted?("選択範囲")
+            return
+        }
+        if activeTool == .text {
+            // Nothing to do here (issue #42): `mouseDown` already handled
+            // the whole gesture (committing any previous edit, then
+            // `beginTextEdit(at:)`), and the eventual commit/cancel happens
+            // later, asynchronously, from the overlay editor's own key
+            // handling (`TextToolEditorView.onCommit`/`onCancel`) or focus
+            // loss (`textDidEndEditing(_:)`) — none of which are this
+            // `mouseUp`. Returning early here just keeps this click from
+            // falling into the generic pencil/eraser fallback below.
             return
         }
         if activeTool == .pen {
@@ -2617,5 +3057,34 @@ final class CanvasView: NSView {
         )
         scrollView.contentView.scroll(to: origin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+}
+
+// MARK: - Text tool overlay editor delegate (issue #42)
+
+extension CanvasView: NSTextViewDelegate {
+    /// Live-resizes the text tool's overlay editor as its content grows —
+    /// `TextToolEditorView` has no enclosing `NSScrollView` of its own (see
+    /// `beginTextEdit(at:)`), so without this the box would stay pinned at
+    /// its initial `textEditorMinWidth`/`textEditorMinHeight` size and clip
+    /// anything typed past it.
+    func textDidChange(_ notification: Notification) {
+        guard let changedView = notification.object as? NSTextView, changedView === textEditor else { return }
+        resizeTextEditorToFitContent()
+    }
+
+    /// Commits the text tool's in-progress edit on focus loss — fires
+    /// whenever `textEditor` resigns first responder for any reason
+    /// (clicking elsewhere on the canvas, clicking a toolbox button,
+    /// switching documents, etc.), the "フォーカス喪失で確定" half of the
+    /// issue's commit rule (the other half, Cmd+Return, is
+    /// `TextToolEditorView.onCommit` instead). Guarded by object identity
+    /// the same way `textDidChange(_:)` above is, and safe to call even
+    /// after `commitTextEdit()`/`cancelTextEdit()` already ran — see
+    /// `commitTextEdit()`'s own doc comment on why removing the editor from
+    /// the view hierarchy can itself re-trigger this notification.
+    func textDidEndEditing(_ notification: Notification) {
+        guard let endedView = notification.object as? NSTextView, endedView === textEditor else { return }
+        commitTextEdit()
     }
 }
