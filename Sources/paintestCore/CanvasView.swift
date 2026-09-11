@@ -2015,12 +2015,13 @@ final class CanvasView: NSView {
     /// tool "no anti-aliasing" policy) — `NSTextView`'s own glyph
     /// rendering always anti-aliases — so this leaves that default
     /// smoothing alone rather than fighting it into a jagged, harder-to-
-    /// read result; `PixelCanvas.compositeImage(_:at:mask:)` still applies
-    /// `CGContext.interpolationQuality = .none` to every *other* draw in
-    /// its own path (inherited from `drawAntialiased(mask:_:)`), so the
-    /// glyph bitmap itself is composited onto the layer pixel-for-pixel,
-    /// with no additional scaling blur layered on top of its own
-    /// anti-aliasing.
+    /// read result; `PixelCanvas.compositeImage(_:at:mask:)` draws the
+    /// glyph bitmap into a `rect` sized directly from the image's own
+    /// `width`/`height` — a 1:1 pixel correspondence, so no scaling
+    /// happens there and `interpolationQuality`'s value (this path never
+    /// actually sets it) has no effect on the result — the glyph bitmap is
+    /// composited onto the layer pixel-for-pixel, with no additional
+    /// scaling blur layered on top of its own anti-aliasing.
     private func rasterizeText(_ text: String, at pixel: (x: Int, y: Int)) {
         let rasterView = NSTextView(frame: .zero)
         rasterView.isRichText = false

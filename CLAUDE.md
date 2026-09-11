@@ -46,7 +46,7 @@ swift test
 ## 既知の制約
 
 - **非normalブレンドモードが絡むレイヤー結合／画像の統合は近似結果になる場合がある**（issue #40自己レビューmust-2、kako-jun判断: 厳密な合成アルゴリズムへの作り直しはせず現状維持）。`LayerStack.mergeDown`/`flatten`は2枚のレイヤーを孤立した透明キャンバスへ描画してから1枚に焼き込むため、上側レイヤーが半透明かつ乗算・スクリーン・オーバーレイ等の非normalブレンドモードが絡むケースでは、結合後の1枚のレイヤー＋1つのblendModeでは元の見た目をさらに下のレイヤーとの関係まで含めて数式的に完全再現できないことがある。Photoshop等の一般的な画像編集ソフトも「統合」機能で同種の制約を持つ。詳細は`LayerStack.mergeDown`のdocコメントを参照
-- **テキストツールのグリフ描画はアンチエイリアスを完全には排除できない**（issue #42）。`CanvasView.rasterizeText(_:at:)`は`NSTextView`の`cacheDisplay(in:to:)`でテキストをビットマップ化してから`PixelCanvas.compositeImage(_:at:mask:)`でレイヤーへ合成するが、`NSTextView`自身のグリフレンダリングは常にアンチエイリアスがかかる仕様のため、鉛筆・図形描画のような`setPixel`/`drawLine`ベースの非AA化はできない。合成自体は`interpolationQuality = .none`で行われ追加のぼかしは乗らないが、グリフ縁に元々かかっているアンチエイリアシングは残る。詳細は`CanvasView.rasterizeText(_:at:)`のdocコメントを参照
+- **テキストツールのグリフ描画はアンチエイリアスを完全には排除できない**（issue #42）。`CanvasView.rasterizeText(_:at:)`は`NSTextView`の`cacheDisplay(in:to:)`でテキストをビットマップ化してから`PixelCanvas.compositeImage(_:at:mask:)`でレイヤーへ合成するが、`NSTextView`自身のグリフレンダリングは常にアンチエイリアスがかかる仕様のため、鉛筆・図形描画のような`setPixel`/`drawLine`ベースの非AA化はできない。`compositeImage`はビットマップの`width`/`height`をそのまま合成先`rect`のサイズに使う1:1のピクセル対応描画のため拡大縮小自体が発生せず、`interpolationQuality`の値は（この経路では実際には設定されていない上に、設定しても）結果に影響しない。グリフ縁に元々かかっているアンチエイリアシングは残る。詳細は`CanvasView.rasterizeText(_:at:)`のdocコメントを参照
 
 ## リポジトリ方針
 
