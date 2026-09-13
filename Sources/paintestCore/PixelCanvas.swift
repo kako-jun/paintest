@@ -136,6 +136,57 @@ final class PixelCanvas {
         }
     }
 
+    /// Fills this canvas with a linear foreground-to-background gradient
+    /// projected along the vector from `start` to `end` (issue #41).
+    ///
+    /// The color is computed per pixel and written directly into the bitmap
+    /// buffer, keeping the core drawing logic independent from AppKit
+    /// gestures. Pixels before `start` clamp to `startColor`; pixels beyond
+    /// `end` clamp to `endColor`. A zero-length drag falls back to a solid
+    /// `startColor` fill, matching the "start color at t=0" endpoint.
+    func applyLinearGradient(from start: (x: Int, y: Int), to end: (x: Int, y: Int), startColor: NSColor, endColor: NSColor, mask: SelectionMask? = nil) {
+        guard let data = bitmap.bitmapData else { return }
+        let (r0, g0, b0, a0) = components(of: startColor)
+        let (r1, g1, b1, a1) = components(of: endColor)
+        let dx = Double(end.x - start.x)
+        let dy = Double(end.y - start.y)
+        let denominator = dx * dx + dy * dy
+        let bytesPerRow = bitmap.bytesPerRow
+        let bpp = bitmap.bitsPerPixel / 8
+        let bounds = mask?.boundingBox ?? (minX: 0, minY: 0, maxX: width - 1, maxY: height - 1)
+
+        guard bounds.minX <= bounds.maxX, bounds.minY <= bounds.maxY else { return }
+
+        let clampedMinX = max(0, bounds.minX)
+        let clampedMaxX = min(width - 1, bounds.maxX)
+        let clampedMinY = max(0, bounds.minY)
+        let clampedMaxY = min(height - 1, bounds.maxY)
+        guard clampedMinX <= clampedMaxX, clampedMinY <= clampedMaxY else { return }
+
+        func interpolate(_ a: UInt8, _ b: UInt8, t: Double) -> UInt8 {
+            UInt8(max(0, min(255, (Double(a) + (Double(b) - Double(a)) * t).rounded())))
+        }
+
+        for y in clampedMinY...clampedMaxY {
+            let rowStart = y * bytesPerRow
+            for x in clampedMinX...clampedMaxX {
+                guard mask == nil || mask!.contains(x: x, y: y) else { continue }
+                let t: Double
+                if denominator == 0 {
+                    t = 0
+                } else {
+                    let projected = (Double(x - start.x) * dx + Double(y - start.y) * dy) / denominator
+                    t = max(0, min(1, projected))
+                }
+                let offset = rowStart + x * bpp
+                data[offset] = interpolate(r0, r1, t: t)
+                data[offset + 1] = interpolate(g0, g1, t: t)
+                data[offset + 2] = interpolate(b0, b1, t: t)
+                data[offset + 3] = interpolate(a0, a1, t: t)
+            }
+        }
+    }
+
     // MARK: - Antialiased drawing (pen tool, issue #10)
     //
     // Unlike `setPixel`/`drawLine` above (nearest-neighbor, dot-exact, no
@@ -379,53 +430,90 @@ final class PixelCanvas {
     /// `CanvasView.flushPenStroke()` for the full picture of why `opacity`
     /// is applied here, once, rather than per dab.
     ///
-    /// `overlay` must be the same size as this canvas (true by construction
-    /// for `CanvasView`'s per-stroke accumulation buffer, which is always
-    /// built via `PixelCanvas(width: layerStack.width, height:
-    /// layerStack.height, ...)`) — a mismatched size draws `overlay`
-    /// stretched to fill `width`x`height` rather than failing outright,
-    /// since `CGContext.draw(_:in:)` itself has no notion of "wrong size".
+    /// `overlay` is normally the same size as this canvas (true by
+    /// construction for `CanvasView`'s per-stroke accumulation buffer, which
+    /// is always built via `PixelCanvas(width: layerStack.width, height:
+    /// layerStack.height, ...)`). If a differently sized overlay ever reaches
+    /// this method, there is no resize/stretch step: the loop only visits the
+    /// shared top-left intersection (`min(width, overlay.width)` by
+    /// `min(height, overlay.height)`), leaving the rest of the destination
+    /// untouched.
     ///
-    /// Reuses `drawAntialiased(mask:_:)`'s same premultiplied-scratch-overlay
-    /// technique as `drawPenDab` above (`overlay` is `.alphaNonpremultiplied`
-    /// like every `PixelCanvas`, so — same reasoning as that method's own
-    /// doc comment — it can't vend a `CGContext` of its own either); here the
-    /// "draw" step is just `context.draw(overlay.cgImage, ...)` under
-    /// `context.setAlpha(alpha)`, instead of a CG fill/stroke/gradient path.
+    /// The merge is deliberately byte-based rather than a `CGContext.draw`
+    /// path. Each non-transparent source pixel is read with `rawPixel`,
+    /// scaled once by the whole-stroke `alpha`, then source-over blended into
+    /// the destination with `blendPixel`.
     /// No `mask` parameter: `overlay`'s own pixels were already masked at
     /// dab-stamping time (`drawPenDab`'s own `mask` argument), so any pixel
     /// outside the selection is already fully transparent here and
     /// contributes nothing to the composite regardless.
     func compositeOverlay(_ overlay: PixelCanvas, alpha: Double) {
         let clampedAlpha = max(0, min(1, alpha))
-        guard clampedAlpha > 0, let overlayImage = overlay.cgImage else { return }
-        drawAntialiased(mask: nil) { context in
-            context.setAlpha(CGFloat(clampedAlpha))
-            context.draw(overlayImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard clampedAlpha > 0 else { return }
+        for y in 0..<min(height, overlay.height) {
+            for x in 0..<min(width, overlay.width) {
+                guard let pixel = overlay.rawPixel(x: x, y: y), pixel.a > 0 else { continue }
+                let scaledAlpha = UInt8(max(0, min(255, (Double(pixel.a) * clampedAlpha).rounded())))
+                blendPixel(x: x, y: y, r: pixel.r, g: pixel.g, b: pixel.b, a: scaledAlpha, mask: nil)
+            }
         }
     }
 
     /// Composites an already-rendered image onto this canvas at `origin`
     /// (top-left corner, in `setPixel`'s pixel-space coordinates) — the
     /// text tool's rasterization step (issue #42:
-    /// `CanvasView.rasterizeText(_:at:)`, which builds `image` from an
-    /// offscreen `NSTextView`'s `cacheDisplay(in:to:)` output). Reuses
-    /// `drawAntialiased(mask:_:)`'s same premultiplied-scratch-overlay
-    /// alpha-compositing technique as `compositeOverlay`/`drawPenDab`
-    /// above, so `image`'s own per-pixel alpha (an anti-aliased glyph edge,
-    /// for instance) blends onto the canvas the same "source over"
-    /// straight-alpha way those do, rather than `setPixel`'s
-    /// fully-opaque-only write.
+    /// `CanvasView.rasterizeText(_:at:)`, which builds `image` by drawing an
+    /// attributed string into an explicitly sized bitmap). Converts `image`
+    /// back to an `NSBitmapImageRep`, walks its source pixels directly, and
+    /// source-over blends each non-transparent pixel into this canvas with
+    /// `blendPixel`. That keeps the text path in the same straight-alpha
+    /// byte-compositing model as `compositeOverlay`, without a
+    /// `CGContext.draw` resize step.
     ///
-    /// `origin` is not clamped or bounds-checked up front — a rectangle
-    /// partially or fully outside `0..<width`/`0..<height` is simply
-    /// clipped by the loop in `drawAntialiased(mask:_:)`, which already
-    /// only ever visits `0..<width`/`0..<height`.
+    /// `origin` is not clamped or bounds-checked up front — source pixels
+    /// whose destination coordinate falls outside `0..<width`/`0..<height`
+    /// are simply skipped by the loop below.
     func compositeImage(_ image: CGImage, at origin: (x: Int, y: Int), mask: SelectionMask? = nil) {
-        drawAntialiased(mask: mask) { context in
-            let rect = CGRect(x: origin.x, y: origin.y, width: image.width, height: image.height)
-            context.draw(image, in: rect)
+        let source = NSBitmapImageRep(cgImage: image)
+        for sy in 0..<source.pixelsHigh {
+            let dy = origin.y + sy
+            guard dy >= 0, dy < height else { continue }
+            for sx in 0..<source.pixelsWide {
+                let dx = origin.x + sx
+                guard dx >= 0, dx < width else { continue }
+                guard mask == nil || mask!.contains(x: dx, y: dy) else { continue }
+                guard let color = source.colorAt(x: sx, y: sy)?.usingColorSpace(.deviceRGB) else { continue }
+                let alpha = UInt8(max(0, min(255, (color.alphaComponent * 255).rounded())))
+                guard alpha > 0 else { continue }
+                let r = UInt8(max(0, min(255, (color.redComponent * 255).rounded())))
+                let g = UInt8(max(0, min(255, (color.greenComponent * 255).rounded())))
+                let b = UInt8(max(0, min(255, (color.blueComponent * 255).rounded())))
+                blendPixel(x: dx, y: dy, r: r, g: g, b: b, a: alpha, mask: nil)
+            }
         }
+    }
+
+    private func blendPixel(x: Int, y: Int, r: UInt8, g: UInt8, b: UInt8, a: UInt8, mask: SelectionMask?) {
+        guard x >= 0, x < width, y >= 0, y < height else { return }
+        guard mask == nil || mask!.contains(x: x, y: y) else { return }
+        guard let data = bitmap.bitmapData else { return }
+        let bytesPerRow = bitmap.bytesPerRow
+        let bpp = bitmap.bitsPerPixel / 8
+        let offset = y * bytesPerRow + x * bpp
+
+        let srcAlpha = Double(a) / 255.0
+        let destAlpha = Double(data[offset + 3]) / 255.0
+        let outAlpha = srcAlpha + destAlpha * (1 - srcAlpha)
+        let blend: (UInt8, UInt8) -> UInt8 = { src, dst in
+            guard outAlpha > 0 else { return 0 }
+            let out = (Double(src) * srcAlpha + Double(dst) * destAlpha * (1 - srcAlpha)) / outAlpha
+            return UInt8(max(0, min(255, out.rounded())))
+        }
+
+        data[offset] = blend(r, data[offset])
+        data[offset + 1] = blend(g, data[offset + 1])
+        data[offset + 2] = blend(b, data[offset + 2])
+        data[offset + 3] = UInt8(max(0, min(255, (outAlpha * 255).rounded())))
     }
 
     // MARK: - Rendering

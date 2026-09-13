@@ -38,9 +38,9 @@ final class ToolboxViewTests: XCTestCase {
         _ = makeView()
     }
 
-    func testButtonCount_equals20() {
+    func testButtonCount_equals21() {
         let view = makeView()
-        XCTAssertEqual(allButtons(in: view).count, 20)
+        XCTAssertEqual(allButtons(in: view).count, 21)
     }
 
     func testExactlyOneButton_isPressedByDefault() {
@@ -57,17 +57,17 @@ final class ToolboxViewTests: XCTestCase {
 
     // Pencil, eraser, pen, the eyedropper, the magnifier, the
     // rectangle/ellipse/lasso/polygon/magic-wand select tools, crop, bucket
-    // fill, and text are wired to real behavior (issues #5, #10, #14, #13,
-    // #11, #21, #38, #42); every other button stays a purely visual
+    // fill, gradient, and text are wired to real behavior (issues #5, #10,
+    // #14, #13, #11, #21, #38, #41, #42); every other button stays a purely visual
     // placeholder with no target/action, same as before. Text was
     // previously its own disabled-but-unwired placeholder (issue #43) until
     // issue #42 gave it a real implementation.
-    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド", "切り抜き", "塗りつぶし", "テキスト"]
+    private static let wiredToolTips: Set<String> = ["鉛筆", "消しゴム", "ペン", "スポイト", "拡大鏡", "矩形選択", "楕円選択", "投げ縄選択", "多角形選択", "マジックワンド", "切り抜き", "塗りつぶし", "グラデーション", "テキスト"]
 
     func testOnlyWiredTools_haveTargetAndAction() {
         let view = makeView()
         let wired = allButtons(in: view).filter { Self.wiredToolTips.contains($0.toolTip ?? "") }
-        XCTAssertEqual(wired.count, 13)
+        XCTAssertEqual(wired.count, 14)
         for button in wired {
             XCTAssertNotNil(button.target, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop/bucket-fill/text must be wired to onToolSelected")
             XCTAssertNotNil(button.action, "pencil/eraser/pen/eyedropper/magnifier/select tools/crop/bucket-fill/text must be wired to onToolSelected")
@@ -103,6 +103,23 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off, "selecting bucket fill must turn the default-on pencil off")
     }
 
+    func testGradientClick_firesOnToolSelectedWithGradient_andTogglesPressedStates() {
+        let view = makeView()
+        guard let pencil = button(toolTip: "鉛筆", in: view), let gradient = button(toolTip: "グラデーション", in: view) else {
+            XCTFail("could not find pencil/gradient buttons")
+            return
+        }
+        XCTAssertEqual(pencil.state, .on, "precondition: pencil starts pressed by default")
+        var selected: Tool?
+        view.onToolSelected = { selected = $0 }
+
+        gradient.performClick(nil)
+
+        XCTAssertEqual(selected, .gradient)
+        XCTAssertEqual(gradient.state, .on)
+        XCTAssertEqual(pencil.state, .off, "selecting gradient must turn the default-on pencil off")
+    }
+
     // MARK: - Single-column layout + scroll wrapping (issue #7)
 
     func testToolboxIsWrappedInScrollView() {
@@ -116,7 +133,7 @@ final class ToolboxViewTests: XCTestCase {
             XCTFail("could not find the toolbox's scroll view")
             return
         }
-        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 20 buttons in one column run taller than the window")
+        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 21 buttons in one column run taller than the window")
     }
 
     func testGrid_hasSingleColumn() {
@@ -237,7 +254,7 @@ final class ToolboxViewTests: XCTestCase {
 
         func assertExactlyOnePressed(_ label: String) {
             let pressed = allButtons(in: view).filter { $0.state == .on }
-            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 20 buttons pressed after \(label)")
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 21 buttons pressed after \(label)")
         }
 
         assertExactlyOnePressed("initial state")
@@ -317,7 +334,7 @@ final class ToolboxViewTests: XCTestCase {
 
         func assertExactlyOnePressed(_ label: String) {
             let pressed = allButtons(in: view).filter { $0.state == .on }
-            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 20 buttons pressed after \(label)")
+            XCTAssertEqual(pressed.count, 1, "expected exactly one of all 21 buttons pressed after \(label)")
         }
 
         assertExactlyOnePressed("initial state")
@@ -381,7 +398,7 @@ final class ToolboxViewTests: XCTestCase {
     // for this fix (see review notes on ToolboxView.swift). Both fixes were
     // manually verified with scratch edits (reverted before commit):
     // temporarily changing the "鉛筆" label confirmed the fallback selects
-    // index 0 instead of crashing, and temporarily appending a 19th tool
+    // index 0 instead of crashing, and temporarily appending another tool
     // (making the count odd) confirmed all 19 buttons render, including the
     // trailing unpaired one in its own row.
 }

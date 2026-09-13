@@ -241,6 +241,60 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
     }
 
+    // MARK: - Linear gradient (issue #41)
+
+    func testApplyLinearGradient_horizontal_interpolatesStartToEndColor() {
+        let canvas = PixelCanvas(width: 4, height: 1, background: .white)
+
+        canvas.applyLinearGradient(
+            from: (x: 0, y: 0),
+            to: (x: 3, y: 0),
+            startColor: .black,
+            endColor: .white
+        )
+
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 0)?.r, 255)
+    }
+
+    func testApplyLinearGradient_selectionMaskRestrictsWrites() {
+        let canvas = PixelCanvas(width: 4, height: 2, background: .white)
+        let mask = SelectionMask.rectangle(x0: 1, y0: 0, x1: 2, y1: 1, width: 4, height: 2)
+
+        canvas.applyLinearGradient(
+            from: (x: 0, y: 0),
+            to: (x: 3, y: 0),
+            startColor: .black,
+            endColor: .white,
+            mask: mask
+        )
+
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 255, "outside the selection must stay untouched")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 1)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 1)?.r, 255, "outside the selection must stay untouched")
+    }
+
+    func testApplyLinearGradient_zeroLengthDrag_fillsWithStartColor() {
+        let canvas = PixelCanvas(width: 3, height: 2, background: .white)
+
+        canvas.applyLinearGradient(
+            from: (x: 1, y: 1),
+            to: (x: 1, y: 1),
+            startColor: .black,
+            endColor: .white
+        )
+
+        for y in 0..<2 {
+            for x in 0..<3 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 0, "x=\(x) y=\(y) zero-length gradient must use the start color everywhere")
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.a, 255, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
     func testDrawAntialiasedDot_centeredOffCanvasEdge_doesNotCrashAndClipsToCanvas() {
         let canvas = PixelCanvas(width: 10, height: 10, background: .white)
 
@@ -578,13 +632,12 @@ final class PixelCanvasTests: XCTestCase {
     // Unlike `compositeOverlay` above (always the same size as its target,
     // and every existing test's own overlay content is a radially symmetric
     // dab that could never expose a vertical/horizontal flip), `compositeImage`
-    // draws an arbitrary already-rendered `CGImage` (`CanvasView
-    // .rasterizeText(_:at:)`'s offscreen `NSTextView` capture) at an
-    // arbitrary `origin` — a genuinely new code path (`context.draw(image,
-    // in: rect)` against a rect built from `origin`, rather than a fixed
-    // `CGRect(x: 0, y: 0, width: width, height: height)`), so it gets its
-    // own dedicated coverage here rather than being assumed to inherit
-    // `compositeOverlay`'s.
+    // accepts the already-rendered `CGImage` produced by
+    // `CanvasView.rasterizeText(_:at:)`'s `NSAttributedString`-into-bitmap
+    // path, reads it back through `NSBitmapImageRep`, and byte-blends those
+    // source pixels at an arbitrary `origin`. That is a genuinely distinct
+    // path from overlay compositing, so it gets its own dedicated coverage
+    // here rather than being assumed to inherit `compositeOverlay`'s.
 
     /// Builds a small, already-rendered "source image" the same way
     /// `compositeImage`'s own doc comment describes `CanvasView

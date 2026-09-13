@@ -3,8 +3,8 @@ import AppKit
 /// Photoshop's left-hand toolbox: a single vertical column of tool icons
 /// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, the
 /// eyedropper, the magnifier, the rectangle/ellipse/lasso/polygon/magic-
-/// wand select tools, crop, bucket fill, and text are wired to real
-/// behavior (issues #5, #10, #14, #13, #11, #21, #38, #42) — clicking any
+/// wand select tools, crop, bucket fill, gradient, and text are wired to real
+/// behavior (issues #5, #10, #14, #13, #11, #21, #38, #41, #42) — clicking any
 /// of them fires `onToolSelected` and exclusively toggles that button's
 /// pressed state against the others' — so every other button here stays a
 /// purely visual placeholder with no target/action, same as before. Text
@@ -16,7 +16,7 @@ import AppKit
 /// column still communicates "this is the active tool" the way the
 /// reference screenshots do.
 ///
-/// A single column of 20 icons runs taller than the window at typical
+/// A single column of 21 icons runs taller than the window at typical
 /// sizes, so (like `DocumentTabBarView`) the column is wrapped in a
 /// vertically-scrolling `NSScrollView` rather than widened back into extra
 /// columns.
@@ -28,7 +28,7 @@ final class ToolboxView: NSView {
         // (issue #5), pen (issue #10), the eyedropper (issue #14), the
         // magnifier (issue #13), the rectangle/ellipse/lasso/polygon/
         // magic-wand select tools (issue #11), crop (issue #21), bucket
-        // fill (issue #38), and text (issue #42); every other descriptor
+        // fill (issue #38), gradient (issue #41), and text (issue #42); every other descriptor
         // stays `nil` and its button gets no target/action, matching the
         // previous all-placeholder behavior.
         let tool: Tool?
@@ -47,6 +47,7 @@ final class ToolboxView: NSView {
         ToolDescriptor(symbol: "crop", label: "切り抜き", tool: .crop),
         ToolDescriptor(symbol: "eraser", label: "消しゴム", tool: .eraser),
         ToolDescriptor(symbol: "drop.fill", label: "塗りつぶし", tool: .bucketFill),
+        ToolDescriptor(symbol: "rectangle.lefthalf.filled", label: "グラデーション", tool: .gradient),
         ToolDescriptor(symbol: "eyedropper", label: "スポイト", tool: .eyedropper),
         ToolDescriptor(symbol: "magnifyingglass", label: "拡大鏡", tool: .magnifier),
         ToolDescriptor(symbol: "pencil", label: "鉛筆", tool: .pencil),
@@ -114,7 +115,7 @@ final class ToolboxView: NSView {
         grid.column(at: 0).width = Self.buttonSide
 
         // Wrapped in a scroll view (same pattern as `DocumentTabBarView`):
-        // 20 buttons in a single column run taller than the window at
+        // 21 buttons in a single column run taller than the window at
         // typical sizes, so the column scrolls vertically instead of
         // widening back into extra columns.
         let scrollView = NSScrollView()

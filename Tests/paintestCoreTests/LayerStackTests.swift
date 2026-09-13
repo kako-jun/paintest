@@ -1478,7 +1478,8 @@ final class LayerStackTests: XCTestCase {
 
         stack.layers[0].canvas.fill(with: .black) // edits the non-active L0 directly, bypassing setVisibility/setOpacity/etc.
 
-        stack.activeLayerIndex = stack.activeLayerIndex // reassignment to the SAME value
+        let sameActiveLayerIndex = stack.activeLayerIndex
+        stack.activeLayerIndex = sameActiveLayerIndex // reassignment to the SAME value
 
         guard let composite = stack.compositeImage(), let pixel = rawRGBA(of: composite, x: 0, y: 0) else {
             XCTFail("compositeImage() returned nil")

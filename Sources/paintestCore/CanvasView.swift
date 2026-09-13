@@ -227,6 +227,13 @@ final class CanvasView: NSView {
     /// "`AppDelegate` keeps `OptionBarView`'s slider in sync" wiring.
     var bucketFillTolerance: Int = 32
 
+    /// The gradient tool's in-progress drag (issue #41), in view-space
+    /// coordinates for drawing the preview line. The final paint operation
+    /// converts these to pixel coordinates and delegates all gradient math
+    /// to `PixelCanvas.applyLinearGradient(...)`.
+    private var gradientDragStart: NSPoint?
+    private var gradientDragCurrent: NSPoint?
+
     /// Which handle of `activeTransform`'s rectangle a transform drag grabbed
     /// (issue #9) — `.move` for a drag started inside the rectangle (not on
     /// a handle), `.corner`/`.edge` for the 8 resize handles (round 1), and
@@ -393,6 +400,8 @@ final class CanvasView: NSView {
             polygonVertices = []
             polygonFirstPoint = nil
             polygonCombineMode = nil
+            gradientDragStart = nil
+            gradientDragCurrent = nil
             // A stale pending crop rectangle (issue #21) must not survive a
             // tool switch either — same reasoning as the selection tools'
             // resets just above: nothing has been applied to any pixels yet
@@ -569,6 +578,8 @@ final class CanvasView: NSView {
         polygonVertices = []
         polygonFirstPoint = nil
         polygonCombineMode = nil
+        gradientDragStart = nil
+        gradientDragCurrent = nil
         // Same reasoning as every other tool's gesture-state reset just
         // above, extended to the crop tool's own pending rectangle (issue
         // #21): entering transform mode preempts it too, and nothing has
@@ -1440,6 +1451,17 @@ final class CanvasView: NSView {
             }
         }
 
+        if activeTool == .gradient, let start = gradientDragStart, let current = gradientDragCurrent {
+            context.setShouldAntialias(true)
+            context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+            context.setLineWidth(1)
+            context.setLineDash(phase: 0, lengths: [5, 3])
+            context.beginPath()
+            context.move(to: start)
+            context.addLine(to: current)
+            context.strokePath()
+        }
+
         // Lasso drag preview (issue #11 round 2): an open (not yet closed)
         // dashed line through every point accumulated so far, drawn through
         // pixel *centers* at the current zoom — same convention as the
@@ -1611,7 +1633,7 @@ final class CanvasView: NSView {
         case .pencil: return "鉛筆"
         case .eraser: return "消しゴム"
         case .pen: return "ペン"
-        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .text:
+        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .gradient, .text:
             // `.crop`'s own `commitCrop()` fires `onEditCompleted?("切り抜き")`
             // itself (issue #21), the same self-contained shape
             // `flushPenStroke()`/`commitLayerTransform()` use — this lookup
@@ -1667,7 +1689,7 @@ final class CanvasView: NSView {
             // before calling `paint(at:)` (issue #13). Kept only to satisfy
             // this switch's exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .gradient:
             // Same as the magnifier above: these branch to their own
             // drag/combine handling in `mouseDown`/`mouseDragged`/`mouseUp`
             // before calling `paint(at:)` (issue #11; `.crop` under issue
@@ -1706,7 +1728,7 @@ final class CanvasView: NSView {
             // Same as `paint(at:)` above: the magnifier never drags into a
             // stroke (issue #13), this exists only for exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .gradient:
             // Same as `paint(at:)` above: these never drag into a stroke
             // (issue #11; `.crop` under issue #21; `.bucketFill` under issue
             // #38, a single-click-only gesture), this exists only for
@@ -1864,7 +1886,7 @@ final class CanvasView: NSView {
         editor.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.85)
         editor.textColor = foregroundColor
         editor.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize * CGFloat(zoomScale))
-        editor.layoutOrientation = textSettings.isVertical ? .vertical : .horizontal
+        editor.setLayoutOrientation(textSettings.isVertical ? .vertical : .horizontal)
         // "What you type is what gets baked" (issue #42) — matches the
         // rest of this app's dot-exact philosophy more closely than a word
         // processor's helpful-but-surprising auto-substitutions would.
@@ -1927,9 +1949,9 @@ final class CanvasView: NSView {
     ///    of what's assumed here, the only consequence is a cosmetic one:
     ///    the *live editing overlay* would grow the wrong way on screen.
     ///    The committed result is unaffected — `rasterizeText(_:at:)` bakes
-    ///    the final text using its own independent offscreen `NSTextView`,
-    ///    a separate code path from this overlay, so the actual pixels
-    ///    written to the layer do not depend on this method at all.
+    ///    the final text through its own attributed-string-to-bitmap path,
+    ///    separate from this live overlay, so the actual pixels written to
+    ///    the layer do not depend on this method at all.
     /// 3. kako-jun: if vertical editing on real macOS shows the overlay
     ///    growing in a visually wrong direction, this `if
     ///    textSettings.isVertical` branch is the only place to look —
@@ -2057,11 +2079,11 @@ final class CanvasView: NSView {
     /// font — see `beginTextEdit(at:)`) and composites it onto the active
     /// layer with its top-left corner at `pixel` (issue #42).
     ///
-    /// Builds a second, throwaway `NSTextView` rather than rasterizing
-    /// `textEditor` itself: `textEditor`'s own on-screen size reflects the
-    /// current `zoomScale`, and downsampling *that* rendering back down to
-    /// canvas-pixel resolution would either blur (interpolated) or
-    /// alias/moiré (nearest-neighbor) an antialiased glyph edge, depending
+    /// Builds a throwaway attributed string and bitmap rather than
+    /// rasterizing `textEditor` itself: `textEditor`'s own on-screen size
+    /// reflects the current `zoomScale`, and downsampling *that* rendering
+    /// back down to canvas-pixel resolution would either blur (interpolated)
+    /// or alias/moiré (nearest-neighbor) an antialiased glyph edge, depending
     /// on which resampling `interpolationQuality` was used — rendering
     /// fresh, directly at the true 1-canvas-pixel-per-point size, avoids
     /// that resampling step entirely and produces the same crisp result
@@ -2069,47 +2091,41 @@ final class CanvasView: NSView {
     ///
     /// Font rendering can't be made fully non-anti-aliased the way the
     /// pencil/bucket-fill's `setPixel`/`drawLine` are (CLAUDE.md's classic-
-    /// tool "no anti-aliasing" policy) — `NSTextView`'s own glyph
-    /// rendering always anti-aliases — so this leaves that default
+    /// tool "no anti-aliasing" policy) — AppKit's glyph drawing anti-
+    /// aliases — so this leaves that default
     /// smoothing alone rather than fighting it into a jagged, harder-to-
-    /// read result; `PixelCanvas.compositeImage(_:at:mask:)` draws the
-    /// glyph bitmap into a `rect` sized directly from the image's own
-    /// `width`/`height` — a 1:1 pixel correspondence, so no scaling
+    /// read result; `PixelCanvas.compositeImage(_:at:mask:)` reads the
+    /// bitmap back as source pixels and source-over blends them onto the
+    /// layer at a 1:1 pixel correspondence. No `CGContext.draw` scaling
     /// happens there and `interpolationQuality`'s value (this path never
     /// actually sets it) has no effect on the result — the glyph bitmap is
     /// composited onto the layer pixel-for-pixel, with no additional
     /// scaling blur layered on top of its own anti-aliasing.
     private func rasterizeText(_ text: String, at pixel: (x: Int, y: Int)) {
-        let rasterView = NSTextView(frame: .zero)
-        rasterView.isRichText = false
-        rasterView.string = text
-        rasterView.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize)
-        rasterView.textColor = foregroundColor
-        rasterView.drawsBackground = false
-        rasterView.layoutOrientation = textSettings.isVertical ? .vertical : .horizontal
-        rasterView.textContainerInset = .zero
-        rasterView.textContainer?.lineFragmentPadding = 0
-        rasterView.isVerticallyResizable = true
-        rasterView.isHorizontallyResizable = true
-        rasterView.textContainer?.widthTracksTextView = false
-        rasterView.textContainer?.heightTracksTextView = false
-        rasterView.textContainer?.containerSize = NSSize(width: 10_000, height: 10_000)
-
-        guard let layoutManager = rasterView.layoutManager, let textContainer = rasterView.textContainer else { return }
-        layoutManager.ensureLayout(for: textContainer)
-        let usedRect = layoutManager.usedRect(for: textContainer)
-        let width = max(1, Int(usedRect.width.rounded(.up)))
-        let height = max(1, Int(usedRect.height.rounded(.up)))
+        let font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize)
+        let rasterText = CanvasView.rasterizedText(text, isVertical: textSettings.isVertical)
+        let attributedText = NSAttributedString(
+            string: rasterText,
+            attributes: [
+                .font: font,
+                .foregroundColor: foregroundColor
+            ]
+        )
+        let boundingRect = attributedText.boundingRect(
+            with: NSSize(width: 10_000, height: 10_000),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        let width = max(1, Int(boundingRect.width.rounded(.up)))
+        let height = max(1, Int(boundingRect.height.rounded(.up)))
         let viewRect = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
-        rasterView.frame = viewRect
 
         // Built by hand — not `bitmapImageRepForCachingDisplay(in:)` — at
         // exactly `width`x`height` *pixels*: that convenience constructor
         // sizes its bitmap using the view's own backing scale factor,
         // which would be `2.0` were this view ever attached to a Retina
         // window, silently doubling the baked-in text's pixel size
-        // relative to what `textSettings.fontSize` says. `rasterView` here
-        // is never attached to any window, so pinning the bitmap's pixel
+        // relative to what `textSettings.fontSize` says. This rasterization
+        // path has no throwaway view at all, so pinning the bitmap's pixel
         // dimensions explicitly (matching `viewRect`'s point size 1:1, via
         // `bitmap.size` below) is what actually guarantees "this many
         // canvas pixels tall" — not an incidental default.
@@ -2127,7 +2143,21 @@ final class CanvasView: NSView {
             bitsPerPixel: 0
         ) else { return }
         bitmap.size = viewRect.size
-        rasterView.cacheDisplay(in: viewRect, to: bitmap)
+        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return }
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = context
+        defer {
+            NSGraphicsContext.current = previousContext
+        }
+        attributedText.draw(
+            with: CGRect(
+                x: -boundingRect.origin.x,
+                y: -boundingRect.origin.y,
+                width: max(viewRect.width, boundingRect.width),
+                height: max(viewRect.height, boundingRect.height)
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
         guard let cgImage = bitmap.cgImage else { return }
 
         layerStack.activeLayer.canvas.compositeImage(cgImage, at: pixel, mask: selection)
@@ -2145,6 +2175,14 @@ final class CanvasView: NSView {
         NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: size)
             ?? NSFont(name: family, size: size)
             ?? NSFont.systemFont(ofSize: size)
+    }
+
+    private static func rasterizedText(_ text: String, isVertical: Bool) -> String {
+        guard isVertical else { return text }
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in line.map(String.init).joined(separator: "\n") }
+            .joined(separator: "\n")
     }
 
     /// Reads the color at a pixel out of the currently displayed
@@ -2486,6 +2524,13 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if activeTool == .gradient {
+            let point = convert(event.locationInWindow, from: nil)
+            gradientDragStart = point
+            gradientDragCurrent = point
+            needsDisplay = true
+            return
+        }
         if activeTool == .crop {
             let point = convert(event.locationInWindow, from: nil)
             if let cropRect {
@@ -2698,6 +2743,11 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if activeTool == .gradient {
+            gradientDragCurrent = convert(event.locationInWindow, from: nil)
+            needsDisplay = true
+            return
+        }
         if activeTool == .lassoSelect {
             let pixel = pixelCoordinate(for: event)
             // Thins out consecutive duplicate points (e.g. the pointer
@@ -2891,6 +2941,26 @@ final class CanvasView: NSView {
             let newMask = SelectionMask.polygon(vertices: lassoVertices, width: layerStack.width, height: layerStack.height)
             applyCombinedSelection(newMask, mode: lassoCombineMode)
             onEditCompleted?("選択範囲")
+            return
+        }
+        if activeTool == .gradient {
+            defer {
+                gradientDragStart = nil
+                gradientDragCurrent = nil
+                needsDisplay = true
+            }
+            guard let start = gradientDragStart, let current = gradientDragCurrent else { return }
+            let p0 = CanvasView.pixelCoordinate(forPoint: start, zoomScale: zoomScale)
+            let p1 = CanvasView.pixelCoordinate(forPoint: current, zoomScale: zoomScale)
+            layerStack.activeLayer.canvas.applyLinearGradient(
+                from: p0,
+                to: p1,
+                startColor: foregroundColor,
+                endColor: backgroundColor,
+                mask: selection
+            )
+            onLayerContentChanged?()
+            onEditCompleted?("グラデーション")
             return
         }
         if activeTool == .text {

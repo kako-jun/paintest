@@ -674,6 +674,7 @@ final class CanvasViewTests: XCTestCase {
     private func makeViewInWindow(width: Int, height: Int, zoomScale: Int = 4) -> CanvasView {
         let stack = LayerStack(width: width, height: height, background: .white)
         let view = CanvasView(layerStack: stack)
+        view.setZoomScale(zoomScale)
         let viewSize = NSSize(width: width * zoomScale, height: height * zoomScale)
         view.frame = NSRect(origin: .zero, size: viewSize)
         let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -682,8 +683,9 @@ final class CanvasViewTests: XCTestCase {
     }
 
     private func windowPoint(forPixelCol col: Int, row: Int, zoomScale: Int, viewHeight: CGFloat) -> NSPoint {
-        let x = CGFloat(col * zoomScale) + 1 // +1: anywhere inside the target pixel's cell, not on its edge
-        let y = viewHeight - CGFloat(row * zoomScale) - 1
+        let cellCenterOffset = CGFloat(zoomScale) / 2
+        let x = CGFloat(col * zoomScale) + cellCenterOffset
+        let y = viewHeight - CGFloat(row * zoomScale) - cellCenterOffset
         return NSPoint(x: x, y: y)
     }
 
@@ -2138,6 +2140,89 @@ final class CanvasViewTests: XCTestCase {
 
         XCTAssertEqual(contentChangedCount, 1)
         XCTAssertEqual(labels, ["塗りつぶし"])
+    }
+
+    // MARK: - Gradient tool (issue #41)
+
+    func testGradientTool_dragAppliesForegroundToBackgroundGradientOnMouseUp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 1, zoomScale: zoomScale)
+        view.activeTool = .gradient
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 0, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: 3, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        XCTAssertEqual(contentChangedCount, 0, "dragging only updates the preview; pixels land on mouseUp")
+
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 0)?.r, 255)
+        XCTAssertEqual(contentChangedCount, 1)
+        XCTAssertEqual(labels, ["グラデーション"])
+    }
+
+    func testGradientTool_selectionRestrictsGradientWrites() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 1, zoomScale: zoomScale)
+        view.activeTool = .gradient
+        view.selection = SelectionMask.rectangle(x0: 1, y0: 0, x1: 2, y1: 0, width: 4, height: 1)
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 0, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: 3, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 255, "outside the selection must stay untouched")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 0)?.r, 255, "outside the selection must stay untouched")
+    }
+
+    func testGradientTool_zeroLengthDragAppliesStartColorAndNotifiesOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 3, height: 2, zoomScale: zoomScale)
+        view.activeTool = .gradient
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertEqual(contentChangedCount, 0, "the zero-length drag preview must not notify before mouseUp")
+
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<2 {
+            for x in 0..<3 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 0, "x=\(x) y=\(y) zero-length gradient must apply the foreground/start color")
+            }
+        }
+        XCTAssertEqual(contentChangedCount, 1)
+        XCTAssertEqual(labels, ["グラデーション"])
     }
 
     // MARK: - Selection combine modes: decision table (issue #11 test-authoring pass)
@@ -5786,7 +5871,11 @@ final class CanvasViewTests: XCTestCase {
         // testMouseUp_magnifierDragFromNegativeOutOfCanvasCoordinates_doesNotCrash
         // already covers for the magnifier tool — must not crash for the
         // crop tool's own rubber-band drag either.
-        dragOutCropRect(on: view, fromCol: -8, fromRow: -8, toCol: -4, toRow: -4, zoomScale: zoomScale)
+        // Pixel bounds are inclusive (`max + 1` in the crop branch), so
+        // -8...-5 is a 4px fully-negative rectangle. This keeps the test's
+        // original minimum-size crop behavior explicit now that
+        // `makeViewInWindow` sets the view's actual zoomScale.
+        dragOutCropRect(on: view, fromCol: -8, fromRow: -8, toCol: -5, toRow: -5, zoomScale: zoomScale)
 
         XCTAssertTrue(view.isCropping, "an out-of-canvas drag must still resolve to a valid pending rectangle, not crash or silently do nothing")
 
