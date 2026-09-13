@@ -1949,9 +1949,9 @@ final class CanvasView: NSView {
     ///    of what's assumed here, the only consequence is a cosmetic one:
     ///    the *live editing overlay* would grow the wrong way on screen.
     ///    The committed result is unaffected — `rasterizeText(_:at:)` bakes
-    ///    the final text using its own independent offscreen `NSTextView`,
-    ///    a separate code path from this overlay, so the actual pixels
-    ///    written to the layer do not depend on this method at all.
+    ///    the final text through its own attributed-string-to-bitmap path,
+    ///    separate from this live overlay, so the actual pixels written to
+    ///    the layer do not depend on this method at all.
     /// 3. kako-jun: if vertical editing on real macOS shows the overlay
     ///    growing in a visually wrong direction, this `if
     ///    textSettings.isVertical` branch is the only place to look —
@@ -2079,11 +2079,11 @@ final class CanvasView: NSView {
     /// font — see `beginTextEdit(at:)`) and composites it onto the active
     /// layer with its top-left corner at `pixel` (issue #42).
     ///
-    /// Builds a second, throwaway `NSTextView` rather than rasterizing
-    /// `textEditor` itself: `textEditor`'s own on-screen size reflects the
-    /// current `zoomScale`, and downsampling *that* rendering back down to
-    /// canvas-pixel resolution would either blur (interpolated) or
-    /// alias/moiré (nearest-neighbor) an antialiased glyph edge, depending
+    /// Builds a throwaway attributed string and bitmap rather than
+    /// rasterizing `textEditor` itself: `textEditor`'s own on-screen size
+    /// reflects the current `zoomScale`, and downsampling *that* rendering
+    /// back down to canvas-pixel resolution would either blur (interpolated)
+    /// or alias/moiré (nearest-neighbor) an antialiased glyph edge, depending
     /// on which resampling `interpolationQuality` was used — rendering
     /// fresh, directly at the true 1-canvas-pixel-per-point size, avoids
     /// that resampling step entirely and produces the same crisp result
@@ -2091,12 +2091,12 @@ final class CanvasView: NSView {
     ///
     /// Font rendering can't be made fully non-anti-aliased the way the
     /// pencil/bucket-fill's `setPixel`/`drawLine` are (CLAUDE.md's classic-
-    /// tool "no anti-aliasing" policy) — `NSTextView`'s own glyph
-    /// rendering always anti-aliases — so this leaves that default
+    /// tool "no anti-aliasing" policy) — AppKit's glyph drawing anti-
+    /// aliases — so this leaves that default
     /// smoothing alone rather than fighting it into a jagged, harder-to-
-    /// read result; `PixelCanvas.compositeImage(_:at:mask:)` draws the
-    /// glyph bitmap into a `rect` sized directly from the image's own
-    /// `width`/`height` — a 1:1 pixel correspondence, so no scaling
+    /// read result; `PixelCanvas.compositeImage(_:at:mask:)` reads the
+    /// bitmap back as source pixels and source-over blends them onto the
+    /// layer at a 1:1 pixel correspondence. No `CGContext.draw` scaling
     /// happens there and `interpolationQuality`'s value (this path never
     /// actually sets it) has no effect on the result — the glyph bitmap is
     /// composited onto the layer pixel-for-pixel, with no additional
@@ -2124,8 +2124,8 @@ final class CanvasView: NSView {
         // sizes its bitmap using the view's own backing scale factor,
         // which would be `2.0` were this view ever attached to a Retina
         // window, silently doubling the baked-in text's pixel size
-        // relative to what `textSettings.fontSize` says. `rasterView` here
-        // is never attached to any window, so pinning the bitmap's pixel
+        // relative to what `textSettings.fontSize` says. This rasterization
+        // path has no throwaway view at all, so pinning the bitmap's pixel
         // dimensions explicitly (matching `viewRect`'s point size 1:1, via
         // `bitmap.size` below) is what actually guarantees "this many
         // canvas pixels tall" — not an incidental default.

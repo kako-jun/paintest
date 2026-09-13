@@ -430,19 +430,19 @@ final class PixelCanvas {
     /// `CanvasView.flushPenStroke()` for the full picture of why `opacity`
     /// is applied here, once, rather than per dab.
     ///
-    /// `overlay` must be the same size as this canvas (true by construction
-    /// for `CanvasView`'s per-stroke accumulation buffer, which is always
-    /// built via `PixelCanvas(width: layerStack.width, height:
-    /// layerStack.height, ...)`) — a mismatched size draws `overlay`
-    /// stretched to fill `width`x`height` rather than failing outright,
-    /// since `CGContext.draw(_:in:)` itself has no notion of "wrong size".
+    /// `overlay` is normally the same size as this canvas (true by
+    /// construction for `CanvasView`'s per-stroke accumulation buffer, which
+    /// is always built via `PixelCanvas(width: layerStack.width, height:
+    /// layerStack.height, ...)`). If a differently sized overlay ever reaches
+    /// this method, there is no resize/stretch step: the loop only visits the
+    /// shared top-left intersection (`min(width, overlay.width)` by
+    /// `min(height, overlay.height)`), leaving the rest of the destination
+    /// untouched.
     ///
-    /// Reuses `drawAntialiased(mask:_:)`'s same premultiplied-scratch-overlay
-    /// technique as `drawPenDab` above (`overlay` is `.alphaNonpremultiplied`
-    /// like every `PixelCanvas`, so — same reasoning as that method's own
-    /// doc comment — it can't vend a `CGContext` of its own either); here the
-    /// "draw" step is just `context.draw(overlay.cgImage, ...)` under
-    /// `context.setAlpha(alpha)`, instead of a CG fill/stroke/gradient path.
+    /// The merge is deliberately byte-based rather than a `CGContext.draw`
+    /// path. Each non-transparent source pixel is read with `rawPixel`,
+    /// scaled once by the whole-stroke `alpha`, then source-over blended into
+    /// the destination with `blendPixel`.
     /// No `mask` parameter: `overlay`'s own pixels were already masked at
     /// dab-stamping time (`drawPenDab`'s own `mask` argument), so any pixel
     /// outside the selection is already fully transparent here and
@@ -462,19 +462,17 @@ final class PixelCanvas {
     /// Composites an already-rendered image onto this canvas at `origin`
     /// (top-left corner, in `setPixel`'s pixel-space coordinates) — the
     /// text tool's rasterization step (issue #42:
-    /// `CanvasView.rasterizeText(_:at:)`, which builds `image` from an
-    /// offscreen `NSTextView`'s `cacheDisplay(in:to:)` output). Reuses
-    /// `drawAntialiased(mask:_:)`'s same premultiplied-scratch-overlay
-    /// alpha-compositing technique as `compositeOverlay`/`drawPenDab`
-    /// above, so `image`'s own per-pixel alpha (an anti-aliased glyph edge,
-    /// for instance) blends onto the canvas the same "source over"
-    /// straight-alpha way those do, rather than `setPixel`'s
-    /// fully-opaque-only write.
+    /// `CanvasView.rasterizeText(_:at:)`, which builds `image` by drawing an
+    /// attributed string into an explicitly sized bitmap). Converts `image`
+    /// back to an `NSBitmapImageRep`, walks its source pixels directly, and
+    /// source-over blends each non-transparent pixel into this canvas with
+    /// `blendPixel`. That keeps the text path in the same straight-alpha
+    /// byte-compositing model as `compositeOverlay`, without a
+    /// `CGContext.draw` resize step.
     ///
-    /// `origin` is not clamped or bounds-checked up front — a rectangle
-    /// partially or fully outside `0..<width`/`0..<height` is simply
-    /// clipped by the loop in `drawAntialiased(mask:_:)`, which already
-    /// only ever visits `0..<width`/`0..<height`.
+    /// `origin` is not clamped or bounds-checked up front — source pixels
+    /// whose destination coordinate falls outside `0..<width`/`0..<height`
+    /// are simply skipped by the loop below.
     func compositeImage(_ image: CGImage, at origin: (x: Int, y: Int), mask: SelectionMask? = nil) {
         let source = NSBitmapImageRep(cgImage: image)
         for sy in 0..<source.pixelsHigh {
