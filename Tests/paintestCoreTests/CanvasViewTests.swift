@@ -5871,7 +5871,11 @@ final class CanvasViewTests: XCTestCase {
         // testMouseUp_magnifierDragFromNegativeOutOfCanvasCoordinates_doesNotCrash
         // already covers for the magnifier tool — must not crash for the
         // crop tool's own rubber-band drag either.
-        dragOutCropRect(on: view, fromCol: -8, fromRow: -8, toCol: -4, toRow: -4, zoomScale: zoomScale)
+        // Pixel bounds are inclusive (`max + 1` in the crop branch), so
+        // -8...-5 is a 4px fully-negative rectangle. This keeps the test's
+        // original minimum-size crop behavior explicit now that
+        // `makeViewInWindow` sets the view's actual zoomScale.
+        dragOutCropRect(on: view, fromCol: -8, fromRow: -8, toCol: -5, toRow: -5, zoomScale: zoomScale)
 
         XCTAssertTrue(view.isCropping, "an out-of-canvas drag must still resolve to a valid pending rectangle, not crash or silently do nothing")
 

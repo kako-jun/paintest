@@ -632,13 +632,12 @@ final class PixelCanvasTests: XCTestCase {
     // Unlike `compositeOverlay` above (always the same size as its target,
     // and every existing test's own overlay content is a radially symmetric
     // dab that could never expose a vertical/horizontal flip), `compositeImage`
-    // draws an arbitrary already-rendered `CGImage` (`CanvasView
-    // .rasterizeText(_:at:)`'s offscreen `NSTextView` capture) at an
-    // arbitrary `origin` — a genuinely new code path (`context.draw(image,
-    // in: rect)` against a rect built from `origin`, rather than a fixed
-    // `CGRect(x: 0, y: 0, width: width, height: height)`), so it gets its
-    // own dedicated coverage here rather than being assumed to inherit
-    // `compositeOverlay`'s.
+    // accepts the already-rendered `CGImage` produced by
+    // `CanvasView.rasterizeText(_:at:)`'s `NSAttributedString`-into-bitmap
+    // path, reads it back through `NSBitmapImageRep`, and byte-blends those
+    // source pixels at an arbitrary `origin`. That is a genuinely distinct
+    // path from overlay compositing, so it gets its own dedicated coverage
+    // here rather than being assumed to inherit `compositeOverlay`'s.
 
     /// Builds a small, already-rendered "source image" the same way
     /// `compositeImage`'s own doc comment describes `CanvasView
