@@ -674,6 +674,7 @@ final class CanvasViewTests: XCTestCase {
     private func makeViewInWindow(width: Int, height: Int, zoomScale: Int = 4) -> CanvasView {
         let stack = LayerStack(width: width, height: height, background: .white)
         let view = CanvasView(layerStack: stack)
+        view.setZoomScale(zoomScale)
         let viewSize = NSSize(width: width * zoomScale, height: height * zoomScale)
         view.frame = NSRect(origin: .zero, size: viewSize)
         let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -682,8 +683,9 @@ final class CanvasViewTests: XCTestCase {
     }
 
     private func windowPoint(forPixelCol col: Int, row: Int, zoomScale: Int, viewHeight: CGFloat) -> NSPoint {
-        let x = CGFloat(col * zoomScale) + 1 // +1: anywhere inside the target pixel's cell, not on its edge
-        let y = viewHeight - CGFloat(row * zoomScale) - 1
+        let cellCenterOffset = CGFloat(zoomScale) / 2
+        let x = CGFloat(col * zoomScale) + cellCenterOffset
+        let y = viewHeight - CGFloat(row * zoomScale) - cellCenterOffset
         return NSPoint(x: x, y: y)
     }
 
@@ -2191,6 +2193,36 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
         XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.r, 170)
         XCTAssertEqual(canvas.rawPixel(x: 3, y: 0)?.r, 255, "outside the selection must stay untouched")
+    }
+
+    func testGradientTool_zeroLengthDragAppliesStartColorAndNotifiesOnce() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 3, height: 2, zoomScale: zoomScale)
+        view.activeTool = .gradient
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: point, in: window))
+        XCTAssertEqual(contentChangedCount, 0, "the zero-length drag preview must not notify before mouseUp")
+
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+        view.mouseUp(with: mouseUpEvent(at: point, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        for y in 0..<2 {
+            for x in 0..<3 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 0, "x=\(x) y=\(y) zero-length gradient must apply the foreground/start color")
+            }
+        }
+        XCTAssertEqual(contentChangedCount, 1)
+        XCTAssertEqual(labels, ["グラデーション"])
     }
 
     // MARK: - Selection combine modes: decision table (issue #11 test-authoring pass)

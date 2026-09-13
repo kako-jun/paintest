@@ -1886,9 +1886,7 @@ final class CanvasView: NSView {
         editor.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.85)
         editor.textColor = foregroundColor
         editor.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize * CGFloat(zoomScale))
-        if textSettings.isVertical {
-            editor.setLayoutOrientation(.vertical)
-        }
+        editor.setLayoutOrientation(textSettings.isVertical ? .vertical : .horizontal)
         // "What you type is what gets baked" (issue #42) — matches the
         // rest of this app's dot-exact philosophy more closely than a word
         // processor's helpful-but-surprising auto-substitutions would.
@@ -2104,30 +2102,22 @@ final class CanvasView: NSView {
     /// composited onto the layer pixel-for-pixel, with no additional
     /// scaling blur layered on top of its own anti-aliasing.
     private func rasterizeText(_ text: String, at pixel: (x: Int, y: Int)) {
-        let rasterView = NSTextView(frame: .zero)
-        rasterView.isRichText = false
-        rasterView.string = text
-        rasterView.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize)
-        rasterView.textColor = foregroundColor
-        rasterView.drawsBackground = false
-        if textSettings.isVertical {
-            rasterView.setLayoutOrientation(.vertical)
-        }
-        rasterView.textContainerInset = .zero
-        rasterView.textContainer?.lineFragmentPadding = 0
-        rasterView.isVerticallyResizable = true
-        rasterView.isHorizontallyResizable = true
-        rasterView.textContainer?.widthTracksTextView = false
-        rasterView.textContainer?.heightTracksTextView = false
-        rasterView.textContainer?.containerSize = NSSize(width: 10_000, height: 10_000)
-
-        guard let layoutManager = rasterView.layoutManager, let textContainer = rasterView.textContainer else { return }
-        layoutManager.ensureLayout(for: textContainer)
-        let usedRect = layoutManager.usedRect(for: textContainer)
-        let width = max(1, Int(usedRect.width.rounded(.up)))
-        let height = max(1, Int(usedRect.height.rounded(.up)))
+        let font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize)
+        let rasterText = CanvasView.rasterizedText(text, isVertical: textSettings.isVertical)
+        let attributedText = NSAttributedString(
+            string: rasterText,
+            attributes: [
+                .font: font,
+                .foregroundColor: foregroundColor
+            ]
+        )
+        let boundingRect = attributedText.boundingRect(
+            with: NSSize(width: 10_000, height: 10_000),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        let width = max(1, Int(boundingRect.width.rounded(.up)))
+        let height = max(1, Int(boundingRect.height.rounded(.up)))
         let viewRect = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
-        rasterView.frame = viewRect
 
         // Built by hand — not `bitmapImageRepForCachingDisplay(in:)` — at
         // exactly `width`x`height` *pixels*: that convenience constructor
@@ -2153,7 +2143,21 @@ final class CanvasView: NSView {
             bitsPerPixel: 0
         ) else { return }
         bitmap.size = viewRect.size
-        rasterView.cacheDisplay(in: viewRect, to: bitmap)
+        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return }
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = context
+        defer {
+            NSGraphicsContext.current = previousContext
+        }
+        attributedText.draw(
+            with: CGRect(
+                x: -boundingRect.origin.x,
+                y: -boundingRect.origin.y,
+                width: max(viewRect.width, boundingRect.width),
+                height: max(viewRect.height, boundingRect.height)
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
         guard let cgImage = bitmap.cgImage else { return }
 
         layerStack.activeLayer.canvas.compositeImage(cgImage, at: pixel, mask: selection)
@@ -2171,6 +2175,14 @@ final class CanvasView: NSView {
         NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: size)
             ?? NSFont(name: family, size: size)
             ?? NSFont.systemFont(ofSize: size)
+    }
+
+    private static func rasterizedText(_ text: String, isVertical: Bool) -> String {
+        guard isVertical else { return text }
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in line.map(String.init).joined(separator: "\n") }
+            .joined(separator: "\n")
     }
 
     /// Reads the color at a pixel out of the currently displayed

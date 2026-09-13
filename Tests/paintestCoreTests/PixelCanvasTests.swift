@@ -277,6 +277,24 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertEqual(canvas.rawPixel(x: 3, y: 1)?.r, 255, "outside the selection must stay untouched")
     }
 
+    func testApplyLinearGradient_zeroLengthDrag_fillsWithStartColor() {
+        let canvas = PixelCanvas(width: 3, height: 2, background: .white)
+
+        canvas.applyLinearGradient(
+            from: (x: 1, y: 1),
+            to: (x: 1, y: 1),
+            startColor: .black,
+            endColor: .white
+        )
+
+        for y in 0..<2 {
+            for x in 0..<3 {
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.r, 0, "x=\(x) y=\(y) zero-length gradient must use the start color everywhere")
+                XCTAssertEqual(canvas.rawPixel(x: x, y: y)?.a, 255, "x=\(x) y=\(y) alpha")
+            }
+        }
+    }
+
     func testDrawAntialiasedDot_centeredOffCanvasEdge_doesNotCrashAndClipsToCanvas() {
         let canvas = PixelCanvas(width: 10, height: 10, background: .white)
 

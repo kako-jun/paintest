@@ -449,10 +449,13 @@ final class PixelCanvas {
     /// contributes nothing to the composite regardless.
     func compositeOverlay(_ overlay: PixelCanvas, alpha: Double) {
         let clampedAlpha = max(0, min(1, alpha))
-        guard clampedAlpha > 0, let overlayImage = overlay.cgImage else { return }
-        drawAntialiased(mask: nil) { context in
-            context.setAlpha(CGFloat(clampedAlpha))
-            context.draw(overlayImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard clampedAlpha > 0 else { return }
+        for y in 0..<min(height, overlay.height) {
+            for x in 0..<min(width, overlay.width) {
+                guard let pixel = overlay.rawPixel(x: x, y: y), pixel.a > 0 else { continue }
+                let scaledAlpha = UInt8(max(0, min(255, (Double(pixel.a) * clampedAlpha).rounded())))
+                blendPixel(x: x, y: y, r: pixel.r, g: pixel.g, b: pixel.b, a: scaledAlpha, mask: nil)
+            }
         }
     }
 
@@ -473,10 +476,46 @@ final class PixelCanvas {
     /// clipped by the loop in `drawAntialiased(mask:_:)`, which already
     /// only ever visits `0..<width`/`0..<height`.
     func compositeImage(_ image: CGImage, at origin: (x: Int, y: Int), mask: SelectionMask? = nil) {
-        drawAntialiased(mask: mask) { context in
-            let rect = CGRect(x: origin.x, y: origin.y, width: image.width, height: image.height)
-            context.draw(image, in: rect)
+        let source = NSBitmapImageRep(cgImage: image)
+        for sy in 0..<source.pixelsHigh {
+            let dy = origin.y + sy
+            guard dy >= 0, dy < height else { continue }
+            for sx in 0..<source.pixelsWide {
+                let dx = origin.x + sx
+                guard dx >= 0, dx < width else { continue }
+                guard mask == nil || mask!.contains(x: dx, y: dy) else { continue }
+                guard let color = source.colorAt(x: sx, y: sy)?.usingColorSpace(.deviceRGB) else { continue }
+                let alpha = UInt8(max(0, min(255, (color.alphaComponent * 255).rounded())))
+                guard alpha > 0 else { continue }
+                let r = UInt8(max(0, min(255, (color.redComponent * 255).rounded())))
+                let g = UInt8(max(0, min(255, (color.greenComponent * 255).rounded())))
+                let b = UInt8(max(0, min(255, (color.blueComponent * 255).rounded())))
+                blendPixel(x: dx, y: dy, r: r, g: g, b: b, a: alpha, mask: nil)
+            }
         }
+    }
+
+    private func blendPixel(x: Int, y: Int, r: UInt8, g: UInt8, b: UInt8, a: UInt8, mask: SelectionMask?) {
+        guard x >= 0, x < width, y >= 0, y < height else { return }
+        guard mask == nil || mask!.contains(x: x, y: y) else { return }
+        guard let data = bitmap.bitmapData else { return }
+        let bytesPerRow = bitmap.bytesPerRow
+        let bpp = bitmap.bitsPerPixel / 8
+        let offset = y * bytesPerRow + x * bpp
+
+        let srcAlpha = Double(a) / 255.0
+        let destAlpha = Double(data[offset + 3]) / 255.0
+        let outAlpha = srcAlpha + destAlpha * (1 - srcAlpha)
+        let blend: (UInt8, UInt8) -> UInt8 = { src, dst in
+            guard outAlpha > 0 else { return 0 }
+            let out = (Double(src) * srcAlpha + Double(dst) * destAlpha * (1 - srcAlpha)) / outAlpha
+            return UInt8(max(0, min(255, out.rounded())))
+        }
+
+        data[offset] = blend(r, data[offset])
+        data[offset + 1] = blend(g, data[offset + 1])
+        data[offset + 2] = blend(b, data[offset + 2])
+        data[offset + 3] = UInt8(max(0, min(255, (outAlpha * 255).rounded())))
     }
 
     // MARK: - Rendering
