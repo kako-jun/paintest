@@ -136,6 +136,57 @@ final class PixelCanvas {
         }
     }
 
+    /// Fills this canvas with a linear foreground-to-background gradient
+    /// projected along the vector from `start` to `end` (issue #41).
+    ///
+    /// The color is computed per pixel and written directly into the bitmap
+    /// buffer, keeping the core drawing logic independent from AppKit
+    /// gestures. Pixels before `start` clamp to `startColor`; pixels beyond
+    /// `end` clamp to `endColor`. A zero-length drag falls back to a solid
+    /// `startColor` fill, matching the "start color at t=0" endpoint.
+    func applyLinearGradient(from start: (x: Int, y: Int), to end: (x: Int, y: Int), startColor: NSColor, endColor: NSColor, mask: SelectionMask? = nil) {
+        guard let data = bitmap.bitmapData else { return }
+        let (r0, g0, b0, a0) = components(of: startColor)
+        let (r1, g1, b1, a1) = components(of: endColor)
+        let dx = Double(end.x - start.x)
+        let dy = Double(end.y - start.y)
+        let denominator = dx * dx + dy * dy
+        let bytesPerRow = bitmap.bytesPerRow
+        let bpp = bitmap.bitsPerPixel / 8
+        let bounds = mask?.boundingBox ?? (minX: 0, minY: 0, maxX: width - 1, maxY: height - 1)
+
+        guard bounds.minX <= bounds.maxX, bounds.minY <= bounds.maxY else { return }
+
+        let clampedMinX = max(0, bounds.minX)
+        let clampedMaxX = min(width - 1, bounds.maxX)
+        let clampedMinY = max(0, bounds.minY)
+        let clampedMaxY = min(height - 1, bounds.maxY)
+        guard clampedMinX <= clampedMaxX, clampedMinY <= clampedMaxY else { return }
+
+        func interpolate(_ a: UInt8, _ b: UInt8, t: Double) -> UInt8 {
+            UInt8(max(0, min(255, (Double(a) + (Double(b) - Double(a)) * t).rounded())))
+        }
+
+        for y in clampedMinY...clampedMaxY {
+            let rowStart = y * bytesPerRow
+            for x in clampedMinX...clampedMaxX {
+                guard mask == nil || mask!.contains(x: x, y: y) else { continue }
+                let t: Double
+                if denominator == 0 {
+                    t = 0
+                } else {
+                    let projected = (Double(x - start.x) * dx + Double(y - start.y) * dy) / denominator
+                    t = max(0, min(1, projected))
+                }
+                let offset = rowStart + x * bpp
+                data[offset] = interpolate(r0, r1, t: t)
+                data[offset + 1] = interpolate(g0, g1, t: t)
+                data[offset + 2] = interpolate(b0, b1, t: t)
+                data[offset + 3] = interpolate(a0, a1, t: t)
+            }
+        }
+    }
+
     // MARK: - Antialiased drawing (pen tool, issue #10)
     //
     // Unlike `setPixel`/`drawLine` above (nearest-neighbor, dot-exact, no

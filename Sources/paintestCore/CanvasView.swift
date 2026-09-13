@@ -227,6 +227,13 @@ final class CanvasView: NSView {
     /// "`AppDelegate` keeps `OptionBarView`'s slider in sync" wiring.
     var bucketFillTolerance: Int = 32
 
+    /// The gradient tool's in-progress drag (issue #41), in view-space
+    /// coordinates for drawing the preview line. The final paint operation
+    /// converts these to pixel coordinates and delegates all gradient math
+    /// to `PixelCanvas.applyLinearGradient(...)`.
+    private var gradientDragStart: NSPoint?
+    private var gradientDragCurrent: NSPoint?
+
     /// Which handle of `activeTransform`'s rectangle a transform drag grabbed
     /// (issue #9) — `.move` for a drag started inside the rectangle (not on
     /// a handle), `.corner`/`.edge` for the 8 resize handles (round 1), and
@@ -393,6 +400,8 @@ final class CanvasView: NSView {
             polygonVertices = []
             polygonFirstPoint = nil
             polygonCombineMode = nil
+            gradientDragStart = nil
+            gradientDragCurrent = nil
             // A stale pending crop rectangle (issue #21) must not survive a
             // tool switch either — same reasoning as the selection tools'
             // resets just above: nothing has been applied to any pixels yet
@@ -569,6 +578,8 @@ final class CanvasView: NSView {
         polygonVertices = []
         polygonFirstPoint = nil
         polygonCombineMode = nil
+        gradientDragStart = nil
+        gradientDragCurrent = nil
         // Same reasoning as every other tool's gesture-state reset just
         // above, extended to the crop tool's own pending rectangle (issue
         // #21): entering transform mode preempts it too, and nothing has
@@ -1440,6 +1451,17 @@ final class CanvasView: NSView {
             }
         }
 
+        if activeTool == .gradient, let start = gradientDragStart, let current = gradientDragCurrent {
+            context.setShouldAntialias(true)
+            context.setStrokeColor(NSColor.selectedControlColor.cgColor)
+            context.setLineWidth(1)
+            context.setLineDash(phase: 0, lengths: [5, 3])
+            context.beginPath()
+            context.move(to: start)
+            context.addLine(to: current)
+            context.strokePath()
+        }
+
         // Lasso drag preview (issue #11 round 2): an open (not yet closed)
         // dashed line through every point accumulated so far, drawn through
         // pixel *centers* at the current zoom — same convention as the
@@ -1611,7 +1633,7 @@ final class CanvasView: NSView {
         case .pencil: return "鉛筆"
         case .eraser: return "消しゴム"
         case .pen: return "ペン"
-        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .text:
+        case .eyedropper, .magnifier, .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .gradient, .text:
             // `.crop`'s own `commitCrop()` fires `onEditCompleted?("切り抜き")`
             // itself (issue #21), the same self-contained shape
             // `flushPenStroke()`/`commitLayerTransform()` use — this lookup
@@ -1667,7 +1689,7 @@ final class CanvasView: NSView {
             // before calling `paint(at:)` (issue #13). Kept only to satisfy
             // this switch's exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .gradient:
             // Same as the magnifier above: these branch to their own
             // drag/combine handling in `mouseDown`/`mouseDragged`/`mouseUp`
             // before calling `paint(at:)` (issue #11; `.crop` under issue
@@ -1706,7 +1728,7 @@ final class CanvasView: NSView {
             // Same as `paint(at:)` above: the magnifier never drags into a
             // stroke (issue #13), this exists only for exhaustiveness.
             return
-        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill:
+        case .rectangleSelect, .ellipseSelect, .lassoSelect, .polygonSelect, .magicWandSelect, .crop, .bucketFill, .gradient:
             // Same as `paint(at:)` above: these never drag into a stroke
             // (issue #11; `.crop` under issue #21; `.bucketFill` under issue
             // #38, a single-click-only gesture), this exists only for
@@ -1864,7 +1886,9 @@ final class CanvasView: NSView {
         editor.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.85)
         editor.textColor = foregroundColor
         editor.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize * CGFloat(zoomScale))
-        editor.layoutOrientation = textSettings.isVertical ? .vertical : .horizontal
+        if textSettings.isVertical {
+            editor.setLayoutOrientation(.vertical)
+        }
         // "What you type is what gets baked" (issue #42) — matches the
         // rest of this app's dot-exact philosophy more closely than a word
         // processor's helpful-but-surprising auto-substitutions would.
@@ -2086,7 +2110,9 @@ final class CanvasView: NSView {
         rasterView.font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize)
         rasterView.textColor = foregroundColor
         rasterView.drawsBackground = false
-        rasterView.layoutOrientation = textSettings.isVertical ? .vertical : .horizontal
+        if textSettings.isVertical {
+            rasterView.setLayoutOrientation(.vertical)
+        }
         rasterView.textContainerInset = .zero
         rasterView.textContainer?.lineFragmentPadding = 0
         rasterView.isVerticallyResizable = true
@@ -2486,6 +2512,13 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if activeTool == .gradient {
+            let point = convert(event.locationInWindow, from: nil)
+            gradientDragStart = point
+            gradientDragCurrent = point
+            needsDisplay = true
+            return
+        }
         if activeTool == .crop {
             let point = convert(event.locationInWindow, from: nil)
             if let cropRect {
@@ -2698,6 +2731,11 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if activeTool == .gradient {
+            gradientDragCurrent = convert(event.locationInWindow, from: nil)
+            needsDisplay = true
+            return
+        }
         if activeTool == .lassoSelect {
             let pixel = pixelCoordinate(for: event)
             // Thins out consecutive duplicate points (e.g. the pointer
@@ -2891,6 +2929,26 @@ final class CanvasView: NSView {
             let newMask = SelectionMask.polygon(vertices: lassoVertices, width: layerStack.width, height: layerStack.height)
             applyCombinedSelection(newMask, mode: lassoCombineMode)
             onEditCompleted?("選択範囲")
+            return
+        }
+        if activeTool == .gradient {
+            defer {
+                gradientDragStart = nil
+                gradientDragCurrent = nil
+                needsDisplay = true
+            }
+            guard let start = gradientDragStart, let current = gradientDragCurrent else { return }
+            let p0 = CanvasView.pixelCoordinate(forPoint: start, zoomScale: zoomScale)
+            let p1 = CanvasView.pixelCoordinate(forPoint: current, zoomScale: zoomScale)
+            layerStack.activeLayer.canvas.applyLinearGradient(
+                from: p0,
+                to: p1,
+                startColor: foregroundColor,
+                endColor: backgroundColor,
+                mask: selection
+            )
+            onLayerContentChanged?()
+            onEditCompleted?("グラデーション")
             return
         }
         if activeTool == .text {

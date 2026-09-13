@@ -2140,6 +2140,59 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(labels, ["塗りつぶし"])
     }
 
+    // MARK: - Gradient tool (issue #41)
+
+    func testGradientTool_dragAppliesForegroundToBackgroundGradientOnMouseUp() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 1, zoomScale: zoomScale)
+        view.activeTool = .gradient
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 0, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: 3, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        XCTAssertEqual(contentChangedCount, 0, "dragging only updates the preview; pixels land on mouseUp")
+
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 0)?.r, 255)
+        XCTAssertEqual(contentChangedCount, 1)
+        XCTAssertEqual(labels, ["グラデーション"])
+    }
+
+    func testGradientTool_selectionRestrictsGradientWrites() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 4, height: 1, zoomScale: zoomScale)
+        view.activeTool = .gradient
+        view.selection = SelectionMask.rectangle(x0: 1, y0: 0, x1: 2, y1: 0, width: 4, height: 1)
+        view.foregroundColor = .black
+        view.backgroundColor = .white
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 0, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: 3, row: 0, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 255, "outside the selection must stay untouched")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 0)?.r, 255, "outside the selection must stay untouched")
+    }
+
     // MARK: - Selection combine modes: decision table (issue #11 test-authoring pass)
     //
     // Exercised through the rectangle-select tool's drag gesture (mouseDown

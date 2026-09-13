@@ -6,7 +6,7 @@ import Foundation
 /// model (issue #5).
 ///
 /// `pencil`, `eraser`, `pen`, `eyedropper`, `magnifier`, the five selection
-/// tools, `crop`, `bucketFill`, and `text` are wired to real behavior so far;
+/// tools, `crop`, `bucketFill`, `gradient`, and `text` are wired to real behavior so far;
 /// `ToolboxView`'s other 7 buttons stay purely visual placeholders until
 /// their own issues give them real tool implementations.
 enum Tool {
@@ -70,6 +70,11 @@ enum Tool {
     /// the whole gesture: no drag/multi-click state of its own. See
     /// `CanvasView`'s `mouseDown` handling.
     case bucketFill
+    /// Drags from a start pixel to an end pixel and fills the active layer
+    /// with a straight-line foreground-to-background gradient (issue #41).
+    /// A selection restricts the write the same way it does for pencil,
+    /// bucket fill, text rasterization, and image adjustments.
+    case gradient
     /// Clicks a canvas position and opens an editable text overlay there
     /// instead of painting (issue #42; was `nil`/disabled-placeholder under
     /// issue #43) — `TextToolSettings` on `CanvasView` holds the font/size/

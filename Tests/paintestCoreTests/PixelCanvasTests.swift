@@ -241,6 +241,42 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
     }
 
+    // MARK: - Linear gradient (issue #41)
+
+    func testApplyLinearGradient_horizontal_interpolatesStartToEndColor() {
+        let canvas = PixelCanvas(width: 4, height: 1, background: .white)
+
+        canvas.applyLinearGradient(
+            from: (x: 0, y: 0),
+            to: (x: 3, y: 0),
+            startColor: .black,
+            endColor: .white
+        )
+
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 0)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 0)?.r, 255)
+    }
+
+    func testApplyLinearGradient_selectionMaskRestrictsWrites() {
+        let canvas = PixelCanvas(width: 4, height: 2, background: .white)
+        let mask = SelectionMask.rectangle(x0: 1, y0: 0, x1: 2, y1: 1, width: 4, height: 2)
+
+        canvas.applyLinearGradient(
+            from: (x: 0, y: 0),
+            to: (x: 3, y: 0),
+            startColor: .black,
+            endColor: .white,
+            mask: mask
+        )
+
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.r, 255, "outside the selection must stay untouched")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 0)?.r, 85)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 1)?.r, 170)
+        XCTAssertEqual(canvas.rawPixel(x: 3, y: 1)?.r, 255, "outside the selection must stay untouched")
+    }
+
     func testDrawAntialiasedDot_centeredOffCanvasEdge_doesNotCrashAndClipsToCanvas() {
         let canvas = PixelCanvas(width: 10, height: 10, background: .white)
 
