@@ -1526,6 +1526,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         currentColorIndicator.onResetToDefaultTapped = { [weak self] in
             self?.resetColorsToDefault()
         }
+
+        // X/D keyboard shortcuts (issue #53) — `CanvasView.keyDown` fires
+        // these two callbacks instead of mutating its own color copies
+        // directly, so the swap/reset goes through the same single path
+        // (`swapColors()`/`resetColorsToDefault()`) that keeps this
+        // delegate's `foregroundColor`/`backgroundColor`, `canvasView`'s,
+        // and `currentColorIndicator`'s all in sync, the same way
+        // `setColor(_:secondary:)` above does for every other color entry
+        // point (palette click, picker dialog, eyedropper).
+        canvasView.onSwapColorsRequested = { [weak self] in
+            self?.swapColors()
+        }
+        canvasView.onResetColorsRequested = { [weak self] in
+            self?.resetColorsToDefault()
+        }
     }
 
     /// Updates the foreground (`secondary == false`) or background
@@ -1620,6 +1635,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         default:
             optionBarView.clear()
         }
+    }
+
+    /// Swaps foreground and background (issue #53's `X` shortcut), the
+    /// classic Paint/Photoshop convention. Deliberately does not touch
+    /// `recentColors` — swapping two colors that are already in play isn't
+    /// "using" a new color the way picking one from the picker or palette
+    /// is, the same reasoning `resetColorsToDefault()` below documents.
+    private func swapColors() {
+        let swapped = backgroundColor
+        backgroundColor = foregroundColor
+        foregroundColor = swapped
+        canvasView.foregroundColor = foregroundColor
+        canvasView.backgroundColor = backgroundColor
+        currentColorIndicator.foregroundColor = foregroundColor
+        currentColorIndicator.backgroundColor = backgroundColor
+        currentColorIndicator.needsDisplay = true
     }
 
     /// Restores foreground/background to classic Paint's black/white

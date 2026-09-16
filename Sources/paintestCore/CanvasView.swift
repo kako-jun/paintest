@@ -61,6 +61,21 @@ final class CanvasView: NSView {
     /// the foreground color.
     var onColorPicked: ((NSColor, _ isSecondary: Bool) -> Void)?
 
+    /// Fired by the `X` keyboard shortcut (issue #53) — swaps the current
+    /// foreground and background colors, the classic Paint/Photoshop
+    /// convention. `AppDelegate` owns the actual foreground/background
+    /// state (see its `wireColorAndToolCallbacks()` doc comment), so this
+    /// just requests the swap the same way `onColorPicked` requests a
+    /// color change, rather than `CanvasView` mutating its own
+    /// `foregroundColor`/`backgroundColor` copies directly and leaving
+    /// `AppDelegate`/`currentColorIndicator` out of sync.
+    var onSwapColorsRequested: (() -> Void)?
+    /// Fired by the `D` keyboard shortcut (issue #53) — requests resetting
+    /// foreground/background to the classic black/white default, the
+    /// keyboard equivalent of `currentColorIndicator.onResetToDefaultTapped`
+    /// (`AppDelegate.resetColorsToDefault()`).
+    var onResetColorsRequested: (() -> Void)?
+
     /// Fired once a single editing gesture actually completes with the
     /// content changed (issue #19): a pencil/eraser/pen stroke's `mouseUp`
     /// (only if that stroke actually called `paint`/`paintLine` — see
@@ -2270,6 +2285,44 @@ final class CanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        // Foreground/background color shortcuts (issue #53): `X` swaps
+        // foreground and background, `D` resets to the classic black/white
+        // default. Checked first, ahead of every tool/gesture-specific
+        // branch below, because — like the `NSColorPanel`'s own keyboard
+        // conventions — these aren't gated on which tool is active or
+        // whether a gesture (layer transform/crop/polygon) is mid-flight;
+        // neither keyCode collides with any of Return/keypad Enter/Escape
+        // (36/76/53) those branches watch for. The text tool's overlay
+        // editor (`textEditor`) is a real `NSTextView` that takes first
+        // responder for itself while editing text (see its doc comment on
+        // `textEditor`/`window?.makeFirstResponder(editor)`), so this
+        // `keyDown` override — and these two cases with it — simply never
+        // fires while text entry is in progress; X/D typed into the text
+        // overlay go straight to the `NSTextView` as ordinary characters.
+        //
+        // Gated on no modifier keys being held (issue #53 independent
+        // review, must-1): the "切り取り" (Cut) menu item is still a
+        // placeholder (`action: nil`), so without this guard Cmd+X falls
+        // straight through the responder chain to this `keyDown` and gets
+        // misread as the bare `X` shortcut, swapping colors as an
+        // unintended side effect of a keyboard-shortcut Cut attempt. `D`
+        // has no such live bug today — Cmd+D is already claimed by
+        // "選択を解除" (Deselect), which intercepts it before `CanvasView`
+        // ever sees the event — but the same guard is applied to both for
+        // symmetry and to fail safe if that menu wiring ever changes.
+        let hasNoModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+        if hasNoModifiers {
+            switch event.keyCode {
+            case 7: // X
+                onSwapColorsRequested?()
+                return
+            case 2: // D
+                onResetColorsRequested?()
+                return
+            default:
+                break
+            }
+        }
         // Layer transform mode (issue #9) takes priority over every other
         // key handling below, the same way it preempts `mouseDown`/
         // `mouseDragged`/`mouseUp` — see `activeTransform`'s doc comment.
