@@ -580,7 +580,7 @@ final class CanvasView: NSView {
         return fitting.max() ?? levels.first ?? 1
     }
 
-    /// "ウィンドウに合わせる" (Cmd+0, issue #55): zooms to the largest level at
+    /// "ウインドウに合わせる" (Cmd+0, issue #55): zooms to the largest level at
     /// which the *whole canvas* fits inside the current viewport, reusing
     /// the magnifier drag-to-zoom's own `bestFitZoomLevel(forPixelSize:
     /// viewportSize:levels:)` (issue #13) with the canvas's full pixel size

@@ -685,13 +685,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ], placeholders: ["切り取り", "コピー", "貼り付け"])
         mainMenu.addItem(editMenuItem)
 
-        // "ウィンドウに合わせる"/"実寸表示" (Cmd+0/Cmd+1, issue #55): one-shot
+        // "ウインドウに合わせる"/"実寸表示" (Cmd+0/Cmd+1, issue #55): one-shot
         // zoom-to-fit and zoom-to-100% commands, alongside the existing
-        // step-by-step 拡大/縮小 pair from #2.
+        // step-by-step 拡大/縮小 pair from #2. "ウインドウ" (not "ウィンドウ")
+        // to match the existing top-level "ウインドウ" menu's spelling below.
         mainMenu.addItem(makeMenuItem(title: "表示", items: [
             ("拡大", #selector(zoomIn), "+"),
             ("縮小", #selector(zoomOut), "-"),
-            ("ウィンドウに合わせる", #selector(zoomToFit), "0"),
+            ("ウインドウに合わせる", #selector(zoomToFit), "0"),
             ("実寸表示", #selector(zoomToActualSize), "1")
         ], placeholders: ["ツール バー", "カラー ボックス", "ステータス バー"]))
 
