@@ -685,9 +685,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ], placeholders: ["切り取り", "コピー", "貼り付け"])
         mainMenu.addItem(editMenuItem)
 
+        // "ウインドウに合わせる"/"実寸表示" (Cmd+0/Cmd+1, issue #55): one-shot
+        // zoom-to-fit and zoom-to-100% commands, alongside the existing
+        // step-by-step 拡大/縮小 pair from #2. "ウインドウ" (not "ウィンドウ")
+        // to match the existing top-level "ウインドウ" menu's spelling below.
         mainMenu.addItem(makeMenuItem(title: "表示", items: [
             ("拡大", #selector(zoomIn), "+"),
-            ("縮小", #selector(zoomOut), "-")
+            ("縮小", #selector(zoomOut), "-"),
+            ("ウインドウに合わせる", #selector(zoomToFit), "0"),
+            ("実寸表示", #selector(zoomToActualSize), "1")
         ], placeholders: ["ツール バー", "カラー ボックス", "ステータス バー"]))
 
         // "色" (issue #2's standalone Colors menu) is folded into "イメージ"
@@ -1278,6 +1284,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func zoomOut() {
         canvasView.zoomOut()
+    }
+
+    @objc private func zoomToFit() {
+        canvasView.zoomToFit()
+    }
+
+    @objc private func zoomToActualSize() {
+        canvasView.zoomToActualSize()
     }
 
     /// "レイヤー" > "自由変形" (Cmd+T, issue #9 round 1: move + scale only —

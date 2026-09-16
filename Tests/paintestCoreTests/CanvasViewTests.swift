@@ -654,6 +654,97 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(level, 8, "with only one level offered, it must be returned even when it doesn't fit")
     }
 
+    // MARK: - zoomToFit()/zoomToActualSize() — one-shot zoom commands (issue #55)
+    //
+    // Both reuse already-covered pure functions (`bestFitZoomLevel` above /
+    // `setZoomScale` in the section above that), so these tests exercise the
+    // wiring — which viewport size feeds the calculation, and that neither
+    // method crashes without an enclosing `NSScrollView` (`centerScroll
+    // (onPixelPoint:)` silently no-ops in that case, the same as the
+    // magnifier's own drag-to-zoom tests above already establish).
+
+    func testZoomToFit_noViewportAvailable_fallsBackToSmallestLevel() {
+        let view = makeView() // frame .zero, no NSScrollView ancestor -> bounds.size is .zero
+        XCTAssertEqual(view.zoomScale, 4, "precondition: default zoom")
+
+        view.zoomToFit()
+
+        XCTAssertEqual(view.zoomScale, 1, "with no usable viewport size, bestFitZoomLevel's own fallback (levels.first) applies")
+    }
+
+    func testZoomToFit_viewportSizeAvailable_picksLargestLevelThatFitsTheWholeCanvas() {
+        let view = makeView() // 8x8 canvas
+        view.frame = NSRect(x: 0, y: 0, width: 70, height: 70) // no enclosing scroll view -> falls back to `bounds.size`
+        view.zoomOut() // 4 -> 2
+        view.zoomOut() // 2 -> 1
+        XCTAssertEqual(view.zoomScale, 1, "precondition: driven down to the floor")
+
+        view.zoomToFit()
+
+        // 8x8 canvas in a 70x70 viewport: level 8 -> 64x64 fits, level 16 -> 128x128 does not.
+        XCTAssertEqual(view.zoomScale, 8, "must pick the largest zoomLevels entry whose full canvas size still fits the viewport")
+    }
+
+    func testZoomToFit_alreadyAtBestFitLevel_isANoOp() {
+        let view = makeView() // 8x8 canvas, default zoomScale 4
+        view.frame = NSRect(x: 0, y: 0, width: 40, height: 40) // 8*4 == 32 fits, 8*8 == 64 does not
+
+        view.zoomToFit()
+
+        XCTAssertEqual(view.zoomScale, 4, "already at the best-fit level, so it must stay put rather than change")
+    }
+
+    func testZoomToFit_withNoEnclosingScrollView_doesNotCrash() {
+        let view = makeView()
+        XCTAssertNil(view.enclosingScrollView, "precondition: no NSScrollView ancestor")
+
+        view.zoomToFit()
+
+        XCTAssertEqual(view.zoomScale, 1, "must still resolve zoomScale (to the fallback level) without crashing on the missing scroll view")
+    }
+
+    func testZoomToActualSize_fromAZoomedInLevel_setsZoomScaleTo1() {
+        let view = makeView()
+        view.zoomIn() // 4 -> 8
+        view.zoomIn() // 8 -> 16
+        XCTAssertEqual(view.zoomScale, 16, "precondition: zoomed in")
+
+        view.zoomToActualSize()
+
+        XCTAssertEqual(view.zoomScale, 1)
+    }
+
+    func testZoomToActualSize_fromAZoomedOutLevel_setsZoomScaleTo1() {
+        let view = makeView()
+        view.zoomOut() // 4 -> 2
+        XCTAssertEqual(view.zoomScale, 2, "precondition: zoomed out")
+
+        view.zoomToActualSize()
+
+        XCTAssertEqual(view.zoomScale, 1)
+    }
+
+    func testZoomToActualSize_alreadyAt1_staysAt1() {
+        let view = makeView()
+        view.zoomOut() // 4 -> 2
+        view.zoomOut() // 2 -> 1
+        XCTAssertEqual(view.zoomScale, 1, "precondition: driven down to the floor")
+
+        view.zoomToActualSize()
+
+        XCTAssertEqual(view.zoomScale, 1)
+    }
+
+    func testZoomToActualSize_withNoEnclosingScrollView_doesNotCrash() {
+        let view = makeView()
+        XCTAssertNil(view.enclosingScrollView, "precondition: no NSScrollView ancestor")
+        view.zoomIn() // 4 -> 8
+
+        view.zoomToActualSize()
+
+        XCTAssertEqual(view.zoomScale, 1, "must still set zoomScale without crashing on the missing scroll view")
+    }
+
     // MARK: - mouseDown routes to the active layer only (test list 44-45)
     //
     // Driving `mouseDown(with:)` for real requires an actual `NSEvent` and
