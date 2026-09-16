@@ -2299,15 +2299,29 @@ final class CanvasView: NSView {
         // `keyDown` override — and these two cases with it — simply never
         // fires while text entry is in progress; X/D typed into the text
         // overlay go straight to the `NSTextView` as ordinary characters.
-        switch event.keyCode {
-        case 7: // X
-            onSwapColorsRequested?()
-            return
-        case 2: // D
-            onResetColorsRequested?()
-            return
-        default:
-            break
+        //
+        // Gated on no modifier keys being held (issue #53 independent
+        // review, must-1): the "切り取り" (Cut) menu item is still a
+        // placeholder (`action: nil`), so without this guard Cmd+X falls
+        // straight through the responder chain to this `keyDown` and gets
+        // misread as the bare `X` shortcut, swapping colors as an
+        // unintended side effect of a keyboard-shortcut Cut attempt. `D`
+        // has no such live bug today — Cmd+D is already claimed by
+        // "選択を解除" (Deselect), which intercepts it before `CanvasView`
+        // ever sees the event — but the same guard is applied to both for
+        // symmetry and to fail safe if that menu wiring ever changes.
+        let hasNoModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+        if hasNoModifiers {
+            switch event.keyCode {
+            case 7: // X
+                onSwapColorsRequested?()
+                return
+            case 2: // D
+                onResetColorsRequested?()
+                return
+            default:
+                break
+            }
         }
         // Layer transform mode (issue #9) takes priority over every other
         // key handling below, the same way it preempts `mouseDown`/

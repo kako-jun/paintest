@@ -1844,11 +1844,11 @@ final class CanvasViewTests: XCTestCase {
     // mouseDragged/mouseUp entry points as the pencil/eraser/pen/eyedropper/
     // magnifier tests above, using the same off-screen-window helpers.
 
-    private func keyDownEvent(keyCode: UInt16, in window: NSWindow) -> NSEvent {
+    private func keyDownEvent(keyCode: UInt16, in window: NSWindow, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
         NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
-            modifierFlags: [],
+            modifierFlags: modifierFlags,
             timestamp: 0,
             windowNumber: window.windowNumber,
             context: nil,
@@ -1929,6 +1929,44 @@ final class CanvasViewTests: XCTestCase {
 
         XCTAssertEqual(swapCount, 0)
         XCTAssertEqual(resetCount, 0)
+    }
+
+    /// Regression test for issue #53's independent review (must-1): the
+    /// "切り取り" (Cut) menu item is still a placeholder with no `action`,
+    /// so without a modifier-flags guard in `keyDown`, Cmd+X used to fall
+    /// straight through to the bare-`X` swap-colors branch — an
+    /// unintended side effect for anyone reaching for Cut. Command,
+    /// Option, and Control are each tested individually since any one of
+    /// them held down must suppress the shortcut.
+    func testKeyDown_xKey_withCommandOptionOrControlHeld_doesNotFireOnSwapColorsRequested() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        let window = view.window!
+        var swapCount = 0
+        view.onSwapColorsRequested = { swapCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 7, in: window, modifierFlags: [.command])) // Cmd+X
+        view.keyDown(with: keyDownEvent(keyCode: 7, in: window, modifierFlags: [.option])) // Option+X
+        view.keyDown(with: keyDownEvent(keyCode: 7, in: window, modifierFlags: [.control])) // Control+X
+
+        XCTAssertEqual(swapCount, 0, "a modified X must not be misread as the bare-X swap-colors shortcut")
+    }
+
+    /// Same guard, applied to `D` for symmetry (issue #53 review must-1) —
+    /// Cmd+D is already claimed by "選択を解除" (Deselect) today, so this
+    /// isn't a live bug the way Cmd+X was, but the fix guards both keys
+    /// identically rather than leaving `D` exposed if that menu wiring
+    /// ever changes.
+    func testKeyDown_dKey_withCommandOptionOrControlHeld_doesNotFireOnResetColorsRequested() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        let window = view.window!
+        var resetCount = 0
+        view.onResetColorsRequested = { resetCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 2, in: window, modifierFlags: [.command])) // Cmd+D
+        view.keyDown(with: keyDownEvent(keyCode: 2, in: window, modifierFlags: [.option])) // Option+D
+        view.keyDown(with: keyDownEvent(keyCode: 2, in: window, modifierFlags: [.control])) // Control+D
+
+        XCTAssertEqual(resetCount, 0, "a modified D must not be misread as the bare-D reset-colors shortcut")
     }
 
     func testMouseDown_rectangleSelect_dragThenUp_confirmsRectangleSelection() {
