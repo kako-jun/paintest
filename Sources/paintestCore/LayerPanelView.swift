@@ -4,11 +4,83 @@ import AppKit
 /// the layer's name, with a click-anywhere-on-the-row selection gesture
 /// (the checkbox itself intercepts its own clicks, so clicking it toggles
 /// visibility without also selecting the row).
+///
+/// Also drives drag-and-drop reordering (issue #54): `mouseDown` still
+/// selects the row immediately, same as before dragging existed — this
+/// matches Finder's own list behavior (starting a drag on an unselected row
+/// selects it first) and, just as importantly, keeps every existing
+/// mouseDown-only test in `LayerPanelViewTests` passing unchanged.
+/// `mouseDragged` only starts reporting a drag once the pointer has moved
+/// past `dragThreshold`, so ordinary select-clicks (which always wobble a
+/// pixel or two) never get mistaken for a reorder drag.
 private final class LayerRowView: NSView {
     var onSelectRow: (() -> Void)?
+    /// Fired on every `mouseDragged` once the gesture has moved past
+    /// `dragThreshold`. `pointInRowsStack` is the pointer's current location
+    /// converted into this row's superview's coordinate space — always
+    /// `LayerPanelView.rowsStack`, since every row is one of its arranged
+    /// subviews — which is exactly what `LayerPanelView.layerIndex(forDropAt:)`
+    /// expects, so this view doesn't need to know anything about
+    /// `LayerPanelView` itself.
+    var onRowDragged: ((NSPoint) -> Void)?
+    /// Fired once, on `mouseUp`, but only if this gesture actually turned
+    /// into a drag (`onRowDragged` fired at least once). A plain click
+    /// (no drag past the threshold) does NOT call this — only `onSelectRow`,
+    /// already fired back on `mouseDown`, applies to it.
+    var onRowDragEnded: ((NSPoint) -> Void)?
+
+    private var mouseDownLocation: NSPoint?
+    private var isDragging = false
+    /// This row's superview (`LayerPanelView.rowsStack`) captured at
+    /// `mouseDown`, *before* `onSelectRow` runs. `onSelectRow` leads to
+    /// `LayerPanelView.selectLayer(at:)`, which unconditionally calls
+    /// `reload()` — even when clicking the already-active row — and
+    /// `reload()` tears down and rebuilds every row view from scratch,
+    /// including this one, detaching it from the view hierarchy
+    /// (`self.superview`/`self.window` both go `nil`). Reading
+    /// `self.superview` directly inside a later `mouseDragged`/`mouseUp`
+    /// would therefore always see `nil` and silently drop the whole drag —
+    /// this capture is what lets a reorder drag survive the row it started
+    /// on being rebuilt out from under it. `rowsStack` itself is a stable
+    /// property of `LayerPanelView`, never recreated by `reload()`, so the
+    /// captured reference stays valid (and is the right coordinate space
+    /// for `LayerPanelView.layerIndex(forDropAt:)`) for the rest of the
+    /// gesture. `weak` since this row doesn't need to keep `rowsStack`
+    /// alive on its own.
+    private weak var dragCoordinateSpace: NSView?
+    /// Minimum mouse movement, in points, before a mouseDown/mouseDragged
+    /// sequence counts as an intentional reorder drag rather than the few
+    /// pixels of hand tremor an ordinary select-click always has.
+    private static let dragThreshold: CGFloat = 4
 
     override func mouseDown(with event: NSEvent) {
+        dragCoordinateSpace = superview
+        mouseDownLocation = event.locationInWindow
+        isDragging = false
         onSelectRow?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = mouseDownLocation else { return }
+        let location = event.locationInWindow
+        if !isDragging {
+            let dx = location.x - start.x
+            let dy = location.y - start.y
+            guard (dx * dx + dy * dy).squareRoot() > Self.dragThreshold else { return }
+            isDragging = true
+        }
+        guard let coordinateSpace = dragCoordinateSpace else { return }
+        onRowDragged?(coordinateSpace.convert(location, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer {
+            mouseDownLocation = nil
+            isDragging = false
+            dragCoordinateSpace = nil
+        }
+        guard isDragging, let coordinateSpace = dragCoordinateSpace else { return }
+        onRowDragEnded?(coordinateSpace.convert(event.locationInWindow, from: nil))
     }
 }
 
@@ -83,6 +155,18 @@ final class LayerPanelView: NSView {
     private static let thumbnailSide: CGFloat = 28
     private static let selectedRowColor = NSColor.selectedControlColor
     private static let panelPadding: CGFloat = 6
+    /// Highlight color for whichever row a drag-reorder gesture is
+    /// currently hovering over (issue #54) — distinct from
+    /// `selectedRowColor` so a drag hovering over a *different* row than
+    /// the active layer's own row is still visibly distinguishable from it.
+    private static let dropTargetRowColor = NSColor.controlAccentColor.withAlphaComponent(0.35)
+
+    /// The `layerStack.layers` index of whichever row a drag-reorder
+    /// gesture (issue #54) is currently hovering over, or `nil` when no
+    /// drag is in progress. Purely a highlight/redraw concern —
+    /// `layerStack` itself isn't touched until `finishDrag(sourceLayerIndex:
+    /// droppedAt:)` actually commits the move on `mouseUp`.
+    private var dragHoverLayerIndex: Int?
 
     init(layerStack: LayerStack) {
         self.layerStack = layerStack
@@ -305,9 +389,19 @@ final class LayerPanelView: NSView {
 
         let row = LayerRowView()
         row.wantsLayer = true
-        row.layer?.backgroundColor = isActive ? Self.selectedRowColor.cgColor : NSColor.clear.cgColor
+        row.layer?.backgroundColor = rowBackgroundColor(forLayerIndex: index, isActive: isActive)
         row.onSelectRow = { [weak self] in
             self?.selectLayer(at: index)
+        }
+        // Issue #54: drag-and-drop reordering. `index` here is already this
+        // row's `layerStack.layers` index (not the reversed display index
+        // `reload()` iterates over), so it can be passed straight to
+        // `LayerStack.moveLayer(from:to:)` without any further translation.
+        row.onRowDragged = { [weak self] pointInRowsStack in
+            self?.updateDropIndicator(sourceLayerIndex: index, hoveringAt: pointInRowsStack)
+        }
+        row.onRowDragEnded = { [weak self] pointInRowsStack in
+            self?.finishDrag(sourceLayerIndex: index, droppedAt: pointInRowsStack)
         }
         row.translatesAutoresizingMaskIntoConstraints = false
 
@@ -344,6 +438,99 @@ final class LayerPanelView: NSView {
         ])
 
         return row
+    }
+
+    /// A row's background color: the drag-reorder drop-target tint takes
+    /// priority over the plain "this is the active layer" highlight, so a
+    /// drag hovering over a non-active row is still visibly distinguishable
+    /// from the active layer's own (unrelated) highlight.
+    private func rowBackgroundColor(forLayerIndex index: Int, isActive: Bool) -> CGColor {
+        if index == dragHoverLayerIndex {
+            return Self.dropTargetRowColor.cgColor
+        }
+        return isActive ? Self.selectedRowColor.cgColor : NSColor.clear.cgColor
+    }
+
+    // MARK: - Drag-and-drop reordering (issue #54)
+    //
+    // `LayerRowView` handles the raw mouse tracking (drag threshold,
+    // click-vs-drag disambiguation) and hands back a point already
+    // converted into `rowsStack`'s coordinate space; everything below only
+    // has to turn that point into "which layer index is this over" and, on
+    // drop, call the same `LayerStack.moveLayer(from:to:)` the "上へ"/"下へ"
+    // buttons already use.
+
+    /// Maps a point in `rowsStack`'s coordinate space to the
+    /// `layerStack.layers` index of whichever row's vertical center is
+    /// closest to it — i.e. which row the pointer is currently "over".
+    /// Returns `nil` only if `rowsStack` has no rows at all, which never
+    /// actually happens (a `LayerStack` always has at least one layer).
+    private func layerIndex(forDropAt pointInRowsStack: NSPoint) -> Int? {
+        // A drag gesture's very first `mouseDown` selects its row (see
+        // `LayerRowView.mouseDown`), and selecting a row calls `reload()`
+        // even when it was already the active one — which tears down and
+        // rebuilds every row view, leaving the fresh replacements with a
+        // stale/zero `frame` until Auto Layout actually runs again. AppKit
+        // normally catches up on its own between real, human-paced mouse
+        // events, but forcing it here removes any dependency on that
+        // timing — this always sees each row's true current position, not
+        // whatever it happened to be at before the last layout pass.
+        rowsStack.layoutSubtreeIfNeeded()
+
+        let displayOrder = Array(layerStack.layers.indices.reversed())
+        let rowViews = rowsStack.arrangedSubviews
+        guard !rowViews.isEmpty, rowViews.count == displayOrder.count else { return nil }
+
+        var closestDisplayIndex = 0
+        var closestDistance = CGFloat.greatestFiniteMagnitude
+        for (displayIndex, rowView) in rowViews.enumerated() {
+            let distance = abs(pointInRowsStack.y - rowView.frame.midY)
+            if distance < closestDistance {
+                closestDistance = distance
+                closestDisplayIndex = displayIndex
+            }
+        }
+        return displayOrder[closestDisplayIndex]
+    }
+
+    /// Re-applies every row's background color from `rowBackgroundColor
+    /// (forLayerIndex:isActive:)` without rebuilding the row list —
+    /// `reload()` would be wasteful on every single `mouseDragged` tick
+    /// (and, worse, would tear down the very row view the drag gesture is
+    /// currently running on, killing the gesture mid-drag).
+    private func applyRowHighlights() {
+        let displayOrder = Array(layerStack.layers.indices.reversed())
+        for (displayIndex, rowView) in rowsStack.arrangedSubviews.enumerated() where displayIndex < displayOrder.count {
+            let layerIndex = displayOrder[displayIndex]
+            rowView.layer?.backgroundColor = rowBackgroundColor(forLayerIndex: layerIndex, isActive: layerIndex == layerStack.activeLayerIndex)
+        }
+    }
+
+    /// Called on every `LayerRowView.onRowDragged` while a reorder drag is
+    /// in progress. Only updates the drop-target highlight — `layerStack`
+    /// itself is untouched until the drag actually ends.
+    private func updateDropIndicator(sourceLayerIndex: Int, hoveringAt pointInRowsStack: NSPoint) {
+        guard let targetIndex = layerIndex(forDropAt: pointInRowsStack), targetIndex != dragHoverLayerIndex else { return }
+        dragHoverLayerIndex = targetIndex
+        applyRowHighlights()
+    }
+
+    /// Called on `LayerRowView.onRowDragEnded` — the gesture's actual drop.
+    /// Moves `sourceLayerIndex` to wherever the pointer was released, via
+    /// the same `LayerStack.moveLayer(from:to:)` the "上へ"/"下へ" buttons
+    /// already call. A drop back onto the dragged row's own position (or
+    /// anywhere `layerIndex(forDropAt:)` can't resolve) is a no-op: nothing
+    /// actually moved, so no `reload()`/`onChange` — just clears the
+    /// leftover highlight.
+    private func finishDrag(sourceLayerIndex: Int, droppedAt pointInRowsStack: NSPoint) {
+        dragHoverLayerIndex = nil
+        guard let targetIndex = layerIndex(forDropAt: pointInRowsStack), targetIndex != sourceLayerIndex else {
+            applyRowHighlights()
+            return
+        }
+        layerStack.moveLayer(from: sourceLayerIndex, to: targetIndex)
+        reload()
+        onChange?()
     }
 
     private func selectLayer(at index: Int) {
