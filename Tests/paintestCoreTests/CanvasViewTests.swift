@@ -1859,6 +1859,78 @@ final class CanvasViewTests: XCTestCase {
         )!
     }
 
+    // MARK: - Foreground/background keyboard shortcuts (issue #53)
+
+    func testKeyDown_xKey_firesOnSwapColorsRequested() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        let window = view.window!
+        var fireCount = 0
+        view.onSwapColorsRequested = { fireCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 7, in: window)) // X
+
+        XCTAssertEqual(fireCount, 1, "X should fire onSwapColorsRequested exactly once")
+    }
+
+    func testKeyDown_dKey_firesOnResetColorsRequested() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        let window = view.window!
+        var fireCount = 0
+        view.onResetColorsRequested = { fireCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 2, in: window)) // D
+
+        XCTAssertEqual(fireCount, 1, "D should fire onResetColorsRequested exactly once")
+    }
+
+    func testKeyDown_xKey_doesNotAlsoFireOnResetColorsRequested_andViceVersa() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        let window = view.window!
+        var swapCount = 0
+        var resetCount = 0
+        view.onSwapColorsRequested = { swapCount += 1 }
+        view.onResetColorsRequested = { resetCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 7, in: window)) // X
+        view.keyDown(with: keyDownEvent(keyCode: 2, in: window)) // D
+
+        XCTAssertEqual(swapCount, 1)
+        XCTAssertEqual(resetCount, 1)
+    }
+
+    func testKeyDown_xAndDKeys_fireRegardlessOfActiveTool_notJustPencil() {
+        // The eyedropper is an arbitrary non-default tool — picked to prove
+        // the X/D handling in `keyDown` isn't gated on `activeTool` the way
+        // the polygon-select Escape/Return handling further down is.
+        let view = makeViewInWindow(width: 8, height: 8)
+        let window = view.window!
+        view.activeTool = .eyedropper
+        var swapCount = 0
+        var resetCount = 0
+        view.onSwapColorsRequested = { swapCount += 1 }
+        view.onResetColorsRequested = { resetCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 7, in: window)) // X
+        view.keyDown(with: keyDownEvent(keyCode: 2, in: window)) // D
+
+        XCTAssertEqual(swapCount, 1)
+        XCTAssertEqual(resetCount, 1)
+    }
+
+    func testKeyDown_otherLetterKeys_doNotFireSwapOrReset() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        let window = view.window!
+        var swapCount = 0
+        var resetCount = 0
+        view.onSwapColorsRequested = { swapCount += 1 }
+        view.onResetColorsRequested = { resetCount += 1 }
+
+        view.keyDown(with: keyDownEvent(keyCode: 0, in: window)) // A
+
+        XCTAssertEqual(swapCount, 0)
+        XCTAssertEqual(resetCount, 0)
+    }
+
     func testMouseDown_rectangleSelect_dragThenUp_confirmsRectangleSelection() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
