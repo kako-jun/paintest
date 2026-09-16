@@ -28,6 +28,12 @@ swift build
 swift run
 ```
 
+コマンドライン引数でファイルパスを渡すと、起動時にそのファイルを開いた状態で立ち上がる（PNG/`.paintestdoc`両対応、#72）:
+
+```bash
+.build/debug/paintest /path/to/image.png
+```
+
 ## テスト
 
 ```bash

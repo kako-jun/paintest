@@ -8,15 +8,25 @@ import UniformTypeIdentifiers
 /// Keeping this as a plain function (not top-level code in a `main.swift`)
 /// also means the `paintestTests` target can `@testable import paintestCore`
 /// without inadvertently launching the app's run loop.
-public func runPaintestApp() {
+///
+/// `initialFileURL` (issue #72) lets `main.swift` forward a command-line
+/// argument — `paintest <path>` opens that file at launch instead of the
+/// usual blank "untitled" canvas. `AppDelegate.applicationDidFinishLaunching`
+/// loads it through the exact same `openDocument(from:)` used by "開く…"/
+/// drag-and-drop, so a missing/unreadable file falls back to the blank
+/// canvas plus an error alert rather than crashing.
+public func runPaintestApp(initialFileURL: URL? = nil) {
     let app = NSApplication.shared
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(initialFileURL: initialFileURL)
     app.delegate = delegate
     app.setActivationPolicy(.regular)
     app.run()
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+    // Set from `runPaintestApp(initialFileURL:)` (issue #72); consumed once,
+    // at the end of `applicationDidFinishLaunching`, via `openDocument(from:)`.
+    private let initialFileURL: URL?
     private var window: NSWindow!
     private var canvasView: CanvasView!
     private var scrollView: NSScrollView!
@@ -116,6 +126,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // Thickness of the 1pt divider lines between レイヤー/プロパティ/ヒスト
     // リー (issue #7 self-review must-2).
     private static let panelDividerThickness: CGFloat = 1
+
+    init(initialFileURL: URL? = nil) {
+        self.initialFileURL = initialFileURL
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Classic Paint's chrome (Windows Classic silver/gray) is always a
@@ -257,6 +272,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.makeFirstResponder(canvasView)
 
         NSApp.activate(ignoringOtherApps: true)
+
+        // `paintest <path>` at launch (issue #72): reuse the exact same
+        // `openDocument(from:)` as "開く…"/drag-and-drop, so a missing or
+        // unreadable path shows the same error alert instead of crashing —
+        // `openDocument(from:)` never touches `documentManager` when it
+        // fails, leaving the initial blank "untitled" document from above
+        // as-is. On success it *adds* the loaded file as a second tab (the
+        // same "open never replaces the current tab" behavior as the panel
+        // and drag-and-drop), so the now-redundant blank tab at index 0 is
+        // closed right after — `closeDocument(at:)` only replaces-with-blank
+        // when it's the *last* tab, so with 2 tabs present this really
+        // removes it, leaving just the requested file open.
+        if let initialFileURL {
+            let documentCountBeforeOpen = documentManager.documents.count
+            openDocument(from: initialFileURL)
+            if documentManager.documents.count > documentCountBeforeOpen {
+                documentManager.closeDocument(at: 0)
+                activateActiveDocument()
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
