@@ -1969,6 +1969,140 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(resetCount, 0, "a modified D must not be misread as the bare-D reset-colors shortcut")
     }
 
+    // MARK: - Delete/Backspace clears the selection's contents (issue #57)
+
+    func testKeyDown_deleteKey_withActiveSelection_clearsOnlyTheSelectedPixelsToTransparent() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        let window = view.window!
+        let start = windowPoint(forPixelCol: 2, row: 2, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: start, in: window))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window))
+        let canvasBefore = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvasBefore.rawPixel(x: 3, y: 3)?.a, 255, "precondition: the canvas starts fully opaque (white background)")
+
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window)) // Delete
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 2)?.a, 0, "inside the selection must become transparent")
+        XCTAssertEqual(canvas.rawPixel(x: 4, y: 4)?.a, 0, "inside the selection must become transparent")
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "outside the selection must be left untouched")
+        XCTAssertEqual(canvas.rawPixel(x: 5, y: 5)?.a, 255, "outside the selection must be left untouched")
+    }
+
+    /// Forward Delete (keyCode 117 — a laptop's fn+Delete, or a dedicated
+    /// key on full-size keyboards) is treated identically to the main
+    /// Delete/Backspace key (51).
+    func testKeyDown_forwardDeleteKey_withActiveSelection_alsoClearsToTransparent() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.selection = SelectionMask.rectangle(x0: 1, y0: 1, x1: 2, y1: 2, width: 8, height: 8)
+        let window = view.window!
+
+        view.keyDown(with: keyDownEvent(keyCode: 117, in: window)) // Forward Delete
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.a, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 2, y: 2)?.a, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "outside the selection must be left untouched")
+    }
+
+    /// The recommended, safer default (issue #57): with no active
+    /// selection, Delete does nothing at all rather than clearing the whole
+    /// active layer the way Photoshop itself does in that case — an
+    /// accidental press with no selection visible would otherwise silently
+    /// wipe an entire layer.
+    func testKeyDown_deleteKey_withNoActiveSelection_doesNothing() {
+        let view = makeViewInWindow(width: 4, height: 4)
+        let window = view.window!
+        XCTAssertNil(view.selection, "precondition: no active selection")
+        let canvasBefore = view.layerStack.activeLayer.canvas
+        let before = (0..<4).map { y in (0..<4).map { x in canvasBefore.rawPixel(x: x, y: y)! } }
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window)) // Delete
+
+        let canvasAfter = view.layerStack.activeLayer.canvas
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let actual = canvasAfter.rawPixel(x: x, y: y)
+                XCTAssertEqual(actual?.r, before[y][x].r)
+                XCTAssertEqual(actual?.g, before[y][x].g)
+                XCTAssertEqual(actual?.b, before[y][x].b)
+                XCTAssertEqual(actual?.a, before[y][x].a)
+            }
+        }
+        XCTAssertEqual(contentChangedCount, 0, "no selection means no target, so nothing should be reported as changed")
+        XCTAssertEqual(labels, [], "no selection means nothing should be recorded to History/Undo either")
+    }
+
+    /// `onEditCompleted` is what `AppDelegate` forwards into
+    /// `HistoryManager.record(_:selection:label:)` (see `onEditCompleted`'s
+    /// own doc comment) — firing it here, with a distinct "削除" label like
+    /// every other single-gesture edit (`"塗りつぶし"`, `"変形"`, `"選択範囲"`
+    /// above), is what makes the Delete/Backspace clear undoable through the
+    /// normal History panel/Cmd+Z, not a special case.
+    func testKeyDown_deleteKey_withActiveSelection_firesOnLayerContentChangedAndOnEditCompletedExactlyOnce() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 1, y1: 1, width: 8, height: 8)
+        let window = view.window!
+        var contentChangedCount = 0
+        var labels: [String] = []
+        view.onLayerContentChanged = { contentChangedCount += 1 }
+        view.onEditCompleted = { labels.append($0) }
+
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window)) // Delete
+
+        XCTAssertEqual(contentChangedCount, 1)
+        XCTAssertEqual(labels, ["削除"])
+    }
+
+    /// Regression guard mirroring `testKeyDown_xKey_withCommandOptionOrControlHeld_...`
+    /// above: a modified Delete (e.g. a future Option+Delete "fill with
+    /// background color" shortcut) must not be misread as the bare clear-
+    /// to-transparent shortcut.
+    func testKeyDown_deleteKey_withCommandOptionOrControlHeld_doesNotClearTheSelection() {
+        let view = makeViewInWindow(width: 4, height: 4)
+        view.selection = SelectionMask.rectangle(x0: 0, y0: 0, x1: 3, y1: 3, width: 4, height: 4)
+        let window = view.window!
+
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window, modifierFlags: [.command]))
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window, modifierFlags: [.option]))
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window, modifierFlags: [.control]))
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "a modified Delete must not clear the selection")
+    }
+
+    /// Regression guard for a non-rectangular selection (review should-2):
+    /// `deleteSelectionContents()` scans `selection.boundingBox` for
+    /// performance (same reasoning as `bucketFill` above), but every pixel
+    /// inside that box still goes through `PixelCanvas
+    /// .setPixel(...,mask:selection)`, so a bounding-box corner that sits
+    /// outside the ellipse's own curved boundary must stay untouched — not
+    /// get cleared just because it falls inside the box.
+    func testKeyDown_deleteKey_withEllipseSelection_leavesPixelsInsideTheBoundingBoxButOutsideTheEllipseUntouched() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        view.selection = SelectionMask.ellipse(centerX: 4, centerY: 4, radiusX: 3, radiusY: 3, width: 8, height: 8)
+        let window = view.window!
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 4), "precondition: the ellipse's center is selected")
+        XCTAssertFalse(view.selection!.contains(x: 1, y: 1), "precondition: (1,1) sits inside the ellipse's bounding box but outside its curved boundary")
+        let canvasBefore = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvasBefore.rawPixel(x: 1, y: 1)?.a, 255, "precondition: fully opaque before the delete")
+
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window)) // Delete
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 4, y: 4)?.a, 0, "inside the ellipse itself must become transparent")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.a, 255, "inside the bounding box but outside the ellipse's curve must be left untouched")
+    }
+
     func testMouseDown_rectangleSelect_dragThenUp_confirmsRectangleSelection() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)

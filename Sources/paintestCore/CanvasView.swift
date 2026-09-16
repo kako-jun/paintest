@@ -2539,6 +2539,44 @@ final class CanvasView: NSView {
         onEditCompleted?("選択範囲")
     }
 
+    // MARK: - Delete/clear selection (issue #57)
+
+    /// Clears `selection`'s contents to fully transparent — Delete/
+    /// Backspace's whole gesture (see `keyDown`'s own case for the two
+    /// keyCodes), invoking the "delete = alpha 0" internal data model issue
+    /// #5 already established. Writes alpha 0 into every pixel of the
+    /// active layer's canvas that `selection` contains, via `PixelCanvas
+    /// .setPixel(x:y:color:mask:)`'s existing mask-restricted overload — the
+    /// same masked-write mechanism issue #11's other selection-restricted
+    /// tools (and `bucketFill` above) already use.
+    ///
+    /// A no-op when there's no active selection (`selection == nil`):
+    /// Photoshop itself clears the *whole* active layer in that case, but
+    /// paintest deliberately doesn't mirror that — an accidental Delete
+    /// press with no selection showing would silently wipe an entire layer
+    /// with no visible warning, a far more damaging accident than "nothing
+    /// happened" (issue #57). Undo still covers a real mistake either way,
+    /// but "no selection means no target" is the safer default to fail into.
+    ///
+    /// Scoped to `selection.boundingBox` rather than the whole canvas, same
+    /// "cost proportional to the selected region" reasoning as `bucketFill`'s
+    /// own masked loop above (issue #38). `boundingBox` is only `nil` for an
+    /// empty mask, which `applyCombinedSelection` already normalizes back to
+    /// a `nil` `selection` — so this guard is defensive, not a case that
+    /// arises in practice today.
+    private func deleteSelectionContents() {
+        guard let selection, let box = selection.boundingBox else { return }
+        let canvas = layerStack.activeLayer.canvas
+        for y in box.minY...box.maxY {
+            for x in box.minX...box.maxX {
+                canvas.setPixel(x: x, y: y, color: .clear, mask: selection)
+            }
+        }
+        onLayerContentChanged?()
+        onEditCompleted?("削除")
+        needsDisplay = true
+    }
+
     override func keyDown(with event: NSEvent) {
         // Foreground/background color shortcuts (issue #53): `X` swaps
         // foreground and background, `D` resets to the classic black/white
@@ -2614,6 +2652,26 @@ final class CanvasView: NSView {
             default:
                 super.keyDown(with: event)
             }
+            return
+        }
+        // Delete/Backspace: clears the active selection's contents to
+        // transparent (issue #57) — Photoshop's own "clear selection"
+        // shortcut. `keyCode` 51 is the main keyboard's Delete/Backspace
+        // key; 117 is Forward Delete (a laptop's fn+Delete, or a dedicated
+        // key on full-size keyboards) — both trigger the same clear, same
+        // convention as Photoshop treating the two interchangeably. Gated on
+        // `hasNoModifiers` for the same reason as the `X`/`D` shortcuts
+        // above: leaves room for a future modifier variant (e.g. Option+
+        // Delete's "fill with background color") without this case eating
+        // it first. Checked here — after transform mode and the pending-crop
+        // rectangle above (both of which already returned if active, so
+        // reaching this point means neither is in progress) but ahead of the
+        // polygon tool's own Escape/Return handling below — since
+        // Delete/Backspace has no meaning for an in-progress polygon/lasso
+        // path and should work regardless of which tool is currently active,
+        // as long as a selection already exists from an earlier gesture.
+        if hasNoModifiers, event.keyCode == 51 || event.keyCode == 117 {
+            deleteSelectionContents()
             return
         }
         // Only the polygon tool, and only mid-gesture, cares about Escape/
