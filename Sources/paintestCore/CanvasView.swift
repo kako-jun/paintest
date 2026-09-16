@@ -246,12 +246,21 @@ final class CanvasView: NSView {
         case corner(TransformCorner)
         case edge(TransformEdge)
         case rotate
-        /// Free-transform / distort (issue #9, round 3): grabbed when
-        /// `mouseDown` hits a corner handle while Option is held (Photoshop's
-        /// own "hold Option, drag a corner" convention for the free-transform
-        /// distort gesture) — see `mouseDown`'s conversion of `.corner` into
-        /// this right after `hitTestTransformHandle` runs.
+        /// Free-transform / distort (issue #9 round 3; key binding fixed in
+        /// issue #51): grabbed when `mouseDown` hits a corner handle while
+        /// Cmd is held (Photoshop's own "hold Cmd, drag a corner" convention
+        /// for the free-transform distort gesture) — see `mouseDown`'s
+        /// conversion of `.corner` into this right after
+        /// `hitTestTransformHandle` runs.
         case distort(TransformCorner)
+        /// Skew (issue #51): grabbed when `mouseDown` hits an edge handle
+        /// while Cmd is held (Photoshop's own "hold Cmd, drag a side handle"
+        /// skew convention) — see `mouseDown`'s conversion of `.edge` into
+        /// this right after `hitTestTransformHandle` runs. Modeled as a pair
+        /// of matching per-corner `distort*` offsets on the dragged edge's
+        /// two corners (see `mouseDragged`'s `.skew` case), the same
+        /// quadrilateral machinery `.distort` uses.
+        case skew(TransformEdge)
     }
 
     private enum TransformCorner: CaseIterable {
@@ -881,12 +890,29 @@ final class CanvasView: NSView {
         return (size, (anchor + newDragged) / 2)
     }
 
+    /// One axis of a center-anchored resize drag (Option — issue #51,
+    /// Photoshop's own "hold Option, drag a handle" convention): unlike
+    /// `resizedAxis`, whose anchor is the fixed opposite handle, this keeps
+    /// the rectangle's own center fixed in place and lets the dragged handle
+    /// *and its mirror image on the opposite side* move together, so the
+    /// local-frame center offset is always `0` (the caller never needs to
+    /// recompute it) and the new size is simply twice the dragged handle's
+    /// new distance from the center.
+    private static func resizedAxisCentered(draggedStart: Double, delta: Double) -> Double {
+        max(transformMinimumSize, abs(draggedStart + delta) * 2)
+    }
+
     /// Resizes `start` by dragging `corner` to `start`'s own position plus
     /// (`dx`, `dy`) view-independent canvas-pixel deltas, holding the
-    /// diagonally opposite corner fixed as the anchor. `keepAspect` (Shift)
-    /// locks the aspect ratio: whichever axis moved further (by raw pixel
-    /// distance) drives a single scale factor applied to both axes, rather
-    /// than letting each axis resize independently.
+    /// diagonally opposite corner fixed as the anchor (or, when
+    /// `centerAnchored` is `true`, holding the rectangle's own center fixed
+    /// instead and moving the opposite corner's mirror image along with the
+    /// dragged one — Option, Photoshop's own center-anchored scale
+    /// convention, issue #51). `keepAspect` (Shift) locks the aspect ratio:
+    /// whichever axis moved further (by raw pixel distance) drives a single
+    /// scale factor applied to both axes, rather than letting each axis
+    /// resize independently. The two combine freely (Shift+Option locks
+    /// aspect ratio *and* keeps the center fixed).
     ///
     /// `dx`/`dy` arrive in screen/canvas axes (see `mouseDragged`), but
     /// `width`/`height`/`centerX`/`centerY` describe the rectangle in its own
@@ -904,7 +930,7 @@ final class CanvasView: NSView {
     /// being added to `centerX`/`centerY`. Both rotations are identity when
     /// `rotation == 0`, so this is byte-for-byte round 1's behavior in that
     /// case.
-    private static func resizeByCorner(_ corner: TransformCorner, start: LayerTransform, dx: Double, dy: Double, keepAspect: Bool) -> LayerTransform {
+    private static func resizeByCorner(_ corner: TransformCorner, start: LayerTransform, dx: Double, dy: Double, keepAspect: Bool, centerAnchored: Bool) -> LayerTransform {
         let cosR = cos(start.rotation)
         let sinR = sin(start.rotation)
         // Inverse rotation (by `-start.rotation`) — same formula
@@ -926,24 +952,41 @@ final class CanvasView: NSView {
         case .bottomLeft: (draggedStart, anchor) = (CGPoint(x: -halfWidth, y: halfHeight), CGPoint(x: halfWidth, y: -halfHeight))
         }
 
-        var (width, localCenterX) = resizedAxis(anchor: Double(anchor.x), draggedStart: Double(draggedStart.x), delta: localDx)
-        var (height, localCenterY) = resizedAxis(anchor: Double(anchor.y), draggedStart: Double(draggedStart.y), delta: localDy)
+        var width: Double
+        var height: Double
+        var localCenterX: Double
+        var localCenterY: Double
+        if centerAnchored {
+            width = resizedAxisCentered(draggedStart: Double(draggedStart.x), delta: localDx)
+            height = resizedAxisCentered(draggedStart: Double(draggedStart.y), delta: localDy)
+            localCenterX = 0
+            localCenterY = 0
+        } else {
+            (width, localCenterX) = resizedAxis(anchor: Double(anchor.x), draggedStart: Double(draggedStart.x), delta: localDx)
+            (height, localCenterY) = resizedAxis(anchor: Double(anchor.y), draggedStart: Double(draggedStart.y), delta: localDy)
+        }
 
         if keepAspect, start.width > 0, start.height > 0 {
             let scale = abs(localDx) >= abs(localDy) ? width / start.width : height / start.height
             width = max(transformMinimumSize, start.width * scale)
             height = max(transformMinimumSize, start.height * scale)
-            let signX: Double = Double(draggedStart.x) + localDx >= Double(anchor.x) ? 1 : -1
-            let signY: Double = Double(draggedStart.y) + localDy >= Double(anchor.y) ? 1 : -1
-            localCenterX = (Double(anchor.x) + (Double(anchor.x) + signX * width)) / 2
-            localCenterY = (Double(anchor.y) + (Double(anchor.y) + signY * height)) / 2
+            if centerAnchored {
+                localCenterX = 0
+                localCenterY = 0
+            } else {
+                let signX: Double = Double(draggedStart.x) + localDx >= Double(anchor.x) ? 1 : -1
+                let signY: Double = Double(draggedStart.y) + localDy >= Double(anchor.y) ? 1 : -1
+                localCenterX = (Double(anchor.x) + (Double(anchor.x) + signX * width)) / 2
+                localCenterY = (Double(anchor.y) + (Double(anchor.y) + signY * height)) / 2
+            }
         }
 
         // Forward rotation (by `+start.rotation`) — same convention
         // `LayerTransform.corners` uses to place a local offset back into
         // canvas space — turning the local-frame center shift back into a
         // screen/canvas-space one before it's added to `start.centerX`/
-        // `centerY` below.
+        // `centerY` below. Identity (contributes nothing) whenever
+        // `centerAnchored` left `localCenterX`/`localCenterY` at `0`.
         let offsetX = localCenterX * cosR - localCenterY * sinR
         let offsetY = localCenterX * sinR + localCenterY * cosR
 
@@ -958,7 +1001,11 @@ final class CanvasView: NSView {
     /// Resizes `start` along a single axis by dragging `edge`'s midpoint,
     /// holding the opposite edge fixed as the anchor — left/right handles
     /// change only `width`/`centerX` (in `start`'s local frame — see below),
-    /// top/bottom only `height`/`centerY`.
+    /// top/bottom only `height`/`centerY`. When `centerAnchored` is `true`
+    /// (Option, issue #51), the rectangle's own center stays fixed instead —
+    /// the opposite edge moves its mirror-image amount along with the
+    /// dragged one, so the local-frame center offset is always `0` and no
+    /// `centerX`/`centerY` update is needed at all.
     ///
     /// Same local-frame rotation fix as `resizeByCorner` above: `dx`/`dy`
     /// are rotated by `-start.rotation` into the rectangle's local frame
@@ -966,7 +1013,7 @@ final class CanvasView: NSView {
     /// center shift is rotated back by `+start.rotation` into screen/canvas
     /// space before being applied to `centerX`/`centerY`. Identity in both
     /// directions when `rotation == 0`.
-    private static func resizeByEdge(_ edge: TransformEdge, start: LayerTransform, dx: Double, dy: Double) -> LayerTransform {
+    private static func resizeByEdge(_ edge: TransformEdge, start: LayerTransform, dx: Double, dy: Double, centerAnchored: Bool) -> LayerTransform {
         let cosR = cos(start.rotation)
         let sinR = sin(start.rotation)
         let localDx = dx * cosR + dy * sinR
@@ -978,25 +1025,41 @@ final class CanvasView: NSView {
         var result = start
         switch edge {
         case .left:
-            let (width, localCenterX) = resizedAxis(anchor: halfWidth, draggedStart: -halfWidth, delta: localDx)
-            result.width = width
-            result.centerX = start.centerX + localCenterX * cosR
-            result.centerY = start.centerY + localCenterX * sinR
+            if centerAnchored {
+                result.width = resizedAxisCentered(draggedStart: -halfWidth, delta: localDx)
+            } else {
+                let (width, localCenterX) = resizedAxis(anchor: halfWidth, draggedStart: -halfWidth, delta: localDx)
+                result.width = width
+                result.centerX = start.centerX + localCenterX * cosR
+                result.centerY = start.centerY + localCenterX * sinR
+            }
         case .right:
-            let (width, localCenterX) = resizedAxis(anchor: -halfWidth, draggedStart: halfWidth, delta: localDx)
-            result.width = width
-            result.centerX = start.centerX + localCenterX * cosR
-            result.centerY = start.centerY + localCenterX * sinR
+            if centerAnchored {
+                result.width = resizedAxisCentered(draggedStart: halfWidth, delta: localDx)
+            } else {
+                let (width, localCenterX) = resizedAxis(anchor: -halfWidth, draggedStart: halfWidth, delta: localDx)
+                result.width = width
+                result.centerX = start.centerX + localCenterX * cosR
+                result.centerY = start.centerY + localCenterX * sinR
+            }
         case .top:
-            let (height, localCenterY) = resizedAxis(anchor: halfHeight, draggedStart: -halfHeight, delta: localDy)
-            result.height = height
-            result.centerX = start.centerX - localCenterY * sinR
-            result.centerY = start.centerY + localCenterY * cosR
+            if centerAnchored {
+                result.height = resizedAxisCentered(draggedStart: -halfHeight, delta: localDy)
+            } else {
+                let (height, localCenterY) = resizedAxis(anchor: halfHeight, draggedStart: -halfHeight, delta: localDy)
+                result.height = height
+                result.centerX = start.centerX - localCenterY * sinR
+                result.centerY = start.centerY + localCenterY * cosR
+            }
         case .bottom:
-            let (height, localCenterY) = resizedAxis(anchor: -halfHeight, draggedStart: halfHeight, delta: localDy)
-            result.height = height
-            result.centerX = start.centerX - localCenterY * sinR
-            result.centerY = start.centerY + localCenterY * cosR
+            if centerAnchored {
+                result.height = resizedAxisCentered(draggedStart: halfHeight, delta: localDy)
+            } else {
+                let (height, localCenterY) = resizedAxis(anchor: -halfHeight, draggedStart: halfHeight, delta: localDy)
+                result.height = height
+                result.centerX = start.centerX - localCenterY * sinR
+                result.centerY = start.centerY + localCenterY * cosR
+            }
         }
         return result
     }
@@ -2351,12 +2414,18 @@ final class CanvasView: NSView {
         if let activeTransform {
             let point = convert(event.locationInWindow, from: nil)
             var handle = hitTestTransformHandle(at: point, transform: activeTransform)
-            // Option+corner is the free-transform / distort gesture (round
-            // 3), Photoshop's own convention — every other handle (move,
-            // edge, rotate) is unaffected by Option and keeps its round 1/2
-            // meaning.
-            if case .some(.corner(let corner)) = handle, event.modifierFlags.contains(.option) {
+            // Cmd+corner is the free-transform / distort gesture, Cmd+edge
+            // is skew — Photoshop's own conventions (issue #51 fixed these
+            // off Option, which Photoshop reserves for center-anchored
+            // scaling instead — see `resizeByCorner`/`resizeByEdge`'s
+            // `centerAnchored` parameter, read straight from
+            // `event.modifierFlags` in `mouseDragged` rather than baked into
+            // the handle here). The rotate handle is unaffected by any of
+            // this and keeps its own meaning regardless of modifiers.
+            if case .some(.corner(let corner)) = handle, event.modifierFlags.contains(.command) {
                 handle = .distort(corner)
+            } else if case .some(.edge(let edge)) = handle, event.modifierFlags.contains(.command) {
+                handle = .skew(edge)
             }
             if event.clickCount == 2, handle == .move {
                 commitLayerTransform()
@@ -2651,22 +2720,40 @@ final class CanvasView: NSView {
                 // UNDISTORTED rectangle's own local-frame corner position,
                 // never the anchor corner's own `distort*` offset (issue #9
                 // review should-3) — so once any corner has been distorted,
-                // an ordinary (non-Option) corner resize is not guaranteed
+                // an ordinary (non-Cmd) corner resize is not guaranteed
                 // to preserve the existing distortion correctly. Rather than
                 // risk a silently-wrong shape, this simply disables plain
                 // resize entirely while `hasDistortion` is true: dragging a
                 // corner/edge handle here is a no-op (see the corresponding
                 // `.edge` case below) until the transform is committed/
-                // cancelled and a fresh, undistorted one is started. Option+
+                // cancelled and a fresh, undistorted one is started. Cmd+
                 // corner (`.distort` below) is unaffected — that's still how
-                // you adjust an already-distorted transform further.
+                // you adjust an already-distorted transform further. Shift
+                // locks the aspect ratio, Option scales symmetrically about
+                // the rectangle's own center (`centerAnchored`) — Photoshop's
+                // own conventions (issue #51) — and the two combine freely.
                 if !startTransform.hasDistortion {
-                    activeTransform = CanvasView.resizeByCorner(corner, start: startTransform, dx: dx, dy: dy, keepAspect: event.modifierFlags.contains(.shift))
+                    activeTransform = CanvasView.resizeByCorner(
+                        corner,
+                        start: startTransform,
+                        dx: dx,
+                        dy: dy,
+                        keepAspect: event.modifierFlags.contains(.shift),
+                        centerAnchored: event.modifierFlags.contains(.option)
+                    )
                 }
             case .edge(let edge):
-                // Same reasoning as `.corner` above.
+                // Same reasoning as `.corner` above. Option scales
+                // symmetrically about the rectangle's own center, same as
+                // for a corner drag.
                 if !startTransform.hasDistortion {
-                    activeTransform = CanvasView.resizeByEdge(edge, start: startTransform, dx: dx, dy: dy)
+                    activeTransform = CanvasView.resizeByEdge(
+                        edge,
+                        start: startTransform,
+                        dx: dx,
+                        dy: dy,
+                        centerAnchored: event.modifierFlags.contains(.option)
+                    )
                 }
             case .rotate:
                 // Angle of the mouse relative to the rectangle's own center,
@@ -2715,6 +2802,54 @@ final class CanvasView: NSView {
                     transform.distortBottomRight = CGVector(dx: startTransform.distortBottomRight.dx + moved.dx, dy: startTransform.distortBottomRight.dy + moved.dy)
                 case .bottomLeft:
                     transform.distortBottomLeft = CGVector(dx: startTransform.distortBottomLeft.dx + moved.dx, dy: startTransform.distortBottomLeft.dy + moved.dy)
+                }
+                activeTransform = transform
+            case .skew(let edge):
+                // Cmd+edge skew (issue #51), Photoshop's convention: shears
+                // the dragged edge's two corners together along the box's
+                // own local axis — horizontal for the top/bottom edges,
+                // vertical for left/right — while the opposite edge, the
+                // rectangle's width/height, and its rotation all stay
+                // exactly as `startTransform` had them. Modeled as two
+                // matching per-corner `distort*` offsets, the same
+                // quadrilateral machinery `.distort` above uses — unlike
+                // `.distort`, though, this rotates the screen-space drag
+                // into the rectangle's own local frame first (same
+                // convention `resizeByCorner`/`resizeByEdge` use) so a skew
+                // on a rotated box shears along the box's own axis rather
+                // than the screen's, and projects out the axis the dragged
+                // edge doesn't own (e.g. only the local-x component of the
+                // drag skews the top/bottom edges) so a diagonal drag can't
+                // sneak in an accidental width/height change alongside the
+                // shear.
+                var transform = startTransform
+                let cosR = cos(startTransform.rotation)
+                let sinR = sin(startTransform.rotation)
+                let localDx = dx * cosR + dy * sinR
+                let localDy = -dx * sinR + dy * cosR
+                // Local-frame offset -> canvas-space vector, the same
+                // convention `LayerTransform.corners` uses to place a local
+                // offset back into canvas space.
+                func toCanvas(localDx: Double, localDy: Double) -> CGVector {
+                    CGVector(dx: localDx * cosR - localDy * sinR, dy: localDx * sinR + localDy * cosR)
+                }
+                switch edge {
+                case .top:
+                    let vector = toCanvas(localDx: localDx, localDy: 0)
+                    transform.distortTopLeft = CGVector(dx: startTransform.distortTopLeft.dx + vector.dx, dy: startTransform.distortTopLeft.dy + vector.dy)
+                    transform.distortTopRight = CGVector(dx: startTransform.distortTopRight.dx + vector.dx, dy: startTransform.distortTopRight.dy + vector.dy)
+                case .bottom:
+                    let vector = toCanvas(localDx: localDx, localDy: 0)
+                    transform.distortBottomLeft = CGVector(dx: startTransform.distortBottomLeft.dx + vector.dx, dy: startTransform.distortBottomLeft.dy + vector.dy)
+                    transform.distortBottomRight = CGVector(dx: startTransform.distortBottomRight.dx + vector.dx, dy: startTransform.distortBottomRight.dy + vector.dy)
+                case .left:
+                    let vector = toCanvas(localDx: 0, localDy: localDy)
+                    transform.distortTopLeft = CGVector(dx: startTransform.distortTopLeft.dx + vector.dx, dy: startTransform.distortTopLeft.dy + vector.dy)
+                    transform.distortBottomLeft = CGVector(dx: startTransform.distortBottomLeft.dx + vector.dx, dy: startTransform.distortBottomLeft.dy + vector.dy)
+                case .right:
+                    let vector = toCanvas(localDx: 0, localDy: localDy)
+                    transform.distortTopRight = CGVector(dx: startTransform.distortTopRight.dx + vector.dx, dy: startTransform.distortTopRight.dy + vector.dy)
+                    transform.distortBottomRight = CGVector(dx: startTransform.distortBottomRight.dx + vector.dx, dy: startTransform.distortBottomRight.dy + vector.dy)
                 }
                 activeTransform = transform
             }
@@ -2788,9 +2923,13 @@ final class CanvasView: NSView {
                 rect.centerY = startRect.centerY + dy
                 cropRect = rect
             case .corner(let corner):
-                cropRect = CanvasView.resizeByCorner(corner, start: startRect, dx: dx, dy: dy, keepAspect: event.modifierFlags.contains(.shift))
+                // Crop is always an axis-aligned rectangle with no
+                // distort/skew counterpart (see `CropHandle`'s own doc
+                // comment), so Option's center-anchored scaling doesn't
+                // apply here — only Shift's aspect-ratio lock does.
+                cropRect = CanvasView.resizeByCorner(corner, start: startRect, dx: dx, dy: dy, keepAspect: event.modifierFlags.contains(.shift), centerAnchored: false)
             case .edge(let edge):
-                cropRect = CanvasView.resizeByEdge(edge, start: startRect, dx: dx, dy: dy)
+                cropRect = CanvasView.resizeByEdge(edge, start: startRect, dx: dx, dy: dy, centerAnchored: false)
             }
             needsDisplay = true
             return
