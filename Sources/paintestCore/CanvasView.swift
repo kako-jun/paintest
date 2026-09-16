@@ -1147,7 +1147,7 @@ final class CanvasView: NSView {
     /// Hit-tests a view-space click/drag-start point against `rect`'s
     /// handles and interior, at the current `zoomScale` — the crop tool's
     /// counterpart to `hitTestTransformHandle(at:transform:)`, minus that
-    /// method's rotate-ring and Option+corner distort handling: `rect`
+    /// method's rotate-ring and Cmd+corner distort handling: `rect`
     /// (`cropRect`) stays axis-aligned for the whole gesture (see its own
     /// doc comment), so this reduces to exactly `hitTestTransformHandle`'s
     /// own `rotation == 0`, no-distortion code path — corners/edges checked
@@ -2605,7 +2605,7 @@ final class CanvasView: NSView {
             if let cropRect {
                 // A pending rectangle already exists (issue #21): hit-test
                 // its handles/interior, mirroring `activeTransform`'s own
-                // `mouseDown` handling above, minus the rotate-ring/Option+
+                // `mouseDown` handling above, minus the rotate-ring/Cmd+
                 // corner distort cases neither this tool nor
                 // `hitTestCropHandle` supports. A double-click on the
                 // rectangle's interior confirms outright, the same
