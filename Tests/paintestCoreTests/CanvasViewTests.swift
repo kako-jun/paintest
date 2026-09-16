@@ -2010,6 +2010,33 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "outside the selection must be left untouched")
     }
 
+    /// Interaction regression guard between issue #57 (this Delete/clear
+    /// feature) and issue #56 (feathered selections): `deleteSelectionContents
+    /// ()` restricts its write to `selection` via `PixelCanvas.setPixel(...,
+    /// color: .clear, mask: selection)` — the exact call `PixelCanvas
+    /// .blendTowardOverwrite`'s own doc comment was written around, since a
+    /// naive "scale the (zero) source alpha by coverage" blend would leave
+    /// a feathered selection's boundary completely untouched by Delete
+    /// instead of fading it toward transparent.
+    func testKeyDown_deleteKey_withFeatheredSelection_fadesBoundaryAlpha_insteadOfLeavingItUntouched() {
+        let view = makeViewInWindow(width: 20, height: 20)
+        let window = view.window!
+        let hardMask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let featheredMask = hardMask.feathered(radius: 1)
+        let boundaryCoverage = featheredMask.alpha(x: 15, y: 9)
+        XCTAssertGreaterThan(boundaryCoverage, 0, "precondition")
+        XCTAssertLessThan(boundaryCoverage, 255, "precondition")
+        view.selection = featheredMask
+
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window)) // Delete
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 9, y: 9)?.a, 0, "the fully-covered interior must still clear completely")
+        let boundaryAlpha = canvas.rawPixel(x: 15, y: 9)?.a ?? 255
+        XCTAssertLessThan(boundaryAlpha, 255, "the feathered boundary must lose some opacity, not stay fully untouched")
+        XCTAssertGreaterThan(boundaryAlpha, 0, "the feathered boundary must not be erased completely either")
+    }
+
     /// The recommended, safer default (issue #57): with no active
     /// selection, Delete does nothing at all rather than clearing the whole
     /// active layer the way Photoshop itself does in that case — an
