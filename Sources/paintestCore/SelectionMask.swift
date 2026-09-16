@@ -1,10 +1,25 @@
 import AppKit
 
 /// A pixel-space selection region — the set of pixels currently eligible for
-/// editing (issue #11: "柔軟な範囲選択"). Kept as a plain, feather-free
-/// boolean mask rather than a path or a float alpha mask, matching
-/// `PixelCanvas`'s "dot-exact, no blur" philosophy: a pixel is either inside
-/// the selection or it isn't, with no soft edges.
+/// editing (issue #11: "柔軟な範囲選択").
+///
+/// Internally a per-pixel `UInt8` *coverage* (0 = fully outside the
+/// selection, 255 = fully inside, anything in between = partially inside),
+/// not a plain boolean mask (issue #56: "選択範囲にフェザー・アンチエイリ
+/// アスがない"). A hard-edged selection — every rectangle/ellipse/polygon/
+/// magic-wand build without `feather`/`antiAlias` requested — only ever
+/// produces `0`/`255` coverage values, so `contains(x:y:)` (and every
+/// pre-#56 caller that only ever asked the boolean question) behaves
+/// byte-for-byte the same as the old `[Bool]`-backed version. `feather`
+/// (`feathered(radius:)`, a post-process Gaussian-style blur applied to any
+/// built mask) and `antiAlias` (`ellipse`/`polygon`/`magicWand`'s own
+/// parameter, sub-pixel-supersampling the shape's own continuous boundary)
+/// are what actually produce fractional coverage — see each one's own doc
+/// comment. This deliberately does NOT touch `PixelCanvas`'s "dot-exact, no
+/// blur" pencil/eraser/bucket-fill drawing algorithms themselves (issue #56
+/// scope) — only the *selection boundary* a tool is restricted to gets soft
+/// edges; a hard-edged (feather 0, no antiAlias) selection still restricts
+/// paints exactly as before.
 ///
 /// Round 1 of 3 built masks from rectangle and ellipse marquees
 /// (`rectangle(...)`/`ellipse(...)`); round 2 adds the lasso/polygon tools'
@@ -18,23 +33,24 @@ final class SelectionMask {
     let width: Int
     let height: Int
 
-    /// Row-major, `width * height` booleans — `cells[y * width + x]` is
-    /// whether pixel `(x, y)` is selected. A flat array (not `PixelCanvas`'s
-    /// raw byte buffer) is enough here: nothing about this type needs to be
-    /// an `NSBitmapImageRep` or round-trip through PNG.
-    private var cells: [Bool]
+    /// Row-major, `width * height` coverage bytes (issue #56) —
+    /// `coverage[y * width + x]` is how much of pixel `(x, y)` is selected,
+    /// `0...255`. A flat array (not `PixelCanvas`'s raw byte buffer) is
+    /// enough here: nothing about this type needs to be an
+    /// `NSBitmapImageRep` or round-trip through PNG.
+    private var coverage: [UInt8]
 
     /// Starts with nothing selected.
     init(width: Int, height: Int) {
         self.width = max(1, width)
         self.height = max(1, height)
-        self.cells = Array(repeating: false, count: self.width * self.height)
+        self.coverage = Array(repeating: 0, count: self.width * self.height)
     }
 
-    private init(width: Int, height: Int, cells: [Bool]) {
+    private init(width: Int, height: Int, coverage: [UInt8]) {
         self.width = width
         self.height = height
-        self.cells = cells
+        self.coverage = coverage
     }
 
     private func index(x: Int, y: Int) -> Int? {
@@ -42,19 +58,46 @@ final class SelectionMask {
         return y * width + x
     }
 
-    /// Whether pixel `(x, y)` is selected. Always `false` for a coordinate
-    /// outside the mask's bounds — never a bounds error — so callers (e.g.
-    /// `PixelCanvas`'s paint guards) can query it unconditionally.
+    /// Whether pixel `(x, y)` is selected *at all* — `true` for any nonzero
+    /// coverage, including a feathered/anti-aliased boundary pixel that's
+    /// only partially selected. Always `false` for a coordinate outside the
+    /// mask's bounds — never a bounds error — so callers (e.g.
+    /// `PixelCanvas`'s paint guards) can query it unconditionally. Callers
+    /// that need the actual coverage fraction (issue #56's partial-alpha
+    /// compositing) use `alpha(x:y:)` instead.
     func contains(x: Int, y: Int) -> Bool {
-        guard let i = index(x: x, y: y) else { return false }
-        return cells[i]
+        alpha(x: x, y: y) > 0
     }
 
-    /// Sets whether pixel `(x, y)` is selected. Silently ignored for a
-    /// coordinate outside the mask's bounds.
+    /// This pixel's coverage, `0...255` — `0` for a coordinate outside the
+    /// mask's bounds (same "never a bounds error" contract as
+    /// `contains(x:y:)`). `255` means fully selected, matching every
+    /// pre-#56 mask (which only ever contains `0`/`255`); values in between
+    /// only occur once `feathered(radius:)` or a shape's own `antiAlias`
+    /// parameter has been used.
+    func alpha(x: Int, y: Int) -> UInt8 {
+        guard let i = index(x: x, y: y) else { return 0 }
+        return coverage[i]
+    }
+
+    /// Sets whether pixel `(x, y)` is selected — `true`/`false` collapse to
+    /// full coverage (`255`) or none (`0`); there is no boolean spelling for
+    /// a partial value (build one via `feathered(radius:)` or a shape's
+    /// `antiAlias`/supersampling instead). Silently ignored for a coordinate
+    /// outside the mask's bounds.
     func setSelected(_ selected: Bool, x: Int, y: Int) {
         guard let i = index(x: x, y: y) else { return }
-        cells[i] = selected
+        coverage[i] = selected ? 255 : 0
+    }
+
+    /// Sets pixel `(x, y)`'s raw coverage directly (issue #56) — used
+    /// internally by the supersampling `antiAlias` path in
+    /// `ellipse`/`polygon`/`magicWand` to record a fractional value, unlike
+    /// `setSelected(_:x:y:)`'s all-or-nothing `0`/`255`. Silently ignored for
+    /// a coordinate outside the mask's bounds, same as `setSelected`.
+    private func setCoverage(_ value: UInt8, x: Int, y: Int) {
+        guard let i = index(x: x, y: y) else { return }
+        coverage[i] = value
     }
 
     // MARK: - Duplication
@@ -66,7 +109,7 @@ final class SelectionMask {
     /// `copy()` doc comment — preventing a later live selection edit from
     /// reaching back into a stored history entry, or vice versa.
     func copy() -> SelectionMask {
-        SelectionMask(width: width, height: height, cells: cells)
+        SelectionMask(width: width, height: height, coverage: coverage)
     }
 
     // MARK: - Shape construction
@@ -90,6 +133,13 @@ final class SelectionMask {
         return mask
     }
 
+    /// The side length of the per-pixel supersampling grid `antiAlias: true`
+    /// uses below in `ellipse`/`polygon` (issue #56) — `4` (16 subsamples
+    /// per pixel) is a standard, cheap-enough-for-pixel-art-canvas-sizes
+    /// choice: enough gradation that a shallow diagonal edge doesn't look
+    /// banded, without the cost of a much finer grid nothing here needs.
+    private static let antiAliasSupersampleAxis = 4
+
     /// A filled ellipse selection. Each pixel's *center* — `(x + 0.5, y +
     /// 0.5)` — is tested against the ellipse equation
     /// `(dx/radiusX)^2 + (dy/radiusY)^2 <= 1`, not its corner, so a pixel is
@@ -98,17 +148,37 @@ final class SelectionMask {
     /// A non-positive `radiusX`/`radiusY` would make that equation divide by
     /// zero (or select nothing meaningful anyway — a zero-radius ellipse has
     /// no interior), so both are guarded and simply produce an empty mask.
-    static func ellipse(centerX: Double, centerY: Double, radiusX: Double, radiusY: Double, width: Int, height: Int) -> SelectionMask {
+    ///
+    /// `antiAlias` (issue #56, default `false` — every pre-#56 call site
+    /// keeps its exact single-center-sample behavior unmodified) instead
+    /// tests a `4x4` grid of sub-pixel offsets per pixel and sets that
+    /// pixel's coverage to the fraction that fell inside the ellipse — `0`
+    /// and `4x4` (all outside/all inside) still collapse to `0`/`255`
+    /// exactly like the non-antialiased path, so only pixels the ellipse's
+    /// curved boundary actually crosses end up with an in-between value.
+    /// Unlike `feathered(radius:)` (a post-process blur that can be applied
+    /// to *any* mask, regardless of shape), this only softens the ellipse's
+    /// own true geometric edge — it does not expand the selection outward
+    /// the way feathering does.
+    static func ellipse(centerX: Double, centerY: Double, radiusX: Double, radiusY: Double, width: Int, height: Int, antiAlias: Bool = false) -> SelectionMask {
         let mask = SelectionMask(width: width, height: height)
         guard radiusX > 0, radiusY > 0 else { return mask }
+        let samplesPerAxis = antiAlias ? antiAliasSupersampleAxis : 1
+        let sampleCount = samplesPerAxis * samplesPerAxis
         for y in 0..<height {
-            let dy = (Double(y) + 0.5) - centerY
             for x in 0..<width {
-                let dx = (Double(x) + 0.5) - centerX
-                let normalized = (dx / radiusX) * (dx / radiusX) + (dy / radiusY) * (dy / radiusY)
-                if normalized <= 1 {
-                    mask.setSelected(true, x: x, y: y)
+                var insideCount = 0
+                for sy in 0..<samplesPerAxis {
+                    let dy = (Double(y) + (Double(sy) + 0.5) / Double(samplesPerAxis)) - centerY
+                    for sx in 0..<samplesPerAxis {
+                        let dx = (Double(x) + (Double(sx) + 0.5) / Double(samplesPerAxis)) - centerX
+                        let normalized = (dx / radiusX) * (dx / radiusX) + (dy / radiusY) * (dy / radiusY)
+                        if normalized <= 1 { insideCount += 1 }
+                    }
                 }
+                guard insideCount > 0 else { continue }
+                let value = insideCount == sampleCount ? UInt8(255) : UInt8((Double(insideCount) / Double(sampleCount) * 255).rounded())
+                mask.setCoverage(value, x: x, y: y)
             }
         }
         return mask
@@ -133,36 +203,57 @@ final class SelectionMask {
     /// and simply produces an empty mask (mirroring `ellipse(...)`'s
     /// non-positive-radius guard) rather than the degenerate 0- or 1-edge
     /// polygon that dropping straight into the ray-casting loop would trace.
-    static func polygon(vertices: [(x: Int, y: Int)], width: Int, height: Int) -> SelectionMask {
+    ///
+    /// `antiAlias` (issue #56, default `false` — every pre-#56 call site
+    /// keeps its exact single-center-sample behavior unmodified) supersamples
+    /// each pixel the same `4x4`-grid way `ellipse(...)`'s own `antiAlias`
+    /// does — see that parameter's doc comment for the general shape (only
+    /// pixels the polygon's edges actually cross end up with in-between
+    /// coverage; this backs both the lasso's free-form path and the polygon
+    /// tool's clicked-vertex path, since both funnel through this one
+    /// constructor).
+    static func polygon(vertices: [(x: Int, y: Int)], width: Int, height: Int, antiAlias: Bool = false) -> SelectionMask {
         let mask = SelectionMask(width: width, height: height)
         guard vertices.count >= 3 else { return mask }
 
-        for y in 0..<height {
-            let py = Double(y) + 0.5
-            for x in 0..<width {
-                let px = Double(x) + 0.5
-                var inside = false
-                var j = vertices.count - 1
-                for i in 0..<vertices.count {
-                    let xi = Double(vertices[i].x) + 0.5
-                    let yi = Double(vertices[i].y) + 0.5
-                    let xj = Double(vertices[j].x) + 0.5
-                    let yj = Double(vertices[j].y) + 0.5
-                    // Standard even-odd crossing test: does edge (i, j)
-                    // straddle the horizontal line at `py`, and if so, does
-                    // it cross to the right of `px`?
-                    let straddles = (yi > py) != (yj > py)
-                    if straddles {
-                        let crossingX = xi + (py - yi) / (yj - yi) * (xj - xi)
-                        if px < crossingX {
-                            inside.toggle()
-                        }
+        func isInside(px: Double, py: Double) -> Bool {
+            var inside = false
+            var j = vertices.count - 1
+            for i in 0..<vertices.count {
+                let xi = Double(vertices[i].x) + 0.5
+                let yi = Double(vertices[i].y) + 0.5
+                let xj = Double(vertices[j].x) + 0.5
+                let yj = Double(vertices[j].y) + 0.5
+                // Standard even-odd crossing test: does edge (i, j)
+                // straddle the horizontal line at `py`, and if so, does
+                // it cross to the right of `px`?
+                let straddles = (yi > py) != (yj > py)
+                if straddles {
+                    let crossingX = xi + (py - yi) / (yj - yi) * (xj - xi)
+                    if px < crossingX {
+                        inside.toggle()
                     }
-                    j = i
                 }
-                if inside {
-                    mask.setSelected(true, x: x, y: y)
+                j = i
+            }
+            return inside
+        }
+
+        let samplesPerAxis = antiAlias ? antiAliasSupersampleAxis : 1
+        let sampleCount = samplesPerAxis * samplesPerAxis
+        for y in 0..<height {
+            for x in 0..<width {
+                var insideCount = 0
+                for sy in 0..<samplesPerAxis {
+                    let py = Double(y) + (Double(sy) + 0.5) / Double(samplesPerAxis)
+                    for sx in 0..<samplesPerAxis {
+                        let px = Double(x) + (Double(sx) + 0.5) / Double(samplesPerAxis)
+                        if isInside(px: px, py: py) { insideCount += 1 }
+                    }
                 }
+                guard insideCount > 0 else { continue }
+                let value = insideCount == sampleCount ? UInt8(255) : UInt8((Double(insideCount) / Double(sampleCount) * 255).rounded())
+                mask.setCoverage(value, x: x, y: y)
             }
         }
         return mask
@@ -203,12 +294,24 @@ final class SelectionMask {
     /// If the start pixel itself has no color (`colorAt(startX, startY) ==
     /// nil`), this returns an empty mask rather than crashing or guessing a
     /// color to match against.
+    ///
+    /// `antiAlias` (issue #56, default `false`, matching every pre-#56 call
+    /// site's exact hard-edged behavior) softens the flood-filled region's
+    /// boundary. Unlike `ellipse`/`polygon`'s own `antiAlias`, the magic
+    /// wand has no continuous shape to supersample — its selection is
+    /// defined pixel-by-pixel by color similarity, not a geometric curve —
+    /// so this is deliberately implemented as `feathered(radius:
+    /// magicWandAntiAliasRadius)` applied to the finished boolean flood-fill
+    /// result rather than a from-scratch supersampling pass: a small blur is
+    /// the standard practical stand-in for "soften this boundary" when no
+    /// sub-pixel geometry exists to sample against.
     static func magicWand(
         startX: Int, startY: Int,
         colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)?,
         tolerance: Int,
         width: Int, height: Int,
-        contiguous: Bool = true
+        contiguous: Bool = true,
+        antiAlias: Bool = false
     ) -> SelectionMask {
         let mask = SelectionMask(width: width, height: height)
         guard let startColor = colorAt(startX, startY) else { return mask }
@@ -229,7 +332,7 @@ final class SelectionMask {
                     mask.setSelected(true, x: x, y: y)
                 }
             }
-            return mask
+            return antiAlias ? mask.feathered(radius: magicWandAntiAliasRadius) : mask
         }
 
         var visited = Array(repeating: false, count: width * height)
@@ -259,7 +362,86 @@ final class SelectionMask {
                 stack.append((nx, ny))
             }
         }
-        return mask
+        return antiAlias ? mask.feathered(radius: magicWandAntiAliasRadius) : mask
+    }
+
+    /// The blur radius `magicWand`'s own `antiAlias` parameter feeds into
+    /// `feathered(radius:)` (issue #56) — small enough to only soften the
+    /// boundary by roughly a pixel (matching Photoshop's own magic-wand
+    /// anti-alias, a subtle edge smoothing rather than a visible feather),
+    /// not a general-purpose feather amount a caller can tune.
+    private static let magicWandAntiAliasRadius: Double = 0.6
+
+    // MARK: - Feathering
+
+    /// Returns a new mask with this one's coverage blurred by `radius`
+    /// pixels (issue #56) — Photoshop's "Feather" selection option. Unlike
+    /// `ellipse`/`polygon`/`magicWand`'s own `antiAlias` (which only softens
+    /// a shape's *own* true boundary, without changing which pixels are
+    /// roughly in vs. out), feathering genuinely expands the soft region in
+    /// both directions: pixels just outside the original hard edge gain some
+    /// partial coverage, and pixels just inside it lose some — this can be
+    /// applied to a mask built by *any* of the shape constructors (or a
+    /// combined/inverted result), not just the two that take `antiAlias`.
+    ///
+    /// `radius <= 0` returns an unmodified copy — every existing hard-edged
+    /// selection (feather 0, the default everywhere) is untouched byte for
+    /// byte, matching this type's "existing boolean-mask callers keep their
+    /// exact behavior" compatibility rule (see the type's own doc comment).
+    ///
+    /// Implemented as a two-pass (horizontal, then vertical) separable
+    /// Gaussian blur — `radius` is used directly as the Gaussian's sigma,
+    /// with the kernel truncated at `±3σ` (the point past which a Gaussian's
+    /// contribution is negligible) — over this mask's coverage rescaled to
+    /// `0...1`. A coordinate outside the canvas contributes `0` (unselected)
+    /// to the blur, the same as it does everywhere else `SelectionMask`
+    /// treats "outside the canvas" as "unselected" (see `contains(x:y:)`'s
+    /// doc comment) — so feathering a selection that touches the canvas edge
+    /// softens that edge too, rather than wrapping or clamping.
+    func feathered(radius: Double) -> SelectionMask {
+        guard radius > 0 else { return copy() }
+        let sigma = radius
+        let kernelRadius = max(1, Int((sigma * 3).rounded(.up)))
+        var kernel = [Double](repeating: 0, count: kernelRadius * 2 + 1)
+        var kernelSum = 0.0
+        for offset in -kernelRadius...kernelRadius {
+            let weight = exp(-Double(offset * offset) / (2 * sigma * sigma))
+            kernel[offset + kernelRadius] = weight
+            kernelSum += weight
+        }
+        for i in 0..<kernel.count { kernel[i] /= kernelSum }
+
+        let source = coverage.map { Double($0) / 255.0 }
+
+        // Horizontal pass.
+        var horizontal = [Double](repeating: 0, count: width * height)
+        for y in 0..<height {
+            let rowStart = y * width
+            for x in 0..<width {
+                var accumulator = 0.0
+                for offset in -kernelRadius...kernelRadius {
+                    let sx = x + offset
+                    guard sx >= 0, sx < width else { continue }
+                    accumulator += source[rowStart + sx] * kernel[offset + kernelRadius]
+                }
+                horizontal[rowStart + x] = accumulator
+            }
+        }
+
+        // Vertical pass.
+        var result = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                var accumulator = 0.0
+                for offset in -kernelRadius...kernelRadius {
+                    let sy = y + offset
+                    guard sy >= 0, sy < height else { continue }
+                    accumulator += horizontal[sy * width + x] * kernel[offset + kernelRadius]
+                }
+                result[y * width + x] = UInt8(max(0, min(255, (accumulator * 255).rounded())))
+            }
+        }
+        return SelectionMask(width: width, height: height, coverage: result)
     }
 
     // MARK: - Combining
@@ -272,41 +454,54 @@ final class SelectionMask {
     // silently under-selects rather than crashing — acceptable since this
     // is explicitly out of scope ("不一致は未定義でよい").
 
-    /// Union — Shift's "add to selection".
+    /// Union — Shift's "add to selection". Combines coverage the standard
+    /// fuzzy-logic way (issue #56: `max`, generalizing boolean OR) so two
+    /// hard-edged (`0`/`255`-only) masks combine exactly as the old boolean
+    /// `||` did, while a feathered/anti-aliased mask's in-between values
+    /// still combine sensibly (the more-selected of the two coverages wins
+    /// at each pixel).
     func unioned(with other: SelectionMask) -> SelectionMask {
-        combined(with: other) { $0 || $1 }
+        combined(with: other) { max($0, $1) }
     }
 
-    /// Difference — Option's "subtract from selection".
+    /// Difference — Option's "subtract from selection". `min(a, 255 - b)`
+    /// generalizes boolean `a && !b` the same fuzzy-logic way `unioned`
+    /// generalizes `||` (issue #56).
     func subtracting(_ other: SelectionMask) -> SelectionMask {
-        combined(with: other) { $0 && !$1 }
+        combined(with: other) { min($0, 255 - $1) }
     }
 
-    /// Intersection — Shift+Option's "intersect with selection".
+    /// Intersection — Shift+Option's "intersect with selection". `min`
+    /// generalizes boolean `&&` the same fuzzy-logic way `unioned`
+    /// generalizes `||` (issue #56).
     func intersected(with other: SelectionMask) -> SelectionMask {
-        combined(with: other) { $0 && $1 }
+        combined(with: other) { min($0, $1) }
     }
 
-    private func combined(with other: SelectionMask, _ op: (Bool, Bool) -> Bool) -> SelectionMask {
-        var result = Array(repeating: false, count: width * height)
+    private func combined(with other: SelectionMask, _ op: (UInt8, UInt8) -> UInt8) -> SelectionMask {
+        var result = Array(repeating: UInt8(0), count: width * height)
         for y in 0..<height {
             for x in 0..<width {
-                result[y * width + x] = op(contains(x: x, y: y), other.contains(x: x, y: y))
+                result[y * width + x] = op(alpha(x: x, y: y), other.alpha(x: x, y: y))
             }
         }
-        return SelectionMask(width: width, height: height, cells: result)
+        return SelectionMask(width: width, height: height, coverage: result)
     }
 
     /// The complement — every currently-unselected pixel becomes selected
-    /// and vice versa.
+    /// and vice versa. `255 - coverage` generalizes boolean negation the
+    /// same fuzzy-logic way `unioned`/`subtracting`/`intersected` do (issue
+    /// #56): a fully-selected pixel (`255`) becomes fully-unselected (`0`)
+    /// and vice versa, and a feathered/anti-aliased pixel's partial coverage
+    /// flips to its complement.
     func inverted() -> SelectionMask {
-        SelectionMask(width: width, height: height, cells: cells.map { !$0 })
+        SelectionMask(width: width, height: height, coverage: coverage.map { 255 - $0 })
     }
 
     // MARK: - Queries
 
     var isEmpty: Bool {
-        !cells.contains(true)
+        !coverage.contains { $0 > 0 }
     }
 
     /// The smallest pixel-space rectangle (inclusive on all four sides)
@@ -325,7 +520,7 @@ final class SelectionMask {
         var maxX = -1
         var maxY = -1
         for y in 0..<height {
-            for x in 0..<width where cells[y * width + x] {
+            for x in 0..<width where coverage[y * width + x] > 0 {
                 if x < minX { minX = x }
                 if y < minY { minY = y }
                 if x > maxX { maxX = x }

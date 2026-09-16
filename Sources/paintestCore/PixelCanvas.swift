@@ -88,18 +88,35 @@ final class PixelCanvas {
     /// and the pixel falls outside it, the call is a no-op. Defaults to
     /// `nil` (no restriction) so every pre-existing call site — and every
     /// pre-existing test — keeps working unmodified.
+    ///
+    /// A hard-edged mask (every pixel's coverage `0` or `255` — every
+    /// pre-#56 mask, and every #56 one built with feather `0`/no
+    /// `antiAlias`) still overwrites the destination pixel outright, byte
+    /// for byte, exactly as before: this is what keeps the pencil/eraser/
+    /// bucket-fill "dot-exact, no blur" guarantee intact (issue #56 scope —
+    /// see `SelectionMask`'s own doc comment). Only a *partial*-coverage
+    /// boundary pixel (feather > 0 or a shape's own `antiAlias`) takes the
+    /// different path below: `color` is alpha-composited ("source over")
+    /// onto the existing pixel, scaled by that coverage fraction, so a soft
+    /// selection edge fades the paint in smoothly rather than producing a
+    /// hard binary cutoff at some arbitrary coverage threshold.
     func setPixel(x: Int, y: Int, color: NSColor, mask: SelectionMask? = nil) {
         guard x >= 0, x < width, y >= 0, y < height else { return }
-        guard mask == nil || mask!.contains(x: x, y: y) else { return }
+        let maskAlpha = mask?.alpha(x: x, y: y) ?? 255
+        guard maskAlpha > 0 else { return }
         guard let data = bitmap.bitmapData else { return }
         let (r, g, b, a) = components(of: color)
-        let bytesPerRow = bitmap.bytesPerRow
-        let bpp = bitmap.bitsPerPixel / 8
-        let offset = y * bytesPerRow + x * bpp
-        data[offset] = r
-        data[offset + 1] = g
-        data[offset + 2] = b
-        data[offset + 3] = a
+        guard maskAlpha < 255 else {
+            let bytesPerRow = bitmap.bytesPerRow
+            let bpp = bitmap.bitsPerPixel / 8
+            let offset = y * bytesPerRow + x * bpp
+            data[offset] = r
+            data[offset + 1] = g
+            data[offset + 2] = b
+            data[offset + 3] = a
+            return
+        }
+        blendPixel(x: x, y: y, r: r, g: g, b: b, a: a, mask: mask)
     }
 
     /// Draws a 1px line between two pixel coordinates using Bresenham's
@@ -269,16 +286,26 @@ final class PixelCanvas {
                 // for the alpha-composited result, so the mask check has to
                 // live here rather than in `drawFillEllipse`/`strokePath`
                 // above (those draw into the scratch overlay, not `bitmap`
-                // itself).
-                guard mask == nil || mask!.contains(x: x, y: y) else { continue }
+                // itself). issue #56: `mask.alpha(x:y:)`'s per-pixel
+                // coverage (`0...255`, not just "in"/"out") scales the
+                // composited `srcAlpha` below instead of a binary skip/keep
+                // gate, so a feathered/anti-aliased selection boundary fades
+                // the pen dab/dot/line in smoothly. `maskAlpha == 0` still
+                // skips the pixel entirely, matching the old behavior for a
+                // hard-edged (or absent) mask exactly.
+                let maskAlpha = mask?.alpha(x: x, y: y) ?? 255
+                guard maskAlpha > 0 else { continue }
 
-                let srcAlpha = Double(srcAlphaByte) / 255.0
                 // Un-premultiply: the overlay stores each channel as
                 // component * alpha, so dividing by alpha recovers the
-                // straight (0-255) component.
-                let srcR = Double(overlayData[srcOffset]) / srcAlpha
-                let srcG = Double(overlayData[srcOffset + 1]) / srcAlpha
-                let srcB = Double(overlayData[srcOffset + 2]) / srcAlpha
+                // straight (0-255) component. Uses the dab's own
+                // (unscaled) alpha — the mask's coverage is folded in
+                // separately below, after un-premultiplying, so it doesn't
+                // distort the recovered color.
+                let srcR = Double(overlayData[srcOffset]) / (Double(srcAlphaByte) / 255.0)
+                let srcG = Double(overlayData[srcOffset + 1]) / (Double(srcAlphaByte) / 255.0)
+                let srcB = Double(overlayData[srcOffset + 2]) / (Double(srcAlphaByte) / 255.0)
+                let srcAlpha = maskAlpha == 255 ? Double(srcAlphaByte) / 255.0 : Double(srcAlphaByte) / 255.0 * Double(maskAlpha) / 255.0
 
                 let destOffset = destRowStart + x * destBpp
                 let destAlpha = Double(destData[destOffset + 3]) / 255.0
@@ -481,27 +508,50 @@ final class PixelCanvas {
             for sx in 0..<source.pixelsWide {
                 let dx = origin.x + sx
                 guard dx >= 0, dx < width else { continue }
-                guard mask == nil || mask!.contains(x: dx, y: dy) else { continue }
                 guard let color = source.colorAt(x: sx, y: sy)?.usingColorSpace(.deviceRGB) else { continue }
                 let alpha = UInt8(max(0, min(255, (color.alphaComponent * 255).rounded())))
                 guard alpha > 0 else { continue }
                 let r = UInt8(max(0, min(255, (color.redComponent * 255).rounded())))
                 let g = UInt8(max(0, min(255, (color.greenComponent * 255).rounded())))
                 let b = UInt8(max(0, min(255, (color.blueComponent * 255).rounded())))
-                blendPixel(x: dx, y: dy, r: r, g: g, b: b, a: alpha, mask: nil)
+                // `mask` (not `nil`, issue #56): `blendPixel` itself now
+                // scales the source alpha by the mask's per-pixel coverage
+                // instead of this call site doing its own binary
+                // `mask!.contains` gate, so a feathered/anti-aliased
+                // selection's partial-coverage boundary blends the
+                // rasterized text proportionally instead of a hard cutoff.
+                blendPixel(x: dx, y: dy, r: r, g: g, b: b, a: alpha, mask: mask)
             }
         }
     }
 
+    /// Source-over blends `(r, g, b, a)` onto the destination pixel at
+    /// `(x, y)`, optionally scaled down by `mask`'s coverage there (issue
+    /// #56).
+    ///
+    /// `mask` no longer just gates this pixel on/off the way it did before
+    /// issue #56 (skip when `mask!.contains(x:y:) == false`, write at full
+    /// strength otherwise): a mask's per-pixel coverage (`0...255`, see
+    /// `SelectionMask.alpha(x:y:)`) now multiplies straight into the source
+    /// alpha before compositing, so a feathered/anti-aliased selection's
+    /// partial-coverage boundary pixels blend proportionally instead of
+    /// getting the same full-strength paint as a fully-selected interior
+    /// pixel. This is still exactly the old binary behavior for every
+    /// hard-edged mask (coverage only ever `0` or `255`): `0` skips the
+    /// pixel entirely (`effectiveAlpha` guard below), `255` leaves `a`
+    /// unscaled.
     private func blendPixel(x: Int, y: Int, r: UInt8, g: UInt8, b: UInt8, a: UInt8, mask: SelectionMask?) {
         guard x >= 0, x < width, y >= 0, y < height else { return }
-        guard mask == nil || mask!.contains(x: x, y: y) else { return }
+        let maskAlpha = mask?.alpha(x: x, y: y) ?? 255
+        guard maskAlpha > 0 else { return }
+        let effectiveAlpha: UInt8 = maskAlpha == 255 ? a : UInt8((Double(a) * Double(maskAlpha) / 255.0).rounded())
+        guard effectiveAlpha > 0 else { return }
         guard let data = bitmap.bitmapData else { return }
         let bytesPerRow = bitmap.bytesPerRow
         let bpp = bitmap.bitsPerPixel / 8
         let offset = y * bytesPerRow + x * bpp
 
-        let srcAlpha = Double(a) / 255.0
+        let srcAlpha = Double(effectiveAlpha) / 255.0
         let destAlpha = Double(data[offset + 3]) / 255.0
         let outAlpha = srcAlpha + destAlpha * (1 - srcAlpha)
         let blend: (UInt8, UInt8) -> UInt8 = { src, dst in
