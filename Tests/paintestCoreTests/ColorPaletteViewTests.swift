@@ -274,4 +274,198 @@ final class ColorPaletteViewTests: XCTestCase {
         XCTAssertEqual(result.filter { $0 == duplicate }.count, 1, "every existing occurrence of the added color must collapse into the single front entry")
         XCTAssertEqual(result.first, duplicate)
     }
+
+    // MARK: - baseRowColors(_:rowIndex:columnCount:) — dynamic column fill (issue #59)
+    //
+    // The first pass at issue #59 filled extra columns by repeating the
+    // existing 14 colors cyclically, which kako-jun flagged as pointless
+    // ("同じ色のパレットが増えてもいみないぞ"): widening the window just showed
+    // the same 14 swatches twice. These tests pin the fix — a widened row
+    // must contain genuinely new colors, not a repeat of the original 14 —
+    // while the classic 14-column width still looks exactly as before.
+
+    func testBaseRowColors_atClassicColumnCount_returnsTheRowUnchanged() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedWhite: CGFloat($0) / 14, alpha: 1) }
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 0, columnCount: sampleRow.count)
+
+        XCTAssertEqual(result, sampleRow, "at the classic 14-column width the row must stay exactly as authored, unchanged by issue #59's widening logic")
+    }
+
+    func testBaseRowColors_widerColumnCount_returnsExactlyColumnCountColors() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedHue: CGFloat($0) / 14, saturation: 1, brightness: 1, alpha: 1) }
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 1, columnCount: 30)
+
+        XCTAssertEqual(result.count, 30)
+    }
+
+    func testBaseRowColors_widerColumnCount_generatesDistinctHuesInsteadOfRepeatingTheOriginal14() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedHue: CGFloat($0) / 14, saturation: 1, brightness: 1, alpha: 1) }
+        let columnCount = 28 // 2x the classic count
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 1, columnCount: columnCount)
+
+        // A naive cyclic repeat of the original 14 colors (the pre-fix
+        // behavior) would only ever produce 14 distinct hues no matter how
+        // wide the row gets. The fixed behavior must do better than that.
+        let uniqueHues = Set(result.map { Int(($0.hueComponent * 1000).rounded()) })
+        XCTAssertGreaterThan(uniqueHues.count, sampleRow.count, "widening the row must reveal genuinely new colors, not just repeat the original 14")
+    }
+
+    func testBaseRowColors_widerColumnCount_rowIndexZeroStaysMutedAndRowIndexOneStaysVivid() {
+        let sampleRow = Array(repeating: NSColor.black, count: 14)
+        let columnCount = 20
+
+        let mutedRow = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 0, columnCount: columnCount)
+        let vividRow = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 1, columnCount: columnCount)
+
+        XCTAssertLessThan(
+            mutedRow[5].saturationComponent, vividRow[5].saturationComponent,
+            "row 0 (muted shades) must stay less saturated than row 1 (vivid tones) once colors are procedurally generated"
+        )
+        XCTAssertLessThan(
+            mutedRow[5].brightnessComponent, vividRow[5].brightnessComponent,
+            "row 0 (muted shades) must stay darker than row 1 (vivid tones) once colors are procedurally generated"
+        )
+    }
+
+    // PR #63 review should-4: the defensive `columnCount < row.count`
+    // truncation branch (not reachable via `columnCount(forWidth:)` today,
+    // since it never returns below `rows[0].count`) had no test either.
+    func testBaseRowColors_narrowerColumnCount_truncatesToPrefix() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedWhite: CGFloat($0) / 14, alpha: 1) }
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 0, columnCount: 10)
+
+        XCTAssertEqual(
+            result, Array(sampleRow.prefix(10)),
+            "a columnCount below row.count must truncate to a prefix, not procedurally generate new colors"
+        )
+    }
+
+    // MARK: - columnCount(forWidth:) — width-to-column-count boundary (issue #59 PR #63 review must-1)
+    //
+    // This is the core conversion the whole issue is about (window width ->
+    // how many swatch columns fit), and it had zero test coverage before an
+    // independent review caught it. Swatch geometry: `swatchSide` 18pt +
+    // `swatchSpacing` 1pt between columns, so n columns span
+    // n*18 + (n-1)*1 = 19n - 1 points.
+
+    func testColumnCountForWidth_exactlyFourteenColumns_returnsFourteen() {
+        // 14*18 + 13*1 = 265
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 265), 14)
+    }
+
+    func testColumnCountForWidth_oneOverFourteenColumnsWidth_staysAtFourteen() {
+        // One point short of what a 15th column would need (284, see below)
+        // — must not round up to 15.
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 266), 14)
+    }
+
+    func testColumnCountForWidth_zeroOrNegative_floorsAtTheClassicFourteen() {
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 0), 14)
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: -100), 14)
+    }
+
+    func testColumnCountForWidth_exactlyFifteenColumns_returnsFifteen() {
+        // 15*18 + 14*1 = 284
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 284), 15)
+    }
+
+    // MARK: - Live-resize batching (isLiveResizing/liveResizeWillStart/liveResizeDidEnd) — issue #59 should-5
+    //
+    // This state machine is only reachable through a real `NSWindow`: it
+    // listens for `NSWindow.willStartLiveResizeNotification`/
+    // `didEndLiveResizeNotification` scoped to `self.window` (registered in
+    // `viewDidMoveToWindow()`), not to the bare, windowless views the rest
+    // of this file builds via `makeView()`. Posting those notifications
+    // directly (rather than performing an actual mouse-driven live resize)
+    // is the same "drive it with a synthetic event, not real user input"
+    // approach already used for `mouseDown`/`rightMouseDown` above — this
+    // project tests internal state carefully (see the
+    // `updateRecentColors(_:)` leak-prevention tests), so this state
+    // shouldn't be the exception.
+
+    /// `n` columns span `n*swatchSide + (n-1)*swatchSpacing` points — see
+    /// `columnCount(forWidth:)`'s own doc comment for the same formula.
+    private func widthForColumns(_ columns: Int) -> CGFloat {
+        CGFloat(columns) * 18 + CGFloat(columns - 1) * 1
+    }
+
+    /// A `ColorPaletteView` actually embedded in a real `NSWindow` (so
+    /// `viewDidMoveToWindow()` fires and registers the live-resize
+    /// observers), sized to fit exactly `columns` columns at launch. The
+    /// window and its container are returned too so the caller can keep
+    /// them alive for the duration of the test — `NSWindow`/`NSView` don't
+    /// retain each other strongly in a way that survives ARC releasing a
+    /// purely-local `NSWindow`.
+    private func makeWindowedView(columns: Int) -> (window: NSWindow, view: ColorPaletteView) {
+        let width = widthForColumns(columns)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 100))
+        window.contentView = container
+
+        let view = ColorPaletteView()
+        view.frame = NSRect(x: 0, y: 0, width: width, height: 60)
+        container.addSubview(view)
+
+        return (window, view)
+    }
+
+    private func gridColumnCount(in view: ColorPaletteView) -> Int? {
+        guard let grid = view.subviews.first as? NSGridView else { return nil }
+        return grid.numberOfColumns
+    }
+
+    func testLiveResize_frameChangeDuringDrag_doesNotRebuildTheGrid() {
+        // `window` must stay alive as a local (not `_`) for the whole test:
+        // nothing else keeps a strong reference to it once
+        // `makeWindowedView` returns, and `view.window` is an unretained
+        // back-pointer — an `NSWindow` that's never `orderFront`-ed and has
+        // no other strong owner would otherwise be deallocated immediately.
+        let (window, view) = makeWindowedView(columns: 14)
+        XCTAssertEqual(gridColumnCount(in: view), 14, "sanity check: starts at the classic 14 columns")
+
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        view.setFrameSize(NSSize(width: widthForColumns(20), height: 60))
+
+        XCTAssertEqual(
+            gridColumnCount(in: view), 14,
+            "a frame change while `NSWindow` is mid-live-resize must not rebuild the grid — only drag end should"
+        )
+    }
+
+    func testLiveResize_dragEnd_catchesUpToTheFinalSizeInOneRebuild() {
+        let (window, view) = makeWindowedView(columns: 14)
+
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        view.setFrameSize(NSSize(width: widthForColumns(20), height: 60))
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+
+        XCTAssertEqual(
+            gridColumnCount(in: view), 20,
+            "ending the live resize must catch up to the final frame size, even though the mid-drag frame change was suppressed"
+        )
+    }
+
+    func testLiveResize_afterDragEnds_ordinaryFrameChangesRebuildImmediatelyAgain() {
+        let (window, view) = makeWindowedView(columns: 14)
+
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        view.setFrameSize(NSSize(width: widthForColumns(20), height: 60))
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+
+        // A further, non-live-resize frame change (e.g. a programmatic
+        // resize) must still take effect immediately — `isLiveResizing`
+        // must not get stuck `true` after a completed drag.
+        view.setFrameSize(NSSize(width: widthForColumns(16), height: 60))
+
+        XCTAssertEqual(gridColumnCount(in: view), 16, "isLiveResizing must reset to false once the drag ends, not stay stuck suppressing rebuilds")
+    }
 }

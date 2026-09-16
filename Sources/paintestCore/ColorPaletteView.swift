@@ -112,6 +112,15 @@ final class ColorPaletteView: NSView {
     // declared below in this same file, can size itself identically.
     fileprivate static let swatchSide: CGFloat = 18
 
+    /// The gap between adjacent swatches, in both directions — shared by
+    /// `columnCount(forWidth:)`'s fit math and `rebuildGrid(columnCount:)`'s
+    /// actual `grid.rowSpacing`/`grid.columnSpacing` (issue #59 PR #63
+    /// review should-3): before this constant existed the two had to be kept
+    /// in sync by a comment alone, which is exactly the kind of
+    /// silently-drifts-apart duplication this codebase avoids elsewhere
+    /// (see `AppDelegate.colorBarHeight`'s "derived, not guessed" comment).
+    private static let swatchSpacing: CGFloat = 1
+
     /// How many colors `updatedRecentColors(adding:to:capacity:)` keeps —
     /// shared with `AppDelegate`, which owns the actual `recentColors`
     /// array (issue #5).
@@ -158,31 +167,194 @@ final class ColorPaletteView: NSView {
 
     private var grid: NSGridView!
 
+    // How many columns the grid is currently built with (issue #59): starts
+    // at the classic 14 and grows as the view widens so the swatches reach
+    // the window's right edge instead of leaving it blank. Never shrinks
+    // below `rows[0].count` — that stays the floor both for the classic
+    // "28-color Paint palette" look and for `recentColorsCapacity`, which is
+    // a *data* concept (how many recent colors are remembered) independent
+    // of how many columns are currently on screen.
+    private var currentColumnCount = rows[0].count
+
+    // The most recent `updateRecentColors(_:)` argument, kept around so a
+    // resize-triggered `rebuildGrid(columnCount:)` can redraw the
+    // recent-colors row at the new column count without losing its content.
+    private var lastRecentColors: [NSColor] = []
+
+    // True between `NSWindow.willStartLiveResizeNotification` and
+    // `didEndLiveResizeNotification` for this view's window (issue #59 PR
+    // #63 review should-5): while the user is actively dragging a window
+    // edge, `frameDidChange()` fires on every intermediate frame, and
+    // rebuilding the whole grid (tear down + recreate 3 rows of
+    // `NSGridView` cells) on each of those would be wasted work and a
+    // visible flicker risk. Rebuilds are suppressed while this is `true`
+    // and caught up once with the final size when live resizing ends.
+    private var isLiveResizing = false
+
     init() {
         super.init(frame: .zero)
-        buildSwatches()
+        // Rebuild the grid whenever this view's own width changes (e.g. the
+        // window is resized) so the swatch columns keep filling it (issue
+        // #59). `postsFrameChangedNotifications` must be turned on for a
+        // plain `NSView` to actually emit this notification.
+        postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(frameDidChange),
+            name: NSView.frameDidChangeNotification,
+            object: self
+        )
+        rebuildGrid(columnCount: currentColumnCount)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private func buildSwatches() {
-        let grid = NSGridView(numberOfColumns: Self.rows[0].count, rows: 0)
-        grid.rowSpacing = 1
-        grid.columnSpacing = 1
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // Tracks the live-resize window notifications against whichever window
+    // this view is currently in (issue #59 should-5) — `object: nil` on the
+    // `removeObserver` calls clears out a stale registration against a
+    // *previous* window before (re-)registering against the current one, so
+    // this stays correct even if the view is ever moved between windows.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self, name: NSWindow.willStartLiveResizeNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didEndLiveResizeNotification, object: nil)
+        guard let window else { return }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(liveResizeWillStart),
+            name: NSWindow.willStartLiveResizeNotification, object: window
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(liveResizeDidEnd),
+            name: NSWindow.didEndLiveResizeNotification, object: window
+        )
+    }
+
+    @objc private func liveResizeWillStart() {
+        isLiveResizing = true
+    }
+
+    @objc private func liveResizeDidEnd() {
+        isLiveResizing = false
+        frameDidChange() // catch up to whatever size the drag settled on
+    }
+
+    @objc private func frameDidChange() {
+        // Suppressed mid-drag (issue #59 should-5, see `isLiveResizing`'s
+        // doc comment) — `liveResizeDidEnd()` calls this again once the
+        // drag settles, so the grid still ends up at the right column count,
+        // just without a rebuild per intermediate frame.
+        guard !isLiveResizing else { return }
+        let desired = Self.columnCount(forWidth: bounds.width)
+        guard desired != currentColumnCount else { return }
+        rebuildGrid(columnCount: desired)
+    }
+
+    /// How many swatch columns fit across `width` without going narrower
+    /// than the classic 14-column palette (issue #59). `width` is this
+    /// view's own bounds width, which already excludes
+    /// `CurrentColorIndicatorView`'s space (see `AppDelegate.makeColorBar()`
+    /// constraints) — so filling it edge-to-edge here is what puts the
+    /// swatches flush against the window's right edge.
+    ///
+    /// `internal`, not `private`, so `ColorPaletteViewTests` can pin its
+    /// boundary behavior directly (PR #63 review must-1: this is the core
+    /// width-to-column-count conversion the whole issue is about, and it
+    /// had no test coverage at all) — same testability reasoning as
+    /// `baseRowColors(_:rowIndex:columnCount:)` and
+    /// `updatedRecentColors(adding:to:capacity:)`.
+    static func columnCount(forWidth width: CGFloat) -> Int {
+        let minimumColumns = rows[0].count
+        guard width > 0 else { return minimumColumns }
+        let cellStride = swatchSide + swatchSpacing
+        // n columns span n*swatchSide + (n-1)*swatchSpacing <= width, i.e.
+        // n <= (width + swatchSpacing) / cellStride.
+        let fitted = Int((width + swatchSpacing) / cellStride)
+        return max(minimumColumns, fitted)
+    }
+
+    /// Adapts a fixed classic-palette row to `columnCount` columns (issue
+    /// #59). At the classic column count (`row.count`, 14) this returns
+    /// `row` untouched, so the default/narrow look stays exactly what it
+    /// was before this issue. Once the grid is wider than that, simply
+    /// repeating the same 14 colors would put visibly duplicate swatches
+    /// side by side for no reason (kako-jun flagged this after the first
+    /// pass) — so instead the whole row is regenerated at `columnCount`
+    /// colors via `proceduralRowColors(rowIndex:columnCount:)`, which
+    /// actually uses the extra width to show more distinct hues.
+    ///
+    /// `internal`, not `private`, so `ColorPaletteViewTests` can exercise it
+    /// directly (the same testability reasoning as
+    /// `updatedRecentColors(adding:to:capacity:)` below).
+    static func baseRowColors(_ row: [NSColor], rowIndex: Int, columnCount: Int) -> [NSColor] {
+        if columnCount == row.count {
+            return row
+        }
+        if columnCount < row.count {
+            // Not reachable via `columnCount(forWidth:)` today (it never
+            // returns below `rows[0].count`), but truncating rather than
+            // procedurally generating keeps this safe if that ever changes.
+            return Array(row.prefix(columnCount))
+        }
+        return proceduralRowColors(rowIndex: rowIndex, columnCount: columnCount)
+    }
+
+    /// Generates `columnCount` colors spread evenly around the hue wheel
+    /// (`hue = column / columnCount`), so widening the window actually
+    /// reveals new, distinct colors instead of a repeated pattern (issue
+    /// #59). `rowIndex` selects a saturation/brightness profile that keeps
+    /// each row's original character: row 0 was "muted shades" (lower
+    /// saturation, on the darker side), row 1 was "vivid tones" (high
+    /// saturation, bright) — see the `rows` doc comment above.
+    private static func proceduralRowColors(rowIndex: Int, columnCount: Int) -> [NSColor] {
+        let isMutedRow = rowIndex == 0
+        let saturation: CGFloat = isMutedRow ? 0.55 : 0.9
+        let brightness: CGFloat = isMutedRow ? 0.55 : 0.95
+        return (0..<columnCount).map { column in
+            let hue = CGFloat(column) / CGFloat(columnCount)
+            return NSColor(calibratedHue: hue, saturation: saturation, brightness: brightness, alpha: 1)
+        }
+    }
+
+    /// `colors`, padded with transparent placeholders up to `columnCount` if
+    /// shorter, or truncated if longer — shared by the initial empty build
+    /// and by `updateRecentColors(_:)`.
+    private static func paddedRecentColors(_ colors: [NSColor], columnCount: Int) -> [NSColor] {
+        var display = Array(colors.prefix(columnCount))
+        if display.count < columnCount {
+            display += Array(repeating: NSColor.clear, count: columnCount - display.count)
+        }
+        return display
+    }
+
+    /// Tears down the current grid (if any) and builds a fresh one at
+    /// `columnCount` columns, reusing `lastRecentColors` so a resize doesn't
+    /// forget the recent-colors row's content (issue #59).
+    private func rebuildGrid(columnCount: Int) {
+        currentColumnCount = columnCount
+        grid?.removeFromSuperview()
+
+        let grid = NSGridView(numberOfColumns: columnCount, rows: 0)
+        grid.rowSpacing = Self.swatchSpacing
+        grid.columnSpacing = Self.swatchSpacing
         grid.translatesAutoresizingMaskIntoConstraints = false
 
-        for row in Self.rows {
-            grid.addRow(with: row.map(makeSwatch))
+        for (rowIndex, row) in Self.rows.enumerated() {
+            grid.addRow(with: Self.baseRowColors(row, rowIndex: rowIndex, columnCount: columnCount).map(makeSwatch))
         }
         // Third row: recently used colors (issue #5), empty at launch —
         // `updateRecentColors(_:)` fills it in as the user picks colors.
         // Transparent placeholders keep the row's column count (and hence
         // the grid's overall geometry) stable from the very first frame.
-        grid.addRow(with: Array(repeating: NSColor.clear, count: Self.rows[0].count).map(makeSwatch))
+        let recentDisplay = Self.paddedRecentColors(lastRecentColors, columnCount: columnCount)
+        grid.addRow(with: recentDisplay.map(makeSwatch))
 
-        for column in 0..<Self.rows[0].count {
+        for column in 0..<columnCount {
             grid.column(at: column).width = Self.swatchSide
         }
 
@@ -210,16 +382,18 @@ final class ColorPaletteView: NSView {
     /// list-like views (e.g. `LayerPanelView.reload()`), rather than
     /// diffing the old row's swatches against the new list.
     ///
-    /// `colors` is padded with transparent placeholders up to the column
-    /// count if shorter, or truncated if somehow longer (callers are
+    /// `colors` is padded with transparent placeholders up to the current
+    /// column count if shorter, or truncated if somehow longer (callers are
     /// expected to already respect `recentColorsCapacity`, but this stays
-    /// safe either way).
+    /// safe either way). The column count itself can be wider than
+    /// `recentColorsCapacity` (issue #59) — capacity is a data-retention
+    /// concept, display width is not — so any extra columns are simply left
+    /// as transparent placeholders.
     func updateRecentColors(_ colors: [NSColor]) {
-        let columnCount = Self.rows[0].count
-        var display = Array(colors.prefix(columnCount))
-        if display.count < columnCount {
-            display += Array(repeating: NSColor.clear, count: columnCount - display.count)
-        }
+        // Remembered so a resize-triggered `rebuildGrid(columnCount:)` can
+        // redraw this row at the new column count (issue #59).
+        lastRecentColors = colors
+        let display = Self.paddedRecentColors(colors, columnCount: currentColumnCount)
 
         // `NSGridView.removeRow(at:)` detaches the row/cells from the grid's
         // *layout*, but does not remove the cells' `contentView`s from the
