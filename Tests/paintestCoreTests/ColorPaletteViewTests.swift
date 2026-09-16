@@ -372,4 +372,100 @@ final class ColorPaletteViewTests: XCTestCase {
         // 15*18 + 14*1 = 284
         XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 284), 15)
     }
+
+    // MARK: - Live-resize batching (isLiveResizing/liveResizeWillStart/liveResizeDidEnd) — issue #59 should-5
+    //
+    // This state machine is only reachable through a real `NSWindow`: it
+    // listens for `NSWindow.willStartLiveResizeNotification`/
+    // `didEndLiveResizeNotification` scoped to `self.window` (registered in
+    // `viewDidMoveToWindow()`), not to the bare, windowless views the rest
+    // of this file builds via `makeView()`. Posting those notifications
+    // directly (rather than performing an actual mouse-driven live resize)
+    // is the same "drive it with a synthetic event, not real user input"
+    // approach already used for `mouseDown`/`rightMouseDown` above — this
+    // project tests internal state carefully (see the
+    // `updateRecentColors(_:)` leak-prevention tests), so this state
+    // shouldn't be the exception.
+
+    /// `n` columns span `n*swatchSide + (n-1)*swatchSpacing` points — see
+    /// `columnCount(forWidth:)`'s own doc comment for the same formula.
+    private func widthForColumns(_ columns: Int) -> CGFloat {
+        CGFloat(columns) * 18 + CGFloat(columns - 1) * 1
+    }
+
+    /// A `ColorPaletteView` actually embedded in a real `NSWindow` (so
+    /// `viewDidMoveToWindow()` fires and registers the live-resize
+    /// observers), sized to fit exactly `columns` columns at launch. The
+    /// window and its container are returned too so the caller can keep
+    /// them alive for the duration of the test — `NSWindow`/`NSView` don't
+    /// retain each other strongly in a way that survives ARC releasing a
+    /// purely-local `NSWindow`.
+    private func makeWindowedView(columns: Int) -> (window: NSWindow, view: ColorPaletteView) {
+        let width = widthForColumns(columns)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 100))
+        window.contentView = container
+
+        let view = ColorPaletteView()
+        view.frame = NSRect(x: 0, y: 0, width: width, height: 60)
+        container.addSubview(view)
+
+        return (window, view)
+    }
+
+    private func gridColumnCount(in view: ColorPaletteView) -> Int? {
+        guard let grid = view.subviews.first as? NSGridView else { return nil }
+        return grid.numberOfColumns
+    }
+
+    func testLiveResize_frameChangeDuringDrag_doesNotRebuildTheGrid() {
+        // `window` must stay alive as a local (not `_`) for the whole test:
+        // nothing else keeps a strong reference to it once
+        // `makeWindowedView` returns, and `view.window` is an unretained
+        // back-pointer — an `NSWindow` that's never `orderFront`-ed and has
+        // no other strong owner would otherwise be deallocated immediately.
+        let (window, view) = makeWindowedView(columns: 14)
+        XCTAssertEqual(gridColumnCount(in: view), 14, "sanity check: starts at the classic 14 columns")
+
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        view.setFrameSize(NSSize(width: widthForColumns(20), height: 60))
+
+        XCTAssertEqual(
+            gridColumnCount(in: view), 14,
+            "a frame change while `NSWindow` is mid-live-resize must not rebuild the grid — only drag end should"
+        )
+    }
+
+    func testLiveResize_dragEnd_catchesUpToTheFinalSizeInOneRebuild() {
+        let (window, view) = makeWindowedView(columns: 14)
+
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        view.setFrameSize(NSSize(width: widthForColumns(20), height: 60))
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+
+        XCTAssertEqual(
+            gridColumnCount(in: view), 20,
+            "ending the live resize must catch up to the final frame size, even though the mid-drag frame change was suppressed"
+        )
+    }
+
+    func testLiveResize_afterDragEnds_ordinaryFrameChangesRebuildImmediatelyAgain() {
+        let (window, view) = makeWindowedView(columns: 14)
+
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        view.setFrameSize(NSSize(width: widthForColumns(20), height: 60))
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+
+        // A further, non-live-resize frame change (e.g. a programmatic
+        // resize) must still take effect immediately — `isLiveResizing`
+        // must not get stuck `true` after a completed drag.
+        view.setFrameSize(NSSize(width: widthForColumns(16), height: 60))
+
+        XCTAssertEqual(gridColumnCount(in: view), 16, "isLiveResizing must reset to false once the drag ends, not stay stuck suppressing rebuilds")
+    }
 }

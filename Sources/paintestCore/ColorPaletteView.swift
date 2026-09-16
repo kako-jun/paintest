@@ -105,7 +105,7 @@ final class ColorPaletteView: NSView {
     /// The gap between adjacent swatches, in both directions — shared by
     /// `columnCount(forWidth:)`'s fit math and `rebuildGrid(columnCount:)`'s
     /// actual `grid.rowSpacing`/`grid.columnSpacing` (issue #59 PR #63
-    /// review must-3): before this constant existed the two had to be kept
+    /// review should-3): before this constant existed the two had to be kept
     /// in sync by a comment alone, which is exactly the kind of
     /// silently-drifts-apart duplication this codebase avoids elsewhere
     /// (see `AppDelegate.colorBarHeight`'s "derived, not guessed" comment).
