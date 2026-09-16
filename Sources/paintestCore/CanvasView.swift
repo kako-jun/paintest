@@ -580,6 +580,33 @@ final class CanvasView: NSView {
         return fitting.max() ?? levels.first ?? 1
     }
 
+    /// "ウィンドウに合わせる" (Cmd+0, issue #55): zooms to the largest level at
+    /// which the *whole canvas* fits inside the current viewport, reusing
+    /// the magnifier drag-to-zoom's own `bestFitZoomLevel(forPixelSize:
+    /// viewportSize:levels:)` (issue #13) with the canvas's full pixel size
+    /// in place of a dragged rectangle. Recenters the scroll position on the
+    /// canvas's own center afterward — without this, whatever scroll offset
+    /// was left over from the previous zoom level could point at empty
+    /// space or a clipped corner once the canvas's on-screen size changes.
+    func zoomToFit() {
+        let viewportSize = enclosingScrollView?.contentView.bounds.size ?? bounds.size
+        let bestLevel = CanvasView.bestFitZoomLevel(
+            forPixelSize: (width: layerStack.width, height: layerStack.height),
+            viewportSize: viewportSize,
+            levels: CanvasView.zoomLevels
+        )
+        setZoomScale(bestLevel)
+        centerScroll(onPixelPoint: (x: layerStack.width / 2, y: layerStack.height / 2))
+    }
+
+    /// "実寸表示" (Cmd+1, issue #55): jumps straight to 100% (`zoomScale ==
+    /// 1`) regardless of the current level, then recenters the scroll
+    /// position the same way `zoomToFit()` does and for the same reason.
+    func zoomToActualSize() {
+        setZoomScale(1)
+        centerScroll(onPixelPoint: (x: layerStack.width / 2, y: layerStack.height / 2))
+    }
+
     // MARK: - Layer transform (issue #9, round 1: move + scale; round 2: rotate)
 
     /// Enters transform mode for the active layer ("自由変形", Cmd+T — see
