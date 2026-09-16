@@ -13,6 +13,17 @@ import AppKit
 /// `mouseDragged` only starts reporting a drag once the pointer has moved
 /// past `dragThreshold`, so ordinary select-clicks (which always wobble a
 /// pixel or two) never get mistaken for a reorder drag.
+///
+/// No Escape-to-cancel (independent review of issue #54's PR, should-2):
+/// deliberately out of scope for this issue rather than an oversight. A
+/// mid-drag Escape would need this row to become (or already be) first
+/// responder purely to catch a key event during an active mouse-tracking
+/// loop — real added complexity — for a gesture that's already cheap to
+/// recover from today: releasing the mouse over the row's own current
+/// position is already a no-op (`LayerPanelView.finishDrag`), and any
+/// unwanted drop can simply be dragged back with the "上へ"/"下へ" buttons
+/// or another drag. Revisit only if this actually comes up as a usability
+/// complaint in practice.
 private final class LayerRowView: NSView {
     var onSelectRow: (() -> Void)?
     /// Fired on every `mouseDragged` once the gesture has moved past

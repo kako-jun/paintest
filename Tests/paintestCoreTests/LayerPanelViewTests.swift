@@ -468,6 +468,51 @@ final class LayerPanelViewTests: XCTestCase {
         XCTAssertEqual(stack.layers.map { $0.name }, ["B", "C", "レイヤー1"])
     }
 
+    func testRowDrag_whileDraggingOverAnotherRow_highlightsItAsTheDropTarget() {
+        // Independent-review should-1: the earlier drag tests only ever
+        // checked the *final* state (after `mouseUp` commits the move) —
+        // none of them actually looked at what happens *during* the drag,
+        // before the drop. This pins down `updateDropIndicator`'s own
+        // effect: mid-drag, the row the pointer is currently hovering over
+        // must already show the drop-target highlight, before `mouseUp`
+        // (and therefore before `layerStack` itself changes at all).
+        let (panel, window, stack) = makePanelInWindow(layerNames: ["レイヤー1", "B", "C"])
+        let initialRows = rows(in: panel)
+        XCTAssertEqual(initialRows.count, 3, "precondition: three rows")
+
+        let sourceRow = initialRows[2] // "レイヤー1"
+        let startPoint = windowCenter(of: sourceRow, in: window)
+        let targetPoint = windowCenter(of: initialRows[0], in: window) // hovering over "C"'s row
+
+        sourceRow.mouseDown(with: mouseEvent(.leftMouseDown, at: startPoint, in: window))
+        // `mouseDown` selects "レイヤー1", which (like every other row
+        // selection) rebuilds every row view via `reload()` — so the row
+        // actually showing the highlight after `mouseDragged` below is a
+        // *fresh* view, not `initialRows[0]`. Re-fetch the current rows
+        // rather than reusing the pre-drag references, same reasoning
+        // `performDrag`'s own doc comment already spells out.
+        sourceRow.mouseDragged(with: mouseEvent(.leftMouseDragged, at: targetPoint, in: window))
+
+        XCTAssertEqual(stack.layers.map { $0.name }, ["レイヤー1", "B", "C"], "precondition: mouseDragged alone must not have moved anything yet — only mouseUp commits the move")
+
+        let expectedDropTargetColor = NSColor.controlAccentColor.withAlphaComponent(0.35).cgColor
+        let rowsDuringDrag = rows(in: panel)
+        XCTAssertEqual(rowsDuringDrag.count, 3, "precondition: still three rows mid-drag")
+        // rowsDuringDrag[0] is "C"'s row (display order is unchanged by a
+        // drag that hasn't been dropped yet) — the one the pointer is
+        // currently over.
+        XCTAssertEqual(rowsDuringDrag[0].layer?.backgroundColor, expectedDropTargetColor, "the row currently under the pointer must show the drop-target highlight while the drag is in progress")
+        // The dragged row's own original position ("レイヤー1", now at
+        // rowsDuringDrag[2] since order hasn't changed yet) must NOT also
+        // be tinted as a drop target — only the actual hover target is.
+        XCTAssertNotEqual(rowsDuringDrag[2].layer?.backgroundColor, expectedDropTargetColor, "only the row actually under the pointer should be highlighted, not the row being dragged")
+
+        // Finish the gesture so the drag doesn't leak into later tests via
+        // any shared state (none currently exists, but this keeps the test
+        // self-contained regardless).
+        sourceRow.mouseUp(with: mouseEvent(.leftMouseUp, at: targetPoint, in: window))
+    }
+
     func testRowDrag_droppedOntoAnotherRow_firesOnChange() {
         let (panel, window, stack) = makePanelInWindow(layerNames: ["レイヤー1", "B", "C"])
         var onChangeCount = 0
