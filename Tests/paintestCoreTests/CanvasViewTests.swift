@@ -6882,6 +6882,51 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertLessThan(rightColumnHeight, leftColumnHeight, "the first typed line (\"A\", one character) must land in the shorter, rightmost column, and the second line (\"BBBB\", four characters) in the taller, leftmost column")
     }
 
+    func testCommitTextEdit_isVertical_multilineText_withCJKCharacters_producesSideBySideColumns() {
+        // Vertical writing (tategaki) is primarily a CJK feature — issue
+        // #50 itself is about Japanese-style multi-column layout — but
+        // every test above only exercises ASCII ("A"/"B"). Same "does a
+        // second Return-separated line add a second column" check as
+        // `testCommitTextEdit_isVertical_multilineText_
+        // producesSideBySideColumns_notCollapsedIntoOneTallColumn` above,
+        // with real Japanese text (two three-character hiragana lines)
+        // instead of a Latin placeholder.
+        func paint(_ text: String) -> PixelCanvas {
+            let zoomScale = 4
+            let view = makeViewInWindow(width: 96, height: 96, zoomScale: zoomScale)
+            view.activeTool = .text
+            view.foregroundColor = .black
+            view.textSettings.fontSize = 12
+            view.textSettings.isVertical = true
+            let window = view.window!
+            let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: point, in: window))
+            typeText(text, into: view)
+            view.commitTextEdit()
+            return view.layerStack.activeLayer.canvas
+        }
+
+        let singleLineCanvas = paint("あいう")
+        let twoLineCanvas = paint("あいう\nかきく")
+
+        guard let singleLineBox = nonWhiteBoundingBox(singleLineCanvas, width: 96, height: 96) else {
+            XCTFail("precondition: single-line vertical bake of Japanese text must paint something")
+            return
+        }
+        guard let twoLineBox = nonWhiteBoundingBox(twoLineCanvas, width: 96, height: 96) else {
+            XCTFail("precondition: two-line vertical bake of Japanese text must paint something")
+            return
+        }
+
+        let singleLineWidth = singleLineBox.maxX - singleLineBox.minX + 1
+        let singleLineHeight = singleLineBox.maxY - singleLineBox.minY + 1
+        let twoLineWidth = twoLineBox.maxX - twoLineBox.minX + 1
+        let twoLineHeight = twoLineBox.maxY - twoLineBox.minY + 1
+
+        XCTAssertGreaterThan(twoLineWidth, singleLineWidth, "a second Return-separated line of Japanese text (\"かきく\") must add a second column beside the first (\"あいう\"), not disappear into it")
+        XCTAssertLessThan(Double(twoLineHeight), Double(singleLineHeight) * 1.5, "the second Japanese line must not stack underneath the first inside one tall column — this is the same issue #50 bug the ASCII tests above cover, just with the script vertical writing actually exists for")
+    }
+
     // MARK: - updateTextEditorForZoomChange() (issue #42 review round 2
     // should-1)
     //

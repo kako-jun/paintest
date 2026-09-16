@@ -2280,6 +2280,11 @@ final class CanvasView: NSView {
         let measureSize = NSSize(width: 10_000, height: 10_000)
         let drawingOptions: NSString.DrawingOptions = [.usesLineFragmentOrigin, .usesFontLeading]
 
+        // `text` is always non-empty here (`commitTextEdit()`'s own `guard
+        // !text.isEmpty` is the only caller reaching `rasterizeText(_:at:)`,
+        // which is this method's only caller), so splitting on `"\n"` with
+        // `omittingEmptySubsequences: false` always yields at least one
+        // element — `columns` below can never actually be empty.
         let columns: [(attributedText: NSAttributedString, boundingRect: CGRect)] = text
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { line in
@@ -2288,10 +2293,19 @@ final class CanvasView: NSView {
                 let boundingRect = attributedText.boundingRect(with: measureSize, options: drawingOptions)
                 return (attributedText, boundingRect)
             }
-        guard !columns.isEmpty else { return nil }
 
         let columnWidths = columns.map { max(1, Int($0.boundingRect.width.rounded(.up))) }
-        let width = max(1, columnWidths.reduce(0, +))
+        // A small gap between columns — reviewed at several zoom levels
+        // against Photoshop's own vertical type, which doesn't butt
+        // adjacent columns flush against each other the way a naive
+        // side-by-side composite would; a quarter of the font's point size
+        // reads as "a column gap" at both small pixel-art sizes and large
+        // display sizes without ballooning the bake. `max(1, ...)` keeps it
+        // visible even at very small font sizes rather than rounding away
+        // to 0. No gap before the first or after the last column, and none
+        // at all for single-column (single-line) text.
+        let columnSpacing = columns.count > 1 ? max(1, Int((font.pointSize * 0.25).rounded())) : 0
+        let width = max(1, columnWidths.reduce(0, +) + columnSpacing * max(0, columns.count - 1))
         let height = max(1, columns.map { Int($0.boundingRect.height.rounded(.up)) }.max() ?? 1)
 
         guard let (bitmap, context) = CanvasView.makeBitmapContext(width: width, height: height) else { return nil }
@@ -2300,7 +2314,8 @@ final class CanvasView: NSView {
         defer { NSGraphicsContext.current = previousContext }
 
         // Right-to-left: the first Return-separated line the user typed is
-        // the rightmost column, each subsequent line extends further left.
+        // the rightmost column, each subsequent line extends further left,
+        // separated by `columnSpacing`.
         var columnRightEdge = CGFloat(width)
         for (index, column) in columns.enumerated() {
             let columnWidth = CGFloat(columnWidths[index])
@@ -2314,7 +2329,7 @@ final class CanvasView: NSView {
                 ),
                 options: drawingOptions
             )
-            columnRightEdge = columnLeftEdge
+            columnRightEdge = columnLeftEdge - CGFloat(columnSpacing)
         }
         return bitmap.cgImage
     }
