@@ -1,5 +1,24 @@
 import AppKit
 
+/// An `NSGridView` that reports itself as flipped, so row 0 (the first tool)
+/// sits at the top of the toolbox instead of the bottom (issue #71). Same
+/// trick as `LayerPanelView`'s `FlippedStackView` / `HistoryPanelView`'s
+/// `FlippedHistoryStackView` / `DocumentTabBarView`'s `FlippedTabStackView`
+/// — every other scrolling panel in this codebase already flips its
+/// documentView; `ToolboxView` was the one holdout, and it showed: with a
+/// non-flipped `NSGridView` as the documentView, `NSClipView` anchors
+/// undersized content to its own bottom-left corner (non-flipped coordinate
+/// system, origin at the bottom), so the `grid.topAnchor` constraint below
+/// was satisfied on paper while the grid still rendered bottom-aligned
+/// whenever the window was taller than the 21-button grid's natural height
+/// — which is the normal case. Flipping the documentView itself (rather
+/// than swapping in a custom `NSClipView` subclass) keeps the fix local to
+/// this file and matches how every sibling panel already solves the exact
+/// same problem.
+private final class FlippedGridView: NSGridView {
+    override var isFlipped: Bool { true }
+}
+
 /// Photoshop's left-hand toolbox: a 2-column grid of tool icons (issue #58;
 /// was a single column under issue #7, which itself had replaced the
 /// original 2-column grid from issue #2 — #7's "Photoshop is single-column"
@@ -99,7 +118,7 @@ final class ToolboxView: NSView {
     }
 
     private func buildGrid() {
-        let grid = NSGridView(numberOfColumns: 2, rows: 0)
+        let grid = FlippedGridView(numberOfColumns: 2, rows: 0)
         grid.rowSpacing = 1
         grid.columnSpacing = 1
         grid.translatesAutoresizingMaskIntoConstraints = false

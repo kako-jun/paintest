@@ -145,6 +145,34 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(grid.numberOfColumns, 2, "the toolbox should be a 2-column grid, matching Photoshop's 2-column toolbar layout (issue #58)")
     }
 
+    // Regression test for issue #71: the grid (the scroll view's
+    // documentView) rendered bottom-aligned instead of top-aligned even
+    // though `grid.topAnchor` was pinned to `scrollView.contentView.topAnchor`
+    // with a small constant, because `NSClipView`'s coordinate system is
+    // non-flipped by default (origin at the bottom-left) — an undersized
+    // documentView anchors to that bottom-left corner regardless of its own
+    // top-anchor constraint. This can't be verified via `grid.frame` in a
+    // headless XCTest without a real window and a forced Auto Layout pass
+    // (`layoutSubtreeIfNeeded()` on an offscreen view still resolves frames
+    // relative to an unflipped clip view either way, so a frame-origin
+    // assertion here wouldn't actually distinguish flipped from unflipped —
+    // the divergence only shows up in how `NSScrollView` visually anchors
+    // undersized content, which is a rendering-time behavior, not a
+    // layout-constraint one). Asserting `isFlipped` directly on the grid is
+    // the precise, headless-safe way to pin down the fix: every sibling
+    // scrolling panel in this codebase (`LayerPanelView`'s `FlippedStackView`,
+    // `HistoryPanelView`'s `FlippedHistoryStackView`,
+    // `DocumentTabBarView`'s `FlippedTabStackView`) solves the identical
+    // problem the identical way, and none of them frame-test it either.
+    func testGrid_isFlipped_soItAnchorsToTheTopWhenUndersized() {
+        let view = makeView()
+        guard let grid = findGridView(in: view) else {
+            XCTFail("could not find the toolbox's grid view")
+            return
+        }
+        XCTAssertTrue(grid.isFlipped, "the grid must report a flipped coordinate system so NSClipView anchors it to the top-left instead of the bottom-left when it's shorter than the scroll view's visible height (issue #71)")
+    }
+
     func testGrid_21OddToolCount_fills11RowsWithTheLastRowHoldingOnlyOneButton() {
         let view = makeView()
         guard let grid = findGridView(in: view) else {
