@@ -145,6 +145,64 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(grid.numberOfColumns, 2, "the toolbox should be a 2-column grid, matching Photoshop's 2-column toolbar layout (issue #58)")
     }
 
+    // Regression test for issue #71: the grid (the scroll view's
+    // documentView) rendered bottom-aligned instead of top-aligned even
+    // though `grid.topAnchor` was pinned to `scrollView.contentView.topAnchor`
+    // with a small constant, because `NSClipView`'s coordinate system is
+    // non-flipped by default (origin at the bottom-left) — an undersized
+    // documentView anchors to that bottom-left corner regardless of its own
+    // top-anchor constraint.
+    //
+    // The fix flips the scroll view's *clip view* (`FlippedClipView`, a
+    // private `NSClipView` subclass), not the grid itself. An earlier
+    // version instead made the grid (an `NSGridView`) report
+    // `isFlipped == true`; that passed `swift build`/`swift test` and even
+    // this file's own cell-structure tests below, but broke on the actual
+    // screen (kako-jun caught it by pixel-sampling a real screenshot):
+    // `NSGridView` keeps its own internal row/column geometry cache, and
+    // overriding `isFlipped` on an `NSGridView` subclass collided with it,
+    // silently collapsing the 2-column layout (issue #58) down to 1 column
+    // on screen even though the cell structure still reported 2 columns.
+    // That's why this test asserts the grid itself stays *non*-flipped
+    // (guarding against re-introducing that regression) while the clip
+    // view is flipped instead.
+    //
+    // Neither the *anchor* (top vs. bottom) nor the *column collapse*
+    // regression the earlier `FlippedGridView` version caused is
+    // verifiable from resolved frames in a headless XCTest. This was
+    // double-checked directly: forcing a real Auto Layout pass on an
+    // unparented, windowless `ToolboxView` (`layoutSubtreeIfNeeded()`, no
+    // window/WindowServer required) and dumping every button's resolved
+    // frame gives the *exact same* 2-distinct-x-origin, correctly-ordered
+    // geometry for both the broken `FlippedGridView` version and this
+    // fixed `FlippedClipView` version — `NSView.convert(_:to:)` normalizes
+    // away coordinate-flip differences between ancestors, so Auto Layout's
+    // resolved frames can't tell the two apart even though they render
+    // completely differently on an actual screen (2 columns vs. 1 column
+    // collapsed, bottom-anchored vs. top-anchored). Both regressions are
+    // strictly rendering/compositing-time phenomena inside `NSGridView`
+    // and `NSScrollView`'s own internal drawing, not Auto Layout defects,
+    // so this test suite cannot substitute for an on-screen check — this
+    // fix was confirmed by launching the real app (`swift run`) and
+    // inspecting a real screenshot, not by `swift test` alone. Given that,
+    // asserting `grid.isFlipped == false` here is a narrow but real guard
+    // against literally reintroducing the exact previous (broken) code
+    // path, even though it can't independently prove the fix renders
+    // correctly.
+    func testGridStaysNonFlipped_whileTheScrollViewsClipViewIsFlipped() {
+        let view = makeView()
+        guard let grid = findGridView(in: view) else {
+            XCTFail("could not find the toolbox's grid view")
+            return
+        }
+        guard let scrollView = findScrollView(in: view) else {
+            XCTFail("could not find the toolbox's scroll view")
+            return
+        }
+        XCTAssertFalse(grid.isFlipped, "the grid (NSGridView) itself must stay non-flipped — flipping it previously broke issue #58's 2-column layout on screen (issue #71 regression)")
+        XCTAssertTrue(scrollView.contentView.isFlipped, "the scroll view's clip view must report a flipped coordinate system so it anchors the grid to the top-left instead of the bottom-left when the grid is shorter than the scroll view's visible height (issue #71)")
+    }
+
     func testGrid_21OddToolCount_fills11RowsWithTheLastRowHoldingOnlyOneButton() {
         let view = makeView()
         guard let grid = findGridView(in: view) else {

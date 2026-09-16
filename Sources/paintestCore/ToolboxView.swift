@@ -1,5 +1,35 @@
 import AppKit
 
+/// An `NSClipView` that reports itself as flipped, so the scroll view
+/// anchors an undersized `documentView` to its top-left corner instead of
+/// its bottom-left corner (issue #71). `NSClipView`'s coordinate system is
+/// non-flipped by default (origin at the bottom-left); when its
+/// `documentView` (the toolbox `grid` below) is shorter than the visible
+/// area, that non-flipped clip view still anchors the document to its own
+/// bottom-left origin regardless of any top-anchor constraint on the
+/// document itself, so the grid rendered bottom-aligned even though
+/// `grid.topAnchor` was pinned to `scrollView.contentView.topAnchor`.
+///
+/// An earlier version of this fix (see PR history) made `grid` itself
+/// (an `NSGridView`) report `isFlipped == true` instead of doing it here.
+/// That looked right in a headless test and even in `swift build`/`swift
+/// test`, but broke on the actual screen: `NSGridView` keeps its own
+/// internal row/column geometry cache, and overriding `isFlipped` on an
+/// `NSGridView` subclass conflicts with that cache, silently dropping the
+/// second column's buttons from the rendered layout (2 columns collapsed
+/// to 1, confirmed by pixel-sampling a real screenshot — the second
+/// column's cells still existed structurally, at their configured width,
+/// but rendered empty). Flipping the *clip view* instead — the same
+/// `NSClipView` subclassing candidate `LayerPanelView`/`HistoryPanelView`/
+/// `DocumentTabBarView` didn't need because their documentViews are plain
+/// `NSStackView`s, not the more special-cased `NSGridView` — leaves `grid`
+/// itself completely untouched, so #58's 2-column layout can't be
+/// disturbed by this fix no matter how `NSGridView` computes its own
+/// geometry internally.
+private final class FlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
+}
+
 /// Photoshop's left-hand toolbox: a 2-column grid of tool icons (issue #58;
 /// was a single column under issue #7, which itself had replaced the
 /// original 2-column grid from issue #2 — #7's "Photoshop is single-column"
@@ -142,6 +172,11 @@ final class ToolboxView: NSView {
         // window at typical sizes, so the grid scrolls vertically instead
         // of widening back into extra columns.
         let scrollView = NSScrollView()
+        // Must be assigned before `documentView` below: `NSScrollView` sets
+        // up its default `NSClipView` at init time, and swapping the clip
+        // view out after a documentView is already installed risks losing
+        // that document view's wiring into the (old) clip view.
+        scrollView.contentView = FlippedClipView()
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
