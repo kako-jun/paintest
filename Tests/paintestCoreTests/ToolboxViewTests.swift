@@ -136,13 +136,13 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 21 buttons in one column run taller than the window")
     }
 
-    func testGrid_hasSingleColumn() {
+    func testGrid_hasTwoColumns() {
         let view = makeView()
         guard let grid = findGridView(in: view) else {
             XCTFail("could not find the toolbox's grid view")
             return
         }
-        XCTAssertEqual(grid.numberOfColumns, 1, "the toolbox should be a single vertical column, matching Photoshop's layout")
+        XCTAssertEqual(grid.numberOfColumns, 2, "the toolbox should be a 2-column grid, matching Photoshop's 2-column toolbar layout (issue #58)")
     }
 
     // MARK: - Pencil/eraser exclusive tool selection (issue #5)
