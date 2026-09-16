@@ -63,10 +63,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // sections instead of one undifferentiated gray block.
     private static let panelDividerColor = NSColor(calibratedWhite: 0.6, alpha: 1)
 
-    // Single column of buttons (issue #7; was 2 columns' worth under #2):
-    // button width + a little breathing room on each side, plus the
-    // vertical scroller's own track width.
-    private static let toolboxWidth: CGFloat = ToolboxView.buttonSide + 20
+    // 2 columns of buttons (issue #58; was a single column under #7, which
+    // had temporarily reverted #2's original 2-column grid): 2 button
+    // widths + the grid's inter-column spacing (1pt) + a little breathing
+    // room on each side, plus the vertical scroller's own track width.
+    private static let toolboxWidth: CGFloat = ToolboxView.buttonSide * 2 + 1 + 20
     // Derived, not guessed (issue #5 — the exact bug class from #7's
     // self-review: a fixed-height constant that silently stops matching the
     // content it wraps). `ColorPaletteView`'s swatch grid grew from 2 rows
