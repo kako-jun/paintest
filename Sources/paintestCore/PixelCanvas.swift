@@ -96,27 +96,91 @@ final class PixelCanvas {
     /// bucket-fill "dot-exact, no blur" guarantee intact (issue #56 scope —
     /// see `SelectionMask`'s own doc comment). Only a *partial*-coverage
     /// boundary pixel (feather > 0 or a shape's own `antiAlias`) takes the
-    /// different path below: `color` is alpha-composited ("source over")
-    /// onto the existing pixel, scaled by that coverage fraction, so a soft
-    /// selection edge fades the paint in smoothly rather than producing a
-    /// hard binary cutoff at some arbitrary coverage threshold.
+    /// different path below, via `blendTowardOverwrite` — see that method's
+    /// own doc comment for why this is deliberately *not* the same
+    /// "alpha-composite, scaled by coverage" math `blendPixel` (further
+    /// down) uses: `setPixel`'s own "full write" is a literal overwrite, not
+    /// a composite, and issue #57's Delete/clear-selection (`setPixel(...,
+    /// color: .clear, mask: selection)`) depends on that distinction to
+    /// fade a feathered selection's edge toward transparent rather than
+    /// leaving it untouched.
     func setPixel(x: Int, y: Int, color: NSColor, mask: SelectionMask? = nil) {
         guard x >= 0, x < width, y >= 0, y < height else { return }
         let maskAlpha = mask?.alpha(x: x, y: y) ?? 255
         guard maskAlpha > 0 else { return }
         guard let data = bitmap.bitmapData else { return }
         let (r, g, b, a) = components(of: color)
+        let bytesPerRow = bitmap.bytesPerRow
+        let bpp = bitmap.bitsPerPixel / 8
+        let offset = y * bytesPerRow + x * bpp
         guard maskAlpha < 255 else {
-            let bytesPerRow = bitmap.bytesPerRow
-            let bpp = bitmap.bitsPerPixel / 8
-            let offset = y * bytesPerRow + x * bpp
             data[offset] = r
             data[offset + 1] = g
             data[offset + 2] = b
             data[offset + 3] = a
             return
         }
-        blendPixel(x: x, y: y, r: r, g: g, b: b, a: a, mask: mask)
+        blendTowardOverwrite(atOffset: offset, targetR: r, targetG: g, targetB: b, targetA: a, coverage: maskAlpha, data: data)
+    }
+
+    /// `setPixel`'s partial-mask-coverage blend (issue #56) — computes a
+    /// coverage-weighted mix between the existing destination pixel
+    /// ("untouched") and `(targetR, targetG, targetB, targetA)` written
+    /// outright ("fully overwritten"), in *premultiplied* alpha space.
+    ///
+    /// This is deliberately not the same math as `blendPixel` below (which
+    /// scales the *source*'s own alpha by the mask's coverage, then
+    /// composites normally): that's the right model when "the full write"
+    /// is itself an alpha-composite over the destination (`blendPixel`'s own
+    /// callers — `compositeOverlay`/`compositeImage`/`drawAntialiased`'s pen
+    /// dabs, all of which are already blending semi-transparent paint onto
+    /// existing content even with no mask at all). `setPixel`'s own "full
+    /// write" is a literal overwrite instead (its `maskAlpha == 255`/no-mask
+    /// path above never composites), so its coverage blend has to target
+    /// that literal overwrite, not a composite of it.
+    ///
+    /// The distinction matters concretely for issue #57's Delete/clear-
+    /// selection, which calls `setPixel(..., color: .clear, mask:
+    /// selection)` — `.clear` is `(0, 0, 0, 0)`. Scaling a *zero* source
+    /// alpha by coverage (the `blendPixel` model) stays zero regardless of
+    /// coverage, so a feathered selection's partially-covered boundary
+    /// pixels would never fade toward transparent at all — a silent no-op
+    /// exactly where feathering is supposed to matter most. Blending toward
+    /// the *literal* target `(0, 0, 0, 0)` instead correctly fades the
+    /// destination's alpha down by the coverage fraction.
+    ///
+    /// Interpolating in *premultiplied* space (not straight-alpha space) is
+    /// what keeps that fade from also darkening the destination's color
+    /// toward black as it goes more transparent: straight-alpha
+    /// interpolation would pull `(destR, destG, destB)` toward `(0, 0, 0)`
+    /// in lockstep with the alpha fade, even though a fully-transparent
+    /// pixel's own RGB is never actually displayed. Premultiplied
+    /// interpolation, once un-premultiplied back out, instead preserves the
+    /// destination's original color and only reduces its alpha — verified
+    /// by `PixelCanvasTests
+    /// .testSetPixel_partialMaskCoverage_erasingThroughAFeather_preservesColor_onlyFadesAlpha`.
+    /// The same premultiplied math also reproduces the expected "paint a
+    /// solid opaque color through a feathered selection over an opaque
+    /// layer" result (a smooth color blend that stays opaque, not a fade to
+    /// transparency) — see `testSetPixel_partialMaskCoverage_blendsProportionally_neitherOverwritesNorSkips`.
+    private func blendTowardOverwrite(atOffset offset: Int, targetR: UInt8, targetG: UInt8, targetB: UInt8, targetA: UInt8, coverage: UInt8, data: UnsafeMutablePointer<UInt8>) {
+        let t = Double(coverage) / 255.0
+        let destAlphaFraction = Double(data[offset + 3]) / 255.0
+        let targetAlphaFraction = Double(targetA) / 255.0
+        let outAlpha = Double(data[offset + 3]) * (1 - t) + Double(targetA) * t
+
+        let blend: (UInt8, UInt8) -> Double = { destChannel, targetChannel in
+            let destPremult = Double(destChannel) * destAlphaFraction
+            let targetPremult = Double(targetChannel) * targetAlphaFraction
+            let outPremult = destPremult * (1 - t) + targetPremult * t
+            guard outAlpha > 0 else { return 0 }
+            return outPremult / (outAlpha / 255.0)
+        }
+
+        data[offset] = UInt8(max(0, min(255, blend(data[offset], targetR).rounded())))
+        data[offset + 1] = UInt8(max(0, min(255, blend(data[offset + 1], targetG).rounded())))
+        data[offset + 2] = UInt8(max(0, min(255, blend(data[offset + 2], targetB).rounded())))
+        data[offset + 3] = UInt8(max(0, min(255, outAlpha.rounded())))
     }
 
     /// Draws a 1px line between two pixel coordinates using Bresenham's
