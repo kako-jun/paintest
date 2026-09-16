@@ -743,6 +743,30 @@ final class PixelCanvasTests: XCTestCase {
         XCTAssertEqual(target.rawPixel(x: 6, y: 1)?.r, 255, "a source pixel outside the mask must be skipped, even though it's fully opaque and would otherwise paint")
     }
 
+    func testCompositeImage_partialMaskCoverage_blendsProportionally_issue56() {
+        // `compositeImage` (the text tool's rasterization path) delegates
+        // its mask handling to `blendPixel` (issue #56) instead of its own
+        // binary gate — this is the regression guard that a feathered
+        // selection's soft boundary actually reaches this call site too,
+        // not just `setPixel`.
+        let image = makeSourceImage(width: 1, height: 1) { _, _ in .black }
+        let target = PixelCanvas(width: 20, height: 20, background: .white)
+        let hardMask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let mask = hardMask.feathered(radius: 1)
+        let partialCoverage = mask.alpha(x: 15, y: 9)
+        XCTAssertGreaterThan(partialCoverage, 0, "precondition")
+        XCTAssertLessThan(partialCoverage, 255, "precondition")
+
+        target.compositeImage(image, at: (x: 15, y: 9), mask: mask)
+
+        guard let pixel = target.rawPixel(x: 15, y: 9) else {
+            XCTFail("expected a pixel")
+            return
+        }
+        XCTAssertGreaterThan(pixel.r, 0, "should not be fully overwritten with black")
+        XCTAssertLessThan(pixel.r, 255, "should not be left fully untouched white")
+    }
+
     func testCompositeImage_originPartiallyOffCanvasEdge_clipsCleanly_doesNotCrash() {
         let image = makeSourceImage(width: 4, height: 4) { _, _ in .black }
         let target = PixelCanvas(width: 8, height: 8, background: .white)
@@ -1034,6 +1058,109 @@ final class PixelCanvasTests: XCTestCase {
         let canvas = PixelCanvas(width: 4, height: 4, background: .white)
         canvas.setPixel(x: 1, y: 1, color: .black, mask: nil)
         XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.r, 0)
+    }
+
+    // MARK: - Feathered/anti-aliased selection masks blend proportionally (issue #56)
+
+    func testSetPixel_partialMaskCoverage_blendsProportionally_neitherOverwritesNorSkips() {
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        let hardMask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let mask = hardMask.feathered(radius: 1)
+        let partialCoverage = mask.alpha(x: 15, y: 9)
+        // Precondition, mirroring `SelectionMaskTests
+        // .testFeathered_positiveRadius_softensTheBoundaryBothWays`: this
+        // pixel must actually have partial (not full, not zero) coverage
+        // for this test to exercise the blend path at all.
+        XCTAssertGreaterThan(partialCoverage, 0, "precondition")
+        XCTAssertLessThan(partialCoverage, 255, "precondition")
+
+        canvas.setPixel(x: 15, y: 9, color: .black, mask: mask)
+
+        guard let pixel = canvas.rawPixel(x: 15, y: 9) else {
+            XCTFail("expected a pixel")
+            return
+        }
+        // A hard-edged mask either overwrites fully (255 coverage, r == 0)
+        // or skips entirely (0 coverage, r == 255, the white background
+        // untouched). Partial coverage must land strictly between the two —
+        // proof this took the proportional-blend path, not either of the
+        // old binary ones.
+        XCTAssertGreaterThan(pixel.r, 0, "should not be fully overwritten with black, unlike full mask coverage")
+        XCTAssertLessThan(pixel.r, 255, "should not be left fully untouched white, unlike zero mask coverage")
+    }
+
+    func testSetPixel_fullMaskCoverage_stillOverwritesDirectly_dotExactUnaffectedByIssue56() {
+        // A feathered mask's fully-covered interior (255, far from the
+        // softened boundary) must still overwrite the destination pixel
+        // outright, byte for byte — the same dot-exact guarantee a `nil`
+        // mask or a pre-#56 hard-edged mask always had.
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        let hardMask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let mask = hardMask.feathered(radius: 1)
+        XCTAssertEqual(mask.alpha(x: 9, y: 9), 255, "precondition: deep interior pixel is still fully covered")
+
+        canvas.setPixel(x: 9, y: 9, color: .black, mask: mask)
+
+        XCTAssertEqual(canvas.rawPixel(x: 9, y: 9)?.r, 0)
+        XCTAssertEqual(canvas.rawPixel(x: 9, y: 9)?.a, 255)
+    }
+
+    func testSetPixel_zeroMaskCoverage_afterFeathering_isStillSkipped() {
+        let canvas = PixelCanvas(width: 20, height: 20, background: .white)
+        let hardMask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let mask = hardMask.feathered(radius: 1)
+        XCTAssertEqual(mask.alpha(x: 19, y: 9), 0, "precondition: far outside the feather's reach")
+
+        canvas.setPixel(x: 19, y: 9, color: .black, mask: mask)
+
+        XCTAssertEqual(canvas.rawPixel(x: 19, y: 9)?.r, 255, "a pixel with zero coverage must be left untouched, same as any hard-edged mask")
+    }
+
+    func testSetPixel_partialMaskCoverage_erasingThroughAFeather_preservesColor_onlyFadesAlpha() {
+        // Regression guard for `blendTowardOverwrite`'s own doc comment
+        // (issue #56/#57): erasing (`color: .clear`, i.e. `(0, 0, 0, 0)`)
+        // through a feathered selection's partially-covered boundary must
+        // reduce the destination's *alpha* proportionally, not leave the
+        // pixel untouched (which a naive "scale the — here zero — source
+        // alpha by coverage" blend would do) and not darken the
+        // destination's *color* toward black along the way (which a naive
+        // straight-alpha interpolation would do).
+        let canvas = PixelCanvas(width: 20, height: 20, background: NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)) // opaque red
+        let hardMask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let mask = hardMask.feathered(radius: 1)
+        let partialCoverage = mask.alpha(x: 15, y: 9)
+        XCTAssertGreaterThan(partialCoverage, 0, "precondition")
+        XCTAssertLessThan(partialCoverage, 255, "precondition")
+
+        canvas.setPixel(x: 15, y: 9, color: .clear, mask: mask)
+
+        guard let pixel = canvas.rawPixel(x: 15, y: 9) else {
+            XCTFail("expected a pixel")
+            return
+        }
+        XCTAssertLessThan(pixel.a, 255, "partial coverage must fade the alpha down, not leave the pixel fully opaque (a no-op)")
+        XCTAssertGreaterThan(pixel.a, 0, "partial coverage must not erase the pixel completely either")
+        XCTAssertEqual(pixel.r, 255, "the original red color must be preserved, not darkened toward black")
+        XCTAssertEqual(pixel.g, 0)
+        XCTAssertEqual(pixel.b, 0)
+    }
+
+    func testSetPixel_fullMaskCoverage_erasing_stillClearsCompletely() {
+        // The fully-covered (255) interior of a feathered selection must
+        // still erase outright, byte for byte — same "dot-exact for hard
+        // coverage" guarantee as
+        // `testSetPixel_fullMaskCoverage_stillOverwritesDirectly_dotExactUnaffectedByIssue56`,
+        // exercised here specifically with an erasing (`color: .clear`)
+        // write, since that's the case `blendTowardOverwrite` had to be
+        // designed around (issue #57).
+        let canvas = PixelCanvas(width: 20, height: 20, background: .black)
+        let hardMask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let mask = hardMask.feathered(radius: 1)
+        XCTAssertEqual(mask.alpha(x: 9, y: 9), 255, "precondition: deep interior pixel is still fully covered")
+
+        canvas.setPixel(x: 9, y: 9, color: .clear, mask: mask)
+
+        XCTAssertEqual(canvas.rawPixel(x: 9, y: 9)?.a, 0)
     }
 
     func testDrawLine_maskSplitsTheLine_onlyTheInsideHalfIsPainted() {

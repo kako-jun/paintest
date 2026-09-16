@@ -586,4 +586,262 @@ final class SelectionMaskTests: XCTestCase {
         XCTAssertTrue(subtracted.isEmpty, "precondition")
         XCTAssertNil(subtracted.boundingBox)
     }
+
+    // MARK: - Feather / anti-alias (issue #56)
+
+    func testAlpha_matchesContains_forAHardEdgedMask() {
+        let mask = SelectionMask.rectangle(x0: 1, y0: 1, x1: 2, y1: 2, width: 4, height: 4)
+        XCTAssertEqual(mask.alpha(x: 1, y: 1), 255)
+        XCTAssertEqual(mask.alpha(x: 0, y: 0), 0)
+    }
+
+    func testAlpha_outOfBounds_isZero_notACrash() {
+        let mask = SelectionMask.rectangle(x0: 1, y0: 1, x1: 2, y1: 2, width: 4, height: 4)
+        XCTAssertEqual(mask.alpha(x: -1, y: 0), 0)
+        XCTAssertEqual(mask.alpha(x: 0, y: -1), 0)
+        XCTAssertEqual(mask.alpha(x: 4, y: 0), 0)
+        XCTAssertEqual(mask.alpha(x: 0, y: 4), 0)
+    }
+
+    /// Permanent regression guard for issue #56's independent review
+    /// must-1: the reviewer measured the pre-fix direct-Gaussian-convolution
+    /// `feathered(radius:)` (cost `O(width * height * radius)`) still not
+    /// completing after 5+ minutes on a 512x512 canvas at radius 200, with
+    /// no progress indicator or way to cancel since it runs synchronously on
+    /// the main thread from `mouseUp`/`keyDown`. This is the reviewer's
+    /// exact repro size/radius, run against the box-blur replacement (cost
+    /// `O(width * height)`, independent of radius — see `feathered(radius:)`
+    /// 's own doc comment) — it must complete near-instantly, not hang.
+    func testFeathered_largeRadiusOnLargeCanvas_completesQuickly_issue56ReviewPerfFix() {
+        let mask = SelectionMask.rectangle(x0: 100, y0: 100, x1: 400, y1: 400, width: 512, height: 512)
+        let start = Date()
+        let feathered = mask.feathered(radius: 200)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 3.0, "feathering a 512x512 canvas must not hang regardless of radius (issue #56 independent review must-1) — reviewer measured 5+ minutes with the pre-fix implementation")
+        XCTAssertFalse(feathered.isEmpty)
+    }
+
+    func testFeathered_radiusAboveMaxRadius_isClampedInternally_asABackstop() {
+        // `feathered(radius:)`'s own clamp to `maxRadius` (issue #56
+        // independent review must-1) — a defensive backstop for any caller
+        // that bypasses `OptionBarView`'s UI-level clamp (the primary one).
+        // A radius far past `maxRadius` must produce the exact same result
+        // as `maxRadius` itself, not a different (and potentially far more
+        // expensive) blur.
+        let mask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let atMax = mask.feathered(radius: SelectionMask.maxRadius)
+        let wayAboveMax = mask.feathered(radius: SelectionMask.maxRadius * 100)
+        for y in 0..<20 {
+            for x in 0..<20 {
+                XCTAssertEqual(wayAboveMax.alpha(x: x, y: y), atMax.alpha(x: x, y: y), "mismatch at (\(x), \(y))")
+            }
+        }
+    }
+
+    func testFeathered_zeroRadius_isUnchangedCopy() {
+        let mask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let feathered = mask.feathered(radius: 0)
+        for y in 0..<20 {
+            for x in 0..<20 {
+                XCTAssertEqual(feathered.alpha(x: x, y: y), mask.alpha(x: x, y: y), "mismatch at (\(x), \(y))")
+            }
+        }
+    }
+
+    func testFeathered_negativeRadius_isUnchangedCopy() {
+        let mask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let feathered = mask.feathered(radius: -3)
+        XCTAssertEqual(feathered.alpha(x: 9, y: 9), mask.alpha(x: 9, y: 9))
+        XCTAssertEqual(feathered.alpha(x: 0, y: 0), mask.alpha(x: 0, y: 0))
+    }
+
+    func testFeathered_positiveRadius_softensTheBoundaryBothWays() {
+        // A 10x10 square (x: 5...14, y: 5...14) on a 20x20 canvas, blurred
+        // with a small enough radius (sigma 1 -> kernel radius `ceil(1*3) ==
+        // 3`) that the effect stays local to the boundary rather than
+        // reaching every pixel.
+        let mask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let feathered = mask.feathered(radius: 1)
+
+        // Deep interior (>= 4px from every edge): every kernel tap for these
+        // pixels lands on other fully-selected pixels, so the blur is a
+        // no-op here — still exactly 255, not just "close to".
+        XCTAssertEqual(feathered.alpha(x: 9, y: 9), 255)
+        XCTAssertEqual(feathered.alpha(x: 10, y: 10), 255)
+
+        // Just outside the original hard edge (1px past x == 14): some of
+        // the selected region falls within the blur kernel, so this pixel —
+        // previously unselected — now has partial coverage.
+        let justOutside = feathered.alpha(x: 15, y: 9)
+        XCTAssertGreaterThan(justOutside, 0)
+        XCTAssertLessThan(justOutside, 255)
+
+        // Far outside (>= 4px past the edge, past the kernel's own reach):
+        // still exactly unselected.
+        XCTAssertEqual(feathered.alpha(x: 19, y: 9), 0)
+
+        // A feathered mask is still `contains(x:y:)`-true for any nonzero
+        // coverage, including the softened boundary pixel above.
+        XCTAssertTrue(feathered.contains(x: 15, y: 9))
+        XCTAssertFalse(feathered.contains(x: 19, y: 9))
+    }
+
+    func testFeathered_touchingCanvasEdge_softensIntoNothing_doesNotWrapOrClamp() {
+        // A selection touching the canvas edge feathers into "outside the
+        // canvas" the same way it feathers into any other unselected area —
+        // it does not wrap around to the opposite edge or clamp back to full
+        // coverage.
+        let mask = SelectionMask.rectangle(x0: 0, y0: 0, x1: 4, y1: 4, width: 10, height: 10)
+        let feathered = mask.feathered(radius: 1)
+        XCTAssertLessThan(feathered.alpha(x: 0, y: 0), 255, "the corner pixel should lose some coverage from the missing off-canvas neighbors")
+        XCTAssertEqual(feathered.alpha(x: 9, y: 9), 0, "the far corner must not pick up any wrapped-around coverage")
+    }
+
+    func testEllipse_withoutAntiAlias_isHardEdged_onlyZeroOr255() {
+        let mask = SelectionMask.ellipse(centerX: 10, centerY: 10, radiusX: 5, radiusY: 5, width: 20, height: 20)
+        for y in 0..<20 {
+            for x in 0..<20 {
+                let value = mask.alpha(x: x, y: y)
+                XCTAssertTrue(value == 0 || value == 255, "unexpected partial coverage \(value) at (\(x), \(y)) without antiAlias")
+            }
+        }
+    }
+
+    func testEllipse_withAntiAlias_hasPartialCoverageSomewhereOnTheBoundary() {
+        let mask = SelectionMask.ellipse(centerX: 10, centerY: 10, radiusX: 5, radiusY: 5, width: 20, height: 20, antiAlias: true)
+        var sawPartialCoverage = false
+        var sawFullCoverage = false
+        for y in 0..<20 {
+            for x in 0..<20 {
+                let value = mask.alpha(x: x, y: y)
+                if value > 0, value < 255 { sawPartialCoverage = true }
+                if value == 255 { sawFullCoverage = true }
+            }
+        }
+        XCTAssertTrue(sawPartialCoverage, "expected at least one boundary pixel with partial coverage")
+        XCTAssertTrue(sawFullCoverage, "expected the ellipse's interior to still be fully covered")
+        // The very center is nowhere near the curved boundary, so it must
+        // still land on exactly full coverage, antiAlias or not.
+        XCTAssertEqual(mask.alpha(x: 10, y: 10), 255)
+    }
+
+    func testPolygon_withoutAntiAlias_isHardEdged_onlyZeroOr255() {
+        let triangle = [(x: 0, y: 0), (x: 19, y: 0), (x: 0, y: 19)]
+        let mask = SelectionMask.polygon(vertices: triangle, width: 20, height: 20)
+        for y in 0..<20 {
+            for x in 0..<20 {
+                let value = mask.alpha(x: x, y: y)
+                XCTAssertTrue(value == 0 || value == 255, "unexpected partial coverage \(value) at (\(x), \(y)) without antiAlias")
+            }
+        }
+    }
+
+    func testPolygon_withAntiAlias_hasPartialCoverageAlongTheDiagonalEdge() {
+        let triangle = [(x: 0, y: 0), (x: 19, y: 0), (x: 0, y: 19)]
+        let mask = SelectionMask.polygon(vertices: triangle, width: 20, height: 20, antiAlias: true)
+        var sawPartialCoverage = false
+        for y in 0..<20 {
+            for x in 0..<20 {
+                let value = mask.alpha(x: x, y: y)
+                if value > 0, value < 255 { sawPartialCoverage = true }
+            }
+        }
+        XCTAssertTrue(sawPartialCoverage, "expected at least one pixel along the triangle's diagonal hypotenuse with partial coverage")
+        // Deep inside the right-angle corner, nowhere near the diagonal.
+        XCTAssertEqual(mask.alpha(x: 1, y: 1), 255)
+        // Well outside the triangle entirely.
+        XCTAssertEqual(mask.alpha(x: 18, y: 18), 0)
+    }
+
+    func testMagicWand_withoutAntiAlias_isHardEdged_onlyZeroOr255() {
+        // A 6x6 solid-color square on an otherwise differently colored
+        // 20x20 canvas.
+        func colorAt(_ x: Int, _ y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+            guard x >= 0, x < 20, y >= 0, y < 20 else { return nil }
+            let inSquare = (5...10).contains(x) && (5...10).contains(y)
+            return inSquare ? (255, 0, 0, 255) : (0, 0, 255, 255)
+        }
+        let mask = SelectionMask.magicWand(startX: 7, startY: 7, colorAt: colorAt, tolerance: 10, width: 20, height: 20)
+        for y in 0..<20 {
+            for x in 0..<20 {
+                let value = mask.alpha(x: x, y: y)
+                XCTAssertTrue(value == 0 || value == 255, "unexpected partial coverage \(value) at (\(x), \(y)) without antiAlias")
+            }
+        }
+    }
+
+    func testMagicWand_withAntiAlias_softensTheFloodFilledBoundary() {
+        // A wider square (12x12, unlike #testMagicWand_withoutAntiAlias's
+        // 6x6) than the other magic-wand tests in this file — needed so the
+        // "deep interior, unaffected by the softening" sample point below
+        // sits outside `feathered(radius:)`'s box-blur support radius
+        // (issue #56 independent review must-1's perf fix switched
+        // `magicWand`'s own `antiAlias` — implemented via `feathered(radius:
+        // magicWandAntiAliasRadius)`, see that constant's doc comment — from
+        // a direct Gaussian convolution to a 3-pass box blur, which has a
+        // slightly wider effective reach for the same nominal radius).
+        func colorAt(_ x: Int, _ y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+            guard x >= 0, x < 20, y >= 0, y < 20 else { return nil }
+            let inSquare = (5...16).contains(x) && (5...16).contains(y)
+            return inSquare ? (255, 0, 0, 255) : (0, 0, 255, 255)
+        }
+        let mask = SelectionMask.magicWand(startX: 10, startY: 10, colorAt: colorAt, tolerance: 10, width: 20, height: 20, antiAlias: true)
+        var sawPartialCoverage = false
+        for y in 0..<20 {
+            for x in 0..<20 {
+                let value = mask.alpha(x: x, y: y)
+                if value > 0, value < 255 { sawPartialCoverage = true }
+            }
+        }
+        XCTAssertTrue(sawPartialCoverage, "expected the flood-filled square's boundary to gain some partial coverage")
+        // Deep inside the flood-filled square, unaffected by the softening.
+        XCTAssertEqual(mask.alpha(x: 10, y: 10), 255)
+    }
+
+    // MARK: - Combining with partial coverage (issue #56 fuzzy-logic generalization)
+
+    func testUnioned_withPartialCoverage_takesTheMaxAtEachPixel() {
+        let partial = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20).feathered(radius: 1)
+        let full = SelectionMask.rectangle(x0: 0, y0: 0, x1: 19, y1: 19, width: 20, height: 20)
+        let union = partial.unioned(with: full)
+        // `max(partialCoverage, 255) == 255` everywhere `full` is fully
+        // selected (i.e. everywhere, since `full` covers the whole canvas).
+        for y in 0..<20 {
+            for x in 0..<20 {
+                XCTAssertEqual(union.alpha(x: x, y: y), 255, "mismatch at (\(x), \(y))")
+            }
+        }
+    }
+
+    func testIntersected_withPartialCoverage_takesTheMinAtEachPixel() {
+        let partial = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20).feathered(radius: 1)
+        let full = SelectionMask.rectangle(x0: 0, y0: 0, x1: 19, y1: 19, width: 20, height: 20)
+        let intersection = partial.intersected(with: full)
+        // `min(partialCoverage, 255) == partialCoverage` everywhere — the
+        // fully-selected `full` mask contributes nothing that isn't already
+        // in `partial`.
+        for y in 0..<20 {
+            for x in 0..<20 {
+                XCTAssertEqual(intersection.alpha(x: x, y: y), partial.alpha(x: x, y: y), "mismatch at (\(x), \(y))")
+            }
+        }
+    }
+
+    func testSubtracting_partialCoverageMinusItsOwnFullCoverage_isEmpty() {
+        let partial = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20).feathered(radius: 1)
+        let full = SelectionMask.rectangle(x0: 0, y0: 0, x1: 19, y1: 19, width: 20, height: 20)
+        let subtracted = partial.subtracting(full)
+        // `min(coverage, 255 - 255) == min(coverage, 0) == 0` everywhere.
+        XCTAssertTrue(subtracted.isEmpty)
+    }
+
+    func testInverted_withPartialCoverage_complementsEachPixel() {
+        let mask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20).feathered(radius: 1)
+        let inverted = mask.inverted()
+        for y in 0..<20 {
+            for x in 0..<20 {
+                XCTAssertEqual(inverted.alpha(x: x, y: y), 255 - mask.alpha(x: x, y: y), "mismatch at (\(x), \(y))")
+            }
+        }
+    }
 }

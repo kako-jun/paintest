@@ -1627,30 +1627,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// tool (issue #13). The magnifier's zoom-level dropdown, the magic
     /// wand's tolerance slider (issue #11, round 3), the bucket fill's own
     /// tolerance slider (issue #38), the pen's size/hardness/opacity/
-    /// flow controls (issue #20), and the text tool's font/size/writing-
-    /// direction controls (issue #42) are the only tools with options of
-    /// their own so far — every other tool just clears the bar back to its
-    /// empty frame.
+    /// flow controls (issue #20), the text tool's font/size/writing-
+    /// direction controls (issue #42), and the five selection tools'
+    /// Feather/Anti-alias controls (issue #56) are the only tools with
+    /// options of their own so far — every other tool just clears the bar
+    /// back to its empty frame.
     private func updateOptionBar(for tool: Tool) {
         switch tool {
         case .magnifier:
             optionBarView.showZoomPresets(currentZoomScale: canvasView.zoomScale, levels: CanvasView.zoomLevels) { [weak self] scale in
                 self?.canvasView.setZoomScale(scale)
             }
+        case .rectangleSelect:
+            // Feather only (issue #56) — no Anti-alias checkbox:
+            // `currentAntiAlias`/`onAntiAliasChanged` are left at their
+            // `nil` default, since the rectangle marquee's edges are always
+            // axis-aligned and `SelectionMask.rectangle(...)` has no
+            // `antiAlias` parameter of its own for a checkbox here to drive
+            // (see `OptionBarView.showSelectionOptions`'s doc comment).
+            optionBarView.showSelectionOptions(
+                currentFeather: canvasView.selectionFeather,
+                onFeatherChanged: { [weak self] feather in
+                    self?.canvasView.selectionFeather = feather
+                }
+            )
+        case .ellipseSelect, .lassoSelect, .polygonSelect:
+            // Feather + Anti-alias (issue #56): unlike the rectangle
+            // marquee just above, these three tools' selection boundaries
+            // are never axis-aligned (an ellipse's curve, a free-form lasso
+            // path, a clicked polygon path), so `SelectionMask.ellipse(...)`/
+            // `.polygon(...)` both take a real `antiAlias` parameter for
+            // this checkbox to drive.
+            optionBarView.showSelectionOptions(
+                currentFeather: canvasView.selectionFeather,
+                currentAntiAlias: canvasView.selectionAntiAlias,
+                onFeatherChanged: { [weak self] feather in
+                    self?.canvasView.selectionFeather = feather
+                },
+                onAntiAliasChanged: { [weak self] antiAlias in
+                    self?.canvasView.selectionAntiAlias = antiAlias
+                }
+            )
         case .magicWandSelect:
             // `currentContiguous`/`onContiguousChanged` (issue #52) add the
             // "隣接ピクセルのみ" checkbox that only the magic wand gets —
             // the `.bucketFill` case just below passes neither, so its own
             // options bar stays tolerance-only (see
             // `OptionBarView.showMagicWandOptions`'s doc comment).
+            // `currentFeather`/`currentAntiAlias` (issue #56) add the same
+            // Feather/Anti-alias controls `.ellipseSelect`/`.lassoSelect`/
+            // `.polygonSelect` get above, in the same bar as the tolerance/
+            // contiguous controls — the magic wand's flood-filled region has
+            // no continuous boundary shape (see `SelectionMask.magicWand
+            // (...)`'s own `antiAlias` doc comment for how it approximates
+            // this anyway).
             optionBarView.showMagicWandOptions(
                 currentTolerance: canvasView.magicWandTolerance,
                 currentContiguous: canvasView.magicWandContiguous,
+                currentFeather: canvasView.selectionFeather,
+                currentAntiAlias: canvasView.selectionAntiAlias,
                 onToleranceChanged: { [weak self] tolerance in
                     self?.canvasView.magicWandTolerance = tolerance
                 },
                 onContiguousChanged: { [weak self] contiguous in
                     self?.canvasView.magicWandContiguous = contiguous
+                },
+                onFeatherChanged: { [weak self] feather in
+                    self?.canvasView.selectionFeather = feather
+                },
+                onAntiAliasChanged: { [weak self] antiAlias in
+                    self?.canvasView.selectionAntiAlias = antiAlias
                 }
             )
         case .bucketFill:

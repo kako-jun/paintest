@@ -547,4 +547,415 @@ final class OptionBarViewTests: XCTestCase {
         XCTAssertTrue(sizeValues.isEmpty, "...nor the stale onSizeChanged closure")
         XCTAssertTrue(orientationValues.isEmpty, "...nor the stale onOrientationChanged closure")
     }
+
+    // MARK: - showSelectionOptions(currentFeather:currentAntiAlias:onFeatherChanged:onAntiAliasChanged:) / clear() (issue #56)
+    //
+    // Previously zero coverage: the Feather numeric field and Anti-alias
+    // checkbox (rectangle/ellipse/lasso/polygon/magic-wand selection tools'
+    // shared option-bar controls) had no test of their own, independent
+    // review should-2.
+
+    private func featherField(in view: OptionBarView) -> NSTextField? {
+        // Distinguished by `isEditable` rather than "the last NSTextField
+        // added" (unlike `toleranceValueLabel(in:)`/`textSizeValueLabel
+        // (in:)` above): `showMagicWandOptions` can show this Feather field
+        // alongside its own read-only 許容誤差 numeric *readout* — both are
+        // plain `NSTextField`s, so ordering alone doesn't tell them apart
+        // when Feather is shown (`.last` would be correct) vs. when it
+        // isn't (`.last` would then wrongly resolve to that readout
+        // instead of `nil`). Every label (`NSTextField(labelWithString:)`,
+        // e.g. "許容誤差"/"ぼかし(Feather)") and every plain value readout
+        // (`toleranceValueLabel`) is non-editable; only the Feather field
+        // itself (`NSTextField(frame: .zero)`, this method's own
+        // implementation) is editable.
+        view.subviews.compactMap { $0 as? NSTextField }.first { $0.isEditable }
+    }
+
+    private func antiAliasCheckbox(in view: OptionBarView) -> NSButton? {
+        view.subviews.compactMap { $0 as? NSButton }.first { $0.title == "アンチエイリアス" }
+    }
+
+    func testShowSelectionOptions_featherFieldInitialValueMatchesCurrentFeather() {
+        let view = makeView()
+
+        view.showSelectionOptions(currentFeather: 12, onFeatherChanged: { _ in })
+
+        XCTAssertEqual(featherField(in: view)?.stringValue, "12")
+    }
+
+    func testShowSelectionOptions_featherFieldInitialValue_trimsTrailingZerosForAFractionalValue() {
+        let view = makeView()
+
+        view.showSelectionOptions(currentFeather: 2.5, onFeatherChanged: { _ in })
+
+        XCTAssertEqual(featherField(in: view)?.stringValue, "2.5")
+    }
+
+    func testShowSelectionOptions_noCurrentAntiAlias_omitsTheCheckboxEntirely() {
+        // The rectangle marquee's own call site (issue #56: no diagonal
+        // edges to anti-alias — see `showSelectionOptions`'s own doc
+        // comment) passes no `currentAntiAlias` at all.
+        let view = makeView()
+
+        view.showSelectionOptions(currentFeather: 0, onFeatherChanged: { _ in })
+
+        XCTAssertNil(antiAliasCheckbox(in: view), "with currentAntiAlias == nil, no Anti-alias checkbox should exist at all")
+    }
+
+    func testShowSelectionOptions_currentAntiAliasTrue_checkboxReflectsIt() {
+        let view = makeView()
+
+        view.showSelectionOptions(currentFeather: 0, currentAntiAlias: true, onFeatherChanged: { _ in })
+
+        XCTAssertEqual(antiAliasCheckbox(in: view)?.state, .on)
+    }
+
+    func testShowSelectionOptions_currentAntiAliasFalse_checkboxReflectsIt() {
+        let view = makeView()
+
+        view.showSelectionOptions(currentFeather: 0, currentAntiAlias: false, onFeatherChanged: { _ in })
+
+        XCTAssertEqual(antiAliasCheckbox(in: view)?.state, .off)
+    }
+
+    func testShowSelectionOptions_committingFeatherField_firesOnFeatherChanged_andReformatsField() {
+        let view = makeView()
+        var receivedValues: [Double] = []
+        view.showSelectionOptions(currentFeather: 0, onFeatherChanged: { receivedValues.append($0) })
+
+        guard let field = featherField(in: view) else {
+            XCTFail("showSelectionOptions should add a Feather NSTextField")
+            return
+        }
+        field.stringValue = "8"
+        _ = field.sendAction(field.action, to: field.target)
+
+        XCTAssertEqual(receivedValues, [8])
+        XCTAssertEqual(field.stringValue, "8", "the field must reformat back through featherString(_:) after committing")
+    }
+
+    func testShowSelectionOptions_committingUnparseableFeatherText_fallsBackToZero() {
+        let view = makeView()
+        var receivedValues: [Double] = []
+        view.showSelectionOptions(currentFeather: 5, onFeatherChanged: { receivedValues.append($0) })
+
+        guard let field = featherField(in: view) else {
+            XCTFail("showSelectionOptions should add a Feather NSTextField")
+            return
+        }
+        field.stringValue = "not a number"
+        _ = field.sendAction(field.action, to: field.target)
+
+        XCTAssertEqual(receivedValues, [0], "unparseable text must fall back to 0, not silently keep the previous value")
+        XCTAssertEqual(field.stringValue, "0")
+    }
+
+    func testShowSelectionOptions_committingNegativeFeather_clampsToZero() {
+        let view = makeView()
+        var receivedValues: [Double] = []
+        view.showSelectionOptions(currentFeather: 5, onFeatherChanged: { receivedValues.append($0) })
+
+        guard let field = featherField(in: view) else {
+            XCTFail("showSelectionOptions should add a Feather NSTextField")
+            return
+        }
+        field.stringValue = "-10"
+        _ = field.sendAction(field.action, to: field.target)
+
+        XCTAssertEqual(receivedValues, [0], "a negative blur radius is meaningless and must clamp to 0")
+        XCTAssertEqual(field.stringValue, "0")
+    }
+
+    /// Independent review must-1's own fix: an unbounded Feather value is
+    /// how a user could hit the performance hang the review measured (5+
+    /// minutes, no progress indicator or cancel) before `SelectionMask
+    /// .feathered(radius:)` was rewritten to a radius-independent box blur.
+    /// This is the UI-level clamp — the first line of defense a typed value
+    /// actually hits.
+    func testShowSelectionOptions_committingFeatherAboveMaxRadius_clampsToMaxRadius() {
+        let view = makeView()
+        var receivedValues: [Double] = []
+        view.showSelectionOptions(currentFeather: 5, onFeatherChanged: { receivedValues.append($0) })
+
+        guard let field = featherField(in: view) else {
+            XCTFail("showSelectionOptions should add a Feather NSTextField")
+            return
+        }
+        field.stringValue = "99999"
+        _ = field.sendAction(field.action, to: field.target)
+
+        XCTAssertEqual(receivedValues, [SelectionMask.maxRadius], "a value past SelectionMask.maxRadius must clamp down to it, not pass the raw typed value through")
+        XCTAssertEqual(field.stringValue, OptionBarViewTests.featherString(SelectionMask.maxRadius), "the field must visibly snap back to the clamped value, not keep showing the typed-in 99999")
+    }
+
+    func testShowSelectionOptions_togglingAntiAliasCheckbox_firesOnAntiAliasChanged() {
+        let view = makeView()
+        var receivedValues: [Bool] = []
+        view.showSelectionOptions(currentFeather: 0, currentAntiAlias: false, onFeatherChanged: { _ in }, onAntiAliasChanged: { receivedValues.append($0) })
+
+        guard let checkbox = antiAliasCheckbox(in: view) else {
+            XCTFail("showSelectionOptions should add an Anti-alias NSButton checkbox")
+            return
+        }
+        checkbox.state = .on
+        _ = checkbox.sendAction(checkbox.action, to: checkbox.target)
+
+        XCTAssertEqual(receivedValues, [true])
+
+        checkbox.state = .off
+        _ = checkbox.sendAction(checkbox.action, to: checkbox.target)
+
+        XCTAssertEqual(receivedValues, [true, false])
+    }
+
+    func testClear_afterShowSelectionOptions_removesControlsAndDetachesCallbacks() {
+        let view = makeView()
+        var featherValues: [Double] = []
+        var antiAliasValues: [Bool] = []
+        view.showSelectionOptions(currentFeather: 3, currentAntiAlias: true, onFeatherChanged: { featherValues.append($0) }, onAntiAliasChanged: { antiAliasValues.append($0) })
+        guard let field = featherField(in: view), let checkbox = antiAliasCheckbox(in: view) else {
+            XCTFail("precondition: showSelectionOptions should add both controls")
+            return
+        }
+
+        view.clear()
+
+        XCTAssertTrue(view.subviews.isEmpty, "clear() must remove every Feather/Anti-alias control and label")
+        field.stringValue = "20"
+        _ = field.sendAction(field.action, to: field.target)
+        checkbox.state = .off
+        _ = checkbox.sendAction(checkbox.action, to: checkbox.target)
+
+        XCTAssertTrue(featherValues.isEmpty, "firing the old, now-detached Feather field after clear() must not reach the stale onFeatherChanged closure")
+        XCTAssertTrue(antiAliasValues.isEmpty, "...nor the stale onAntiAliasChanged closure")
+    }
+
+    // MARK: - showMagicWandOptions(...)'s own Feather/Anti-alias controls (issue #56)
+    //
+    // The magic wand is itself one of the five selection tools issue #56
+    // covers, so `showMagicWandOptions` grows the same two controls
+    // `showSelectionOptions` above shows the other four tools — in the same
+    // bar as its own pre-existing tolerance slider and Contiguous checkbox,
+    // not instead of them.
+
+    func testShowMagicWandOptions_currentFeatherNil_omitsFeatherAndAntiAliasEntirely() {
+        // Bucket fill reuses this same method's tolerance-only layout
+        // (issue #38) and passes no Feather/Anti-alias of its own — a
+        // bucket fill has no selection boundary for either to apply to.
+        let view = makeView()
+
+        view.showMagicWandOptions(currentTolerance: 32, onToleranceChanged: { _ in })
+
+        XCTAssertNil(featherField(in: view), "with currentFeather == nil, no Feather field should exist at all")
+        XCTAssertNil(antiAliasCheckbox(in: view), "with currentFeather == nil, no Anti-alias checkbox should exist either")
+    }
+
+    func testShowMagicWandOptions_currentFeatherProvided_addsFeatherFieldAlongsideTolerance() {
+        let view = makeView()
+
+        view.showMagicWandOptions(
+            currentTolerance: 32,
+            currentContiguous: true,
+            currentFeather: 15,
+            currentAntiAlias: true,
+            onToleranceChanged: { _ in },
+            onContiguousChanged: { _ in },
+            onFeatherChanged: { _ in },
+            onAntiAliasChanged: { _ in }
+        )
+
+        guard let slider = toleranceSlider(in: view) else {
+            XCTFail("the tolerance slider must still be present alongside the new Feather/Anti-alias controls")
+            return
+        }
+        XCTAssertEqual(slider.doubleValue, 32, accuracy: 0.001)
+        XCTAssertEqual(featherField(in: view)?.stringValue, "15")
+        XCTAssertEqual(antiAliasCheckbox(in: view)?.state, .on)
+    }
+
+    func testShowMagicWandOptions_committingFeatherField_firesOnFeatherChanged_independentlyOfTolerance() {
+        let view = makeView()
+        var toleranceValues: [Int] = []
+        var featherValues: [Double] = []
+        view.showMagicWandOptions(
+            currentTolerance: 32,
+            currentFeather: 0,
+            onToleranceChanged: { toleranceValues.append($0) },
+            onFeatherChanged: { featherValues.append($0) }
+        )
+        guard let field = featherField(in: view) else {
+            XCTFail("showMagicWandOptions should add a Feather NSTextField when currentFeather is non-nil")
+            return
+        }
+
+        field.stringValue = "6"
+        _ = field.sendAction(field.action, to: field.target)
+
+        XCTAssertEqual(featherValues, [6])
+        XCTAssertTrue(toleranceValues.isEmpty, "committing the Feather field must not also fire onToleranceChanged")
+    }
+
+    func testShowMagicWandOptions_togglingAntiAliasCheckbox_doesNotAffectContiguousCheckbox() {
+        let view = makeView()
+        var contiguousValues: [Bool] = []
+        var antiAliasValues: [Bool] = []
+        view.showMagicWandOptions(
+            currentTolerance: 32,
+            currentContiguous: true,
+            currentFeather: 0,
+            currentAntiAlias: false,
+            onToleranceChanged: { _ in },
+            onContiguousChanged: { contiguousValues.append($0) },
+            onFeatherChanged: { _ in },
+            onAntiAliasChanged: { antiAliasValues.append($0) }
+        )
+        guard let checkbox = antiAliasCheckbox(in: view) else {
+            XCTFail("showMagicWandOptions should add an Anti-alias checkbox when currentAntiAlias is non-nil")
+            return
+        }
+
+        checkbox.state = .on
+        _ = checkbox.sendAction(checkbox.action, to: checkbox.target)
+
+        XCTAssertEqual(antiAliasValues, [true])
+        XCTAssertTrue(contiguousValues.isEmpty, "toggling Anti-alias must not also fire onContiguousChanged")
+    }
+
+    /// Mirrors `SelectionMask`/`OptionBarView`'s own private `featherString`
+    /// formatting (`%g`) so this test file doesn't need access to that
+    /// private implementation detail to assert against it.
+    private static func featherString(_ value: Double) -> String {
+        String(format: "%g", value)
+    }
+
+    // MARK: - AppDelegate.updateOptionBar(for:)'s per-tool wiring, mirrored (issue #56 independent review should-2)
+    //
+    // `AppDelegate` itself can't be unit tested directly — a whole
+    // `NSApplicationDelegate` with a real menu bar/window/document stack,
+    // not practical to construct in a test target (the exact same
+    // "impractical to construct" situation `CanvasViewTests.swift`
+    // documents repeatedly for `AppDelegate.activateActiveDocument()`/
+    // `undo()`/`redo()`/etc. — see e.g. its own comment on
+    // `AppDelegate.activateActiveDocument()`). Following that file's
+    // established convention: rather than skip coverage of `updateOptionBar
+    // (for:)`'s five selection-tool cases entirely, each test below
+    // reproduces that method's exact call — same arguments, same source
+    // (a real `CanvasView`'s own `selectionFeather`/`selectionAntiAlias`/
+    // `magicWandTolerance`/`magicWandContiguous`), same write-back closure
+    // bodies — and asserts against the resulting `OptionBarView` state and
+    // the `CanvasView` properties the write-back closures target. A
+    // divergence between `AppDelegate.updateOptionBar(for:)`'s real source
+    // and what's mirrored here would only go undetected by a change to
+    // *both* files that happens to keep them in sync by accident — the same
+    // residual risk this file's sibling "mirrors AppDelegate" tests already
+    // accept.
+
+    func testAppDelegateWiring_rectangleSelect_showsFeatherOnly_noAntiAliasCheckbox() {
+        let canvasView = CanvasView(layerStack: LayerStack(width: 8, height: 8))
+        canvasView.selectionFeather = 7
+        let optionBar = makeView()
+
+        // Mirrors AppDelegate.updateOptionBar(for: .rectangleSelect).
+        optionBar.showSelectionOptions(
+            currentFeather: canvasView.selectionFeather,
+            onFeatherChanged: { canvasView.selectionFeather = $0 }
+        )
+
+        XCTAssertEqual(featherField(in: optionBar)?.stringValue, "7")
+        XCTAssertNil(antiAliasCheckbox(in: optionBar), "the rectangle marquee has no diagonal edges to anti-alias (SelectionMask.rectangle has no antiAlias parameter), so its bar must show Feather only")
+
+        featherField(in: optionBar)?.stringValue = "3"
+        _ = featherField(in: optionBar)?.sendAction(featherField(in: optionBar)?.action, to: featherField(in: optionBar)?.target)
+        XCTAssertEqual(canvasView.selectionFeather, 3, "the write-back closure must land on the same CanvasView property AppDelegate reads from")
+    }
+
+    /// `.ellipseSelect`/`.lassoSelect`/`.polygonSelect` share one
+    /// `AppDelegate.updateOptionBar(for:)` switch case (identical wiring for
+    /// all three, since none of their boundaries are axis-aligned) — this
+    /// mirrors that one shared call once rather than three byte-identical
+    /// copies; `testAppDelegateWiring_magicWandSelect...` below covers the
+    /// one remaining Feather/Anti-alias tool with genuinely different
+    /// wiring (its own extra tolerance/contiguous controls).
+    func testAppDelegateWiring_ellipseLassoPolygonSelect_showsFeatherAndAntiAlias() {
+        let canvasView = CanvasView(layerStack: LayerStack(width: 8, height: 8))
+        canvasView.selectionFeather = 4
+        canvasView.selectionAntiAlias = true
+        let optionBar = makeView()
+
+        // Mirrors AppDelegate.updateOptionBar(for: .ellipseSelect) (and,
+        // identically, .lassoSelect/.polygonSelect).
+        optionBar.showSelectionOptions(
+            currentFeather: canvasView.selectionFeather,
+            currentAntiAlias: canvasView.selectionAntiAlias,
+            onFeatherChanged: { canvasView.selectionFeather = $0 },
+            onAntiAliasChanged: { canvasView.selectionAntiAlias = $0 }
+        )
+
+        XCTAssertEqual(featherField(in: optionBar)?.stringValue, "4")
+        guard let checkbox = antiAliasCheckbox(in: optionBar) else {
+            XCTFail("ellipse/lasso/polygon selection all have non-axis-aligned boundaries and must show the Anti-alias checkbox")
+            return
+        }
+        XCTAssertEqual(checkbox.state, .on)
+
+        checkbox.state = .off
+        _ = checkbox.sendAction(checkbox.action, to: checkbox.target)
+        XCTAssertEqual(canvasView.selectionAntiAlias, false, "the write-back closure must land on the same CanvasView property AppDelegate reads from")
+    }
+
+    func testAppDelegateWiring_magicWandSelect_showsToleranceContiguousFeatherAndAntiAlias() {
+        let canvasView = CanvasView(layerStack: LayerStack(width: 8, height: 8))
+        canvasView.magicWandTolerance = 47
+        canvasView.magicWandContiguous = false
+        canvasView.selectionFeather = 9
+        canvasView.selectionAntiAlias = true
+        let optionBar = makeView()
+
+        // Mirrors AppDelegate.updateOptionBar(for: .magicWandSelect).
+        optionBar.showMagicWandOptions(
+            currentTolerance: canvasView.magicWandTolerance,
+            currentContiguous: canvasView.magicWandContiguous,
+            currentFeather: canvasView.selectionFeather,
+            currentAntiAlias: canvasView.selectionAntiAlias,
+            onToleranceChanged: { canvasView.magicWandTolerance = $0 },
+            onContiguousChanged: { canvasView.magicWandContiguous = $0 },
+            onFeatherChanged: { canvasView.selectionFeather = $0 },
+            onAntiAliasChanged: { canvasView.selectionAntiAlias = $0 }
+        )
+
+        guard let slider = toleranceSlider(in: optionBar) else {
+            XCTFail("magic wand must still show its own tolerance slider alongside Feather/Anti-alias")
+            return
+        }
+        XCTAssertEqual(slider.doubleValue, 47, accuracy: 0.001)
+        XCTAssertEqual(featherField(in: optionBar)?.stringValue, "9")
+        XCTAssertEqual(antiAliasCheckbox(in: optionBar)?.state, .on)
+
+        // Each of the four controls' write-back must independently land on
+        // its own matching CanvasView property — not, say, all four
+        // silently landing on the same one from a copy/paste mistake in the
+        // real AppDelegate wiring this mirrors.
+        slider.doubleValue = 100
+        _ = slider.sendAction(slider.action, to: slider.target)
+        XCTAssertEqual(canvasView.magicWandTolerance, 100)
+
+        featherField(in: optionBar)?.stringValue = "20"
+        _ = featherField(in: optionBar)?.sendAction(featherField(in: optionBar)?.action, to: featherField(in: optionBar)?.target)
+        XCTAssertEqual(canvasView.selectionFeather, 20)
+
+        antiAliasCheckbox(in: optionBar)?.state = .off
+        _ = antiAliasCheckbox(in: optionBar)?.sendAction(antiAliasCheckbox(in: optionBar)?.action, to: antiAliasCheckbox(in: optionBar)?.target)
+        XCTAssertEqual(canvasView.selectionAntiAlias, false)
+
+        // magicWandContiguous has no checkbox lookup helper of its own in
+        // this file (only `antiAliasCheckbox(in:)`, distinguished by
+        // title) — found here by title directly instead.
+        guard let contiguousCheckbox = optionBar.subviews.compactMap({ $0 as? NSButton }).first(where: { $0.title == "隣接ピクセルのみ" }) else {
+            XCTFail("magic wand must still show its own Contiguous checkbox alongside Feather/Anti-alias")
+            return
+        }
+        contiguousCheckbox.state = .on
+        _ = contiguousCheckbox.sendAction(contiguousCheckbox.action, to: contiguousCheckbox.target)
+        XCTAssertEqual(canvasView.magicWandContiguous, true)
+    }
 }
