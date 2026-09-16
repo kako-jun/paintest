@@ -24,7 +24,10 @@ final class CurrentColorIndicatorView: NSView {
     // squares (issue #60: front top-left, back bottom-right leaves the
     // bottom-left corner empty): with `swatchSide` 20, the squares'
     // combined bounding box is vertically centered and 32pt tall (see
-    // `swatchRects()`), so any view taller than ~40pt (every real
+    // `swatchRects()`), leaving a margin of (H - 32) / 2 above and below
+    // it. The button occupies that margin's bottom 14pt (12pt tall, 2pt
+    // inset from the edge), so it only clears the swatches once that
+    // margin is at least 14pt, i.e. any view H >= 60pt (every real
     // `colorBarHeight` is) leaves an empty strip along the bottom edge for
     // this button to sit in without overlapping the swatches.
     private let resetButton: NSButton = {
