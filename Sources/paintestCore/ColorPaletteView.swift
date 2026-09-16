@@ -102,6 +102,15 @@ final class ColorPaletteView: NSView {
     // declared below in this same file, can size itself identically.
     fileprivate static let swatchSide: CGFloat = 18
 
+    /// The gap between adjacent swatches, in both directions — shared by
+    /// `columnCount(forWidth:)`'s fit math and `rebuildGrid(columnCount:)`'s
+    /// actual `grid.rowSpacing`/`grid.columnSpacing` (issue #59 PR #63
+    /// review must-3): before this constant existed the two had to be kept
+    /// in sync by a comment alone, which is exactly the kind of
+    /// silently-drifts-apart duplication this codebase avoids elsewhere
+    /// (see `AppDelegate.colorBarHeight`'s "derived, not guessed" comment).
+    private static let swatchSpacing: CGFloat = 1
+
     /// How many colors `updatedRecentColors(adding:to:capacity:)` keeps —
     /// shared with `AppDelegate`, which owns the actual `recentColors`
     /// array (issue #5).
@@ -162,6 +171,16 @@ final class ColorPaletteView: NSView {
     // recent-colors row at the new column count without losing its content.
     private var lastRecentColors: [NSColor] = []
 
+    // True between `NSWindow.willStartLiveResizeNotification` and
+    // `didEndLiveResizeNotification` for this view's window (issue #59 PR
+    // #63 review should-5): while the user is actively dragging a window
+    // edge, `frameDidChange()` fires on every intermediate frame, and
+    // rebuilding the whole grid (tear down + recreate 3 rows of
+    // `NSGridView` cells) on each of those would be wasted work and a
+    // visible flicker risk. Rebuilds are suppressed while this is `true`
+    // and caught up once with the final size when live resizing ends.
+    private var isLiveResizing = false
+
     init() {
         super.init(frame: .zero)
         // Rebuild the grid whenever this view's own width changes (e.g. the
@@ -186,7 +205,41 @@ final class ColorPaletteView: NSView {
         NotificationCenter.default.removeObserver(self)
     }
 
+    // Tracks the live-resize window notifications against whichever window
+    // this view is currently in (issue #59 should-5) — `object: nil` on the
+    // `removeObserver` calls clears out a stale registration against a
+    // *previous* window before (re-)registering against the current one, so
+    // this stays correct even if the view is ever moved between windows.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self, name: NSWindow.willStartLiveResizeNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didEndLiveResizeNotification, object: nil)
+        guard let window else { return }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(liveResizeWillStart),
+            name: NSWindow.willStartLiveResizeNotification, object: window
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(liveResizeDidEnd),
+            name: NSWindow.didEndLiveResizeNotification, object: window
+        )
+    }
+
+    @objc private func liveResizeWillStart() {
+        isLiveResizing = true
+    }
+
+    @objc private func liveResizeDidEnd() {
+        isLiveResizing = false
+        frameDidChange() // catch up to whatever size the drag settled on
+    }
+
     @objc private func frameDidChange() {
+        // Suppressed mid-drag (issue #59 should-5, see `isLiveResizing`'s
+        // doc comment) — `liveResizeDidEnd()` calls this again once the
+        // drag settles, so the grid still ends up at the right column count,
+        // just without a rebuild per intermediate frame.
+        guard !isLiveResizing else { return }
         let desired = Self.columnCount(forWidth: bounds.width)
         guard desired != currentColumnCount else { return }
         rebuildGrid(columnCount: desired)
@@ -198,14 +251,20 @@ final class ColorPaletteView: NSView {
     /// `CurrentColorIndicatorView`'s space (see `AppDelegate.makeColorBar()`
     /// constraints) — so filling it edge-to-edge here is what puts the
     /// swatches flush against the window's right edge.
-    private static func columnCount(forWidth width: CGFloat) -> Int {
+    ///
+    /// `internal`, not `private`, so `ColorPaletteViewTests` can pin its
+    /// boundary behavior directly (PR #63 review must-1: this is the core
+    /// width-to-column-count conversion the whole issue is about, and it
+    /// had no test coverage at all) — same testability reasoning as
+    /// `baseRowColors(_:rowIndex:columnCount:)` and
+    /// `updatedRecentColors(adding:to:capacity:)`.
+    static func columnCount(forWidth width: CGFloat) -> Int {
         let minimumColumns = rows[0].count
         guard width > 0 else { return minimumColumns }
-        let spacing: CGFloat = 1 // matches grid.columnSpacing below
-        let cellStride = swatchSide + spacing
-        // n columns span n*swatchSide + (n-1)*spacing <= width, i.e.
-        // n <= (width + spacing) / cellStride.
-        let fitted = Int((width + spacing) / cellStride)
+        let cellStride = swatchSide + swatchSpacing
+        // n columns span n*swatchSide + (n-1)*swatchSpacing <= width, i.e.
+        // n <= (width + swatchSpacing) / cellStride.
+        let fitted = Int((width + swatchSpacing) / cellStride)
         return max(minimumColumns, fitted)
     }
 
@@ -271,8 +330,8 @@ final class ColorPaletteView: NSView {
         grid?.removeFromSuperview()
 
         let grid = NSGridView(numberOfColumns: columnCount, rows: 0)
-        grid.rowSpacing = 1
-        grid.columnSpacing = 1
+        grid.rowSpacing = Self.swatchSpacing
+        grid.columnSpacing = Self.swatchSpacing
         grid.translatesAutoresizingMaskIntoConstraints = false
 
         for (rowIndex, row) in Self.rows.enumerated() {

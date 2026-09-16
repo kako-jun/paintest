@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // rowSpacing (1) * 2 gaps = 56pt tall, up from the old 2-row grid's
     // 18*2+1 = 37pt. At the old colorBarHeight (44), the grid was centered
     // with an implicit (44-37)/2 = 3.5pt margin above and below (see
-    // `ColorPaletteView.buildSwatches()`'s `grid.centerYAnchor` constraint).
+    // `ColorPaletteView.rebuildGrid(columnCount:)`'s `grid.centerYAnchor` constraint).
     // Keeping that same ~3.5pt margin on the new 56pt-tall grid gives
     // 56 + 3.5*2 = 63.
     private static let colorBarHeight: CGFloat = 63

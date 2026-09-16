@@ -329,4 +329,47 @@ final class ColorPaletteViewTests: XCTestCase {
             "row 0 (muted shades) must stay darker than row 1 (vivid tones) once colors are procedurally generated"
         )
     }
+
+    // PR #63 review should-4: the defensive `columnCount < row.count`
+    // truncation branch (not reachable via `columnCount(forWidth:)` today,
+    // since it never returns below `rows[0].count`) had no test either.
+    func testBaseRowColors_narrowerColumnCount_truncatesToPrefix() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedWhite: CGFloat($0) / 14, alpha: 1) }
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 0, columnCount: 10)
+
+        XCTAssertEqual(
+            result, Array(sampleRow.prefix(10)),
+            "a columnCount below row.count must truncate to a prefix, not procedurally generate new colors"
+        )
+    }
+
+    // MARK: - columnCount(forWidth:) — width-to-column-count boundary (issue #59 PR #63 review must-1)
+    //
+    // This is the core conversion the whole issue is about (window width ->
+    // how many swatch columns fit), and it had zero test coverage before an
+    // independent review caught it. Swatch geometry: `swatchSide` 18pt +
+    // `swatchSpacing` 1pt between columns, so n columns span
+    // n*18 + (n-1)*1 = 19n - 1 points.
+
+    func testColumnCountForWidth_exactlyFourteenColumns_returnsFourteen() {
+        // 14*18 + 13*1 = 265
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 265), 14)
+    }
+
+    func testColumnCountForWidth_oneOverFourteenColumnsWidth_staysAtFourteen() {
+        // One point short of what a 15th column would need (284, see below)
+        // — must not round up to 15.
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 266), 14)
+    }
+
+    func testColumnCountForWidth_zeroOrNegative_floorsAtTheClassicFourteen() {
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 0), 14)
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: -100), 14)
+    }
+
+    func testColumnCountForWidth_exactlyFifteenColumns_returnsFifteen() {
+        // 15*18 + 14*1 = 284
+        XCTAssertEqual(ColorPaletteView.columnCount(forWidth: 284), 15)
+    }
 }
