@@ -209,13 +209,47 @@ final class ColorPaletteView: NSView {
         return max(minimumColumns, fitted)
     }
 
-    /// Extends (or truncates) a fixed classic-palette row to `columnCount`
-    /// columns by repeating its existing colors cyclically — the simplest
-    /// way to keep filling extra columns with a recognizable, already-tuned
-    /// hue sequence instead of inventing new colors procedurally (issue
-    /// #59).
-    private static func baseRowColors(_ row: [NSColor], columnCount: Int) -> [NSColor] {
-        (0..<columnCount).map { row[$0 % row.count] }
+    /// Adapts a fixed classic-palette row to `columnCount` columns (issue
+    /// #59). At the classic column count (`row.count`, 14) this returns
+    /// `row` untouched, so the default/narrow look stays exactly what it
+    /// was before this issue. Once the grid is wider than that, simply
+    /// repeating the same 14 colors would put visibly duplicate swatches
+    /// side by side for no reason (kako-jun flagged this after the first
+    /// pass) — so instead the whole row is regenerated at `columnCount`
+    /// colors via `proceduralRowColors(rowIndex:columnCount:)`, which
+    /// actually uses the extra width to show more distinct hues.
+    ///
+    /// `internal`, not `private`, so `ColorPaletteViewTests` can exercise it
+    /// directly (the same testability reasoning as
+    /// `updatedRecentColors(adding:to:capacity:)` below).
+    static func baseRowColors(_ row: [NSColor], rowIndex: Int, columnCount: Int) -> [NSColor] {
+        if columnCount == row.count {
+            return row
+        }
+        if columnCount < row.count {
+            // Not reachable via `columnCount(forWidth:)` today (it never
+            // returns below `rows[0].count`), but truncating rather than
+            // procedurally generating keeps this safe if that ever changes.
+            return Array(row.prefix(columnCount))
+        }
+        return proceduralRowColors(rowIndex: rowIndex, columnCount: columnCount)
+    }
+
+    /// Generates `columnCount` colors spread evenly around the hue wheel
+    /// (`hue = column / columnCount`), so widening the window actually
+    /// reveals new, distinct colors instead of a repeated pattern (issue
+    /// #59). `rowIndex` selects a saturation/brightness profile that keeps
+    /// each row's original character: row 0 was "muted shades" (lower
+    /// saturation, on the darker side), row 1 was "vivid tones" (high
+    /// saturation, bright) — see the `rows` doc comment above.
+    private static func proceduralRowColors(rowIndex: Int, columnCount: Int) -> [NSColor] {
+        let isMutedRow = rowIndex == 0
+        let saturation: CGFloat = isMutedRow ? 0.55 : 0.9
+        let brightness: CGFloat = isMutedRow ? 0.55 : 0.95
+        return (0..<columnCount).map { column in
+            let hue = CGFloat(column) / CGFloat(columnCount)
+            return NSColor(calibratedHue: hue, saturation: saturation, brightness: brightness, alpha: 1)
+        }
     }
 
     /// `colors`, padded with transparent placeholders up to `columnCount` if
@@ -241,8 +275,8 @@ final class ColorPaletteView: NSView {
         grid.columnSpacing = 1
         grid.translatesAutoresizingMaskIntoConstraints = false
 
-        for row in Self.rows {
-            grid.addRow(with: Self.baseRowColors(row, columnCount: columnCount).map(makeSwatch))
+        for (rowIndex, row) in Self.rows.enumerated() {
+            grid.addRow(with: Self.baseRowColors(row, rowIndex: rowIndex, columnCount: columnCount).map(makeSwatch))
         }
         // Third row: recently used colors (issue #5), empty at launch —
         // `updateRecentColors(_:)` fills it in as the user picks colors.

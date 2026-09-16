@@ -274,4 +274,59 @@ final class ColorPaletteViewTests: XCTestCase {
         XCTAssertEqual(result.filter { $0 == duplicate }.count, 1, "every existing occurrence of the added color must collapse into the single front entry")
         XCTAssertEqual(result.first, duplicate)
     }
+
+    // MARK: - baseRowColors(_:rowIndex:columnCount:) — dynamic column fill (issue #59)
+    //
+    // The first pass at issue #59 filled extra columns by repeating the
+    // existing 14 colors cyclically, which kako-jun flagged as pointless
+    // ("同じ色のパレットが増えてもいみないぞ"): widening the window just showed
+    // the same 14 swatches twice. These tests pin the fix — a widened row
+    // must contain genuinely new colors, not a repeat of the original 14 —
+    // while the classic 14-column width still looks exactly as before.
+
+    func testBaseRowColors_atClassicColumnCount_returnsTheRowUnchanged() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedWhite: CGFloat($0) / 14, alpha: 1) }
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 0, columnCount: sampleRow.count)
+
+        XCTAssertEqual(result, sampleRow, "at the classic 14-column width the row must stay exactly as authored, unchanged by issue #59's widening logic")
+    }
+
+    func testBaseRowColors_widerColumnCount_returnsExactlyColumnCountColors() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedHue: CGFloat($0) / 14, saturation: 1, brightness: 1, alpha: 1) }
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 1, columnCount: 30)
+
+        XCTAssertEqual(result.count, 30)
+    }
+
+    func testBaseRowColors_widerColumnCount_generatesDistinctHuesInsteadOfRepeatingTheOriginal14() {
+        let sampleRow: [NSColor] = (0..<14).map { NSColor(calibratedHue: CGFloat($0) / 14, saturation: 1, brightness: 1, alpha: 1) }
+        let columnCount = 28 // 2x the classic count
+
+        let result = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 1, columnCount: columnCount)
+
+        // A naive cyclic repeat of the original 14 colors (the pre-fix
+        // behavior) would only ever produce 14 distinct hues no matter how
+        // wide the row gets. The fixed behavior must do better than that.
+        let uniqueHues = Set(result.map { Int(($0.hueComponent * 1000).rounded()) })
+        XCTAssertGreaterThan(uniqueHues.count, sampleRow.count, "widening the row must reveal genuinely new colors, not just repeat the original 14")
+    }
+
+    func testBaseRowColors_widerColumnCount_rowIndexZeroStaysMutedAndRowIndexOneStaysVivid() {
+        let sampleRow = Array(repeating: NSColor.black, count: 14)
+        let columnCount = 20
+
+        let mutedRow = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 0, columnCount: columnCount)
+        let vividRow = ColorPaletteView.baseRowColors(sampleRow, rowIndex: 1, columnCount: columnCount)
+
+        XCTAssertLessThan(
+            mutedRow[5].saturationComponent, vividRow[5].saturationComponent,
+            "row 0 (muted shades) must stay less saturated than row 1 (vivid tones) once colors are procedurally generated"
+        )
+        XCTAssertLessThan(
+            mutedRow[5].brightnessComponent, vividRow[5].brightnessComponent,
+            "row 0 (muted shades) must stay darker than row 1 (vivid tones) once colors are procedurally generated"
+        )
+    }
 }
