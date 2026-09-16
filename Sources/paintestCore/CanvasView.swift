@@ -2166,6 +2166,10 @@ final class CanvasView: NSView {
     /// fresh, directly at the true 1-canvas-pixel-per-point size, avoids
     /// that resampling step entirely and produces the same crisp result
     /// regardless of what zoom level the user happened to be editing at.
+    /// `rasterizedHorizontalTextImage(_:font:color:)`/
+    /// `rasterizedVerticalTextImage(_:font:color:)` below do the actual
+    /// bitmap construction so this method stays a thin dispatch on
+    /// `textSettings.isVertical`.
     ///
     /// Font rendering can't be made fully non-anti-aliased the way the
     /// pencil/bucket-fill's `setPixel`/`drawLine` are (CLAUDE.md's classic-
@@ -2181,62 +2185,10 @@ final class CanvasView: NSView {
     /// scaling blur layered on top of its own anti-aliasing.
     private func rasterizeText(_ text: String, at pixel: (x: Int, y: Int)) {
         let font = CanvasView.resolvedFont(family: textSettings.fontFamily, size: textSettings.fontSize)
-        let rasterText = CanvasView.rasterizedText(text, isVertical: textSettings.isVertical)
-        let attributedText = NSAttributedString(
-            string: rasterText,
-            attributes: [
-                .font: font,
-                .foregroundColor: foregroundColor
-            ]
-        )
-        let boundingRect = attributedText.boundingRect(
-            with: NSSize(width: 10_000, height: 10_000),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
-        let width = max(1, Int(boundingRect.width.rounded(.up)))
-        let height = max(1, Int(boundingRect.height.rounded(.up)))
-        let viewRect = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
-
-        // Built by hand — not `bitmapImageRepForCachingDisplay(in:)` — at
-        // exactly `width`x`height` *pixels*: that convenience constructor
-        // sizes its bitmap using the view's own backing scale factor,
-        // which would be `2.0` were this view ever attached to a Retina
-        // window, silently doubling the baked-in text's pixel size
-        // relative to what `textSettings.fontSize` says. This rasterization
-        // path has no throwaway view at all, so pinning the bitmap's pixel
-        // dimensions explicitly (matching `viewRect`'s point size 1:1, via
-        // `bitmap.size` below) is what actually guarantees "this many
-        // canvas pixels tall" — not an incidental default.
-        guard let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: width,
-            pixelsHigh: height,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bitmapFormat: [],
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ) else { return }
-        bitmap.size = viewRect.size
-        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return }
-        let previousContext = NSGraphicsContext.current
-        NSGraphicsContext.current = context
-        defer {
-            NSGraphicsContext.current = previousContext
-        }
-        attributedText.draw(
-            with: CGRect(
-                x: -boundingRect.origin.x,
-                y: -boundingRect.origin.y,
-                width: max(viewRect.width, boundingRect.width),
-                height: max(viewRect.height, boundingRect.height)
-            ),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
-        guard let cgImage = bitmap.cgImage else { return }
+        let cgImage = textSettings.isVertical
+            ? CanvasView.rasterizedVerticalTextImage(text, font: font, color: foregroundColor)
+            : CanvasView.rasterizedHorizontalTextImage(text, font: font, color: foregroundColor)
+        guard let cgImage else { return }
 
         layerStack.activeLayer.canvas.compositeImage(cgImage, at: pixel, mask: selection)
     }
@@ -2255,12 +2207,151 @@ final class CanvasView: NSView {
             ?? NSFont.systemFont(ofSize: size)
     }
 
-    private static func rasterizedText(_ text: String, isVertical: Bool) -> String {
-        guard isVertical else { return text }
-        return text
+    /// Builds the bitmap for horizontal writing: a single
+    /// `NSAttributedString`, measured and drawn as-is via the ordinary
+    /// `NSStringDrawing` convenience methods — unchanged from before issue
+    /// #50, which is a vertical-writing-only bug.
+    private static func rasterizedHorizontalTextImage(_ text: String, font: NSFont, color: NSColor) -> CGImage? {
+        let attributedText = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: color
+            ]
+        )
+        let boundingRect = attributedText.boundingRect(
+            with: NSSize(width: 10_000, height: 10_000),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        let width = max(1, Int(boundingRect.width.rounded(.up)))
+        let height = max(1, Int(boundingRect.height.rounded(.up)))
+
+        guard let (bitmap, context) = CanvasView.makeBitmapContext(width: width, height: height) else { return nil }
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = context
+        defer { NSGraphicsContext.current = previousContext }
+
+        attributedText.draw(
+            with: CGRect(
+                x: -boundingRect.origin.x,
+                y: -boundingRect.origin.y,
+                width: max(CGFloat(width), boundingRect.width),
+                height: max(CGFloat(height), boundingRect.height)
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        return bitmap.cgImage
+    }
+
+    /// Builds the bitmap for vertical writing (issue #50 fix): each
+    /// Return-separated line of the typed text becomes its own *column*,
+    /// stacked characters top-to-bottom within the column, columns laid
+    /// out right-to-left — Photoshop's tategaki convention, per the issue.
+    ///
+    /// Before this fix, `rasterizeText(_:at:)` ran every line through the
+    /// same "one character per paragraph" trick used below for a *single*
+    /// column, but then joined all of those already-stacked lines together
+    /// with another `"\n"` — collapsing every column into one, since both
+    /// "next character in this column" and "next column" used the same
+    /// separator with no way to tell them apart once joined. This method
+    /// keeps that per-character-stacking trick (it works — see
+    /// `CanvasViewTests.testCommitTextEdit_isVertical_
+    /// boundingBoxIsTallerThanWide_comparedToHorizontalWriting`, unaffected
+    /// by this fix since a single-line input still produces exactly one
+    /// column) but now applies it once per line and composites the results
+    /// side by side instead of flattening them into one string.
+    ///
+    /// This intentionally does *not* go through `NSTextView
+    /// .setLayoutOrientation(.vertical)`/`NSTextContainer.layoutOrientation`
+    /// (what `beginTextEdit(at:)`'s live overlay sets): on-device testing
+    /// while fixing this issue found that `layoutOrientation = .vertical`
+    /// does not actually change TextKit 1's line-fragment geometry on this
+    /// machine's AppKit (Swift 6.3 / macOS 26.6) — an explicit `"\n"` still
+    /// starts a new line stacked *below* the previous one, not a new column
+    /// beside it, for both Latin and CJK sample text — so it cannot be used
+    /// as the source of truth for column layout here. Right-to-left column
+    /// order below is the issue's own stated ground truth (Photoshop's
+    /// convention), independent of that unreliable API.
+    private static func rasterizedVerticalTextImage(_ text: String, font: NSFont, color: NSColor) -> CGImage? {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color
+        ]
+        let measureSize = NSSize(width: 10_000, height: 10_000)
+        let drawingOptions: NSString.DrawingOptions = [.usesLineFragmentOrigin, .usesFontLeading]
+
+        let columns: [(attributedText: NSAttributedString, boundingRect: CGRect)] = text
             .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line in line.map(String.init).joined(separator: "\n") }
-            .joined(separator: "\n")
+            .map { line in
+                let stacked = line.map(String.init).joined(separator: "\n")
+                let attributedText = NSAttributedString(string: stacked, attributes: attributes)
+                let boundingRect = attributedText.boundingRect(with: measureSize, options: drawingOptions)
+                return (attributedText, boundingRect)
+            }
+        guard !columns.isEmpty else { return nil }
+
+        let columnWidths = columns.map { max(1, Int($0.boundingRect.width.rounded(.up))) }
+        let width = max(1, columnWidths.reduce(0, +))
+        let height = max(1, columns.map { Int($0.boundingRect.height.rounded(.up)) }.max() ?? 1)
+
+        guard let (bitmap, context) = CanvasView.makeBitmapContext(width: width, height: height) else { return nil }
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = context
+        defer { NSGraphicsContext.current = previousContext }
+
+        // Right-to-left: the first Return-separated line the user typed is
+        // the rightmost column, each subsequent line extends further left.
+        var columnRightEdge = CGFloat(width)
+        for (index, column) in columns.enumerated() {
+            let columnWidth = CGFloat(columnWidths[index])
+            let columnLeftEdge = columnRightEdge - columnWidth
+            column.attributedText.draw(
+                with: CGRect(
+                    x: columnLeftEdge - column.boundingRect.origin.x,
+                    y: -column.boundingRect.origin.y,
+                    width: max(columnWidth, column.boundingRect.width),
+                    height: max(CGFloat(height), column.boundingRect.height)
+                ),
+                options: drawingOptions
+            )
+            columnRightEdge = columnLeftEdge
+        }
+        return bitmap.cgImage
+    }
+
+    /// Shared bitmap-plus-graphics-context setup for
+    /// `rasterizedHorizontalTextImage(_:font:color:)`/
+    /// `rasterizedVerticalTextImage(_:font:color:)`: a `width`x`height`
+    /// *pixel* RGBA bitmap (not point-sized — see below) with an
+    /// `NSGraphicsContext` ready to draw into it.
+    ///
+    /// Built by hand — not `bitmapImageRepForCachingDisplay(in:)` — at
+    /// exactly `width`x`height` *pixels*: that convenience constructor
+    /// sizes its bitmap using the view's own backing scale factor, which
+    /// would be `2.0` were this view ever attached to a Retina window,
+    /// silently doubling the baked-in text's pixel size relative to what
+    /// `textSettings.fontSize` says. This rasterization path has no
+    /// throwaway view at all, so pinning the bitmap's pixel dimensions
+    /// explicitly (matching `size`'s point size 1:1, via `bitmap.size`
+    /// below) is what actually guarantees "this many canvas pixels tall" —
+    /// not an incidental default.
+    private static func makeBitmapContext(width: Int, height: Int) -> (NSBitmapImageRep, NSGraphicsContext)? {
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        bitmap.size = NSSize(width: CGFloat(width), height: CGFloat(height))
+        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        return (bitmap, context)
     }
 
     /// Reads the color at a pixel out of the currently displayed

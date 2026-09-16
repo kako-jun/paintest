@@ -6312,6 +6312,26 @@ final class CanvasViewTests: XCTestCase {
         return (minX, minY, maxX, maxY)
     }
 
+    /// The vertical extent (inclusive canvas-pixel row range) of non-white
+    /// pixels within a single canvas-pixel column `x` of the `height`-tall
+    /// region, or `nil` if that column is entirely white — used by the
+    /// issue #50 multi-column vertical-writing tests below to check *how
+    /// tall* a specific x-slice's ink is (e.g. "the rightmost column is
+    /// short" vs "the leftmost column is tall"), the same glyph-shape-
+    /// agnostic spirit as `nonWhiteBoundingBox(_:width:height:)`.
+    private func nonWhiteVerticalExtent(_ canvas: PixelCanvas, x: Int, height: Int) -> (minY: Int, maxY: Int)? {
+        var minY = Int.max, maxY = Int.min
+        for y in 0..<height {
+            guard let pixel = canvas.rawPixel(x: x, y: y) else { continue }
+            if pixel.r != 255 || pixel.g != 255 || pixel.b != 255 {
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+            }
+        }
+        guard minY <= maxY else { return nil }
+        return (minY, maxY)
+    }
+
     func testMouseDown_withTextActive_beginsEditing_addsEditorSubview_doesNotPaintAnyPixelDirectly() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
@@ -6762,6 +6782,104 @@ final class CanvasViewTests: XCTestCase {
 
         XCTAssertGreaterThan(horizontalWidth, horizontalHeight, "horizontal writing (isVertical = false) must lay \"AAAA\" out wider than it is tall")
         XCTAssertGreaterThan(verticalHeight, verticalWidth, "vertical writing (isVertical = true) must stack \"AAAA\" taller than it is wide")
+    }
+
+    // MARK: - Vertical writing, multiple Return-separated lines (issue #50)
+    //
+    // Before this fix, `rasterizeText(_:at:)` ran every Return-separated
+    // line of vertical-writing text through the same "stack this line's
+    // characters into one column" trick and then joined *all* of those
+    // already-stacked lines together with another "\n" — collapsing every
+    // line into a single tall column instead of laying each line out as
+    // its own column beside the others, the way Photoshop's tategaki (and
+    // the live `NSTextView.layoutOrientation = .vertical` overlay) does.
+    // The single-line case above was already covered; these two tests
+    // cover the actual multi-line bug.
+
+    func testCommitTextEdit_isVertical_multilineText_producesSideBySideColumns_notCollapsedIntoOneTallColumn() {
+        // A collapsed bake (the issue #50 bug) would be the same width as
+        // a single-line bake of just the first line, but roughly twice as
+        // tall (both lines' characters stacked into one column). A
+        // correctly-fixed bake instead grows *wider* (a second column
+        // appears beside the first) while staying about as tall as the
+        // single-line bake (each column is independently only as tall as
+        // its own line's characters).
+        func paint(_ text: String) -> PixelCanvas {
+            let zoomScale = 4
+            let view = makeViewInWindow(width: 64, height: 64, zoomScale: zoomScale)
+            view.activeTool = .text
+            view.foregroundColor = .black
+            view.textSettings.fontSize = 12
+            view.textSettings.isVertical = true
+            let window = view.window!
+            let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+            view.mouseDown(with: mouseDownEvent(at: point, in: window))
+            typeText(text, into: view)
+            view.commitTextEdit()
+            return view.layerStack.activeLayer.canvas
+        }
+
+        let singleLineCanvas = paint("AAAA")
+        let twoLineCanvas = paint("AAAA\nBBBB")
+
+        guard let singleLineBox = nonWhiteBoundingBox(singleLineCanvas, width: 64, height: 64) else {
+            XCTFail("precondition: single-line vertical bake must paint something")
+            return
+        }
+        guard let twoLineBox = nonWhiteBoundingBox(twoLineCanvas, width: 64, height: 64) else {
+            XCTFail("precondition: two-line vertical bake must paint something")
+            return
+        }
+
+        let singleLineWidth = singleLineBox.maxX - singleLineBox.minX + 1
+        let singleLineHeight = singleLineBox.maxY - singleLineBox.minY + 1
+        let twoLineWidth = twoLineBox.maxX - twoLineBox.minX + 1
+        let twoLineHeight = twoLineBox.maxY - twoLineBox.minY + 1
+
+        XCTAssertGreaterThan(twoLineWidth, singleLineWidth, "a second Return-separated line must add a second column beside the first, widening the bake")
+        XCTAssertLessThan(Double(twoLineHeight), Double(singleLineHeight) * 1.5, "a second line must NOT stack underneath the first inside one tall column (the issue #50 bug) — each column should independently stay about as tall as \"AAAA\" alone, not roughly double")
+    }
+
+    func testCommitTextEdit_isVertical_multilineText_firstTypedLineIsRightmostColumn() {
+        // Photoshop's tategaki convention, per issue #50: the first
+        // Return-separated line typed is the *rightmost* column, and each
+        // subsequent line extends further left. A short first line ("A")
+        // followed by a taller second line ("BBBB") should paint a short
+        // column on the right side of the bake and a tall column on the
+        // left; the reverse (or no separation at all) would mean the
+        // columns came out in the wrong order — or didn't separate into
+        // columns in the first place.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 64, height: 64, zoomScale: zoomScale)
+        view.activeTool = .text
+        view.foregroundColor = .black
+        view.textSettings.fontSize = 12
+        view.textSettings.isVertical = true
+        let window = view.window!
+        let point = windowPoint(forPixelCol: 4, row: 4, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: point, in: window))
+        typeText("A\nBBBB", into: view)
+        view.commitTextEdit()
+
+        let canvas = view.layerStack.activeLayer.canvas
+        guard let box = nonWhiteBoundingBox(canvas, width: 64, height: 64) else {
+            XCTFail("precondition: two-line vertical bake must paint something")
+            return
+        }
+
+        guard let rightColumnExtent = nonWhiteVerticalExtent(canvas, x: box.maxX, height: 64) else {
+            XCTFail("precondition: the rightmost painted column must not be blank")
+            return
+        }
+        guard let leftColumnExtent = nonWhiteVerticalExtent(canvas, x: box.minX, height: 64) else {
+            XCTFail("precondition: the leftmost painted column must not be blank")
+            return
+        }
+
+        let rightColumnHeight = rightColumnExtent.maxY - rightColumnExtent.minY + 1
+        let leftColumnHeight = leftColumnExtent.maxY - leftColumnExtent.minY + 1
+
+        XCTAssertLessThan(rightColumnHeight, leftColumnHeight, "the first typed line (\"A\", one character) must land in the shorter, rightmost column, and the second line (\"BBBB\", four characters) in the taller, leftmost column")
     }
 
     // MARK: - updateTextEditorForZoomChange() (issue #42 review round 2
