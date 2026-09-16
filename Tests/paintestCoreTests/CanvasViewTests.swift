@@ -1992,6 +1992,152 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertNil(view.selection, "a click just past polygonCloseDistance must not close the shape")
     }
 
+    func testPolygonSelect_threeClicksThenDoubleClickAnywhere_closesTheSelection() {
+        // issue #52: a double-click anywhere (not just near the first
+        // vertex) must close the polygon once >= 3 vertices are placed —
+        // AppKit's `clickCount` distinguishes it from a plain click, which
+        // still just appends a 4th vertex (see the counterpart test below).
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let farAwayDoubleClick = windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        XCTAssertNil(view.selection, "precondition: the shape isn't closed yet after only 3 clicks")
+
+        // A double-click far from the first vertex — nowhere near
+        // `polygonCloseDistance` — must still close the shape using the 3
+        // vertices already placed, not append a 4th vertex at this point.
+        view.mouseDown(with: mouseDownEvent(at: farAwayDoubleClick, in: window, clickCount: 2))
+
+        XCTAssertNotNil(view.selection, "a double-click, anywhere, with >=3 vertices placed must close and commit the selection")
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 2), "a point inside the closed triangle (v1/v2/v3, not the double-click point) must be selected")
+    }
+
+    func testPolygonSelect_doubleClickWithOnlyTwoVertices_doesNotClose_addsAThirdVertexInstead() {
+        // The double-click shortcut only applies once >= 3 vertices already
+        // exist (issue #52) — same threshold the "click near first vertex"
+        // path already enforces. With only 2 vertices placed, this call's
+        // first mouseDown (clickCount 1, matching how AppKit actually
+        // delivers a double click — see the closing test above) appends the
+        // 3rd vertex; nothing has closed the shape yet.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window, clickCount: 2))
+
+        XCTAssertNil(view.selection, "a double-click with fewer than 3 vertices placed must not close the shape")
+    }
+
+    // MARK: - Selection tools: rectangle/ellipse Shift-aspect-lock (issue #52)
+
+    /// Same shape as `dragRectangleSelect` above, but — unlike that
+    /// helper — passes `modifierFlags` to the `mouseDragged` event too, not
+    /// just `mouseDown`. Needed specifically for these Shift-aspect-lock
+    /// tests: the aspect lock is read live off each `mouseDragged` event
+    /// (so pressing/releasing Shift mid-drag takes effect immediately — see
+    /// `mouseDragged(with:)`'s own comment), so a helper that only sets
+    /// Shift at `mouseDown` (real `combineMode` only needs it there) would
+    /// never trigger it, unlike a real physical Shift key held throughout
+    /// the gesture.
+    private func dragSelectWithModifiersThroughoutGesture(on view: CanvasView, fromCol: Int, fromRow: Int, toCol: Int, toRow: Int, zoomScale: Int, modifierFlags: NSEvent.ModifierFlags) {
+        let window = view.window!
+        let start = windowPoint(forPixelCol: fromCol, row: fromRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: toCol, row: toRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: start, in: window, modifierFlags: modifierFlags))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window, modifierFlags: modifierFlags))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window, modifierFlags: modifierFlags))
+    }
+
+    func testRectangleSelect_shiftDrag_noExistingSelection_widerThanTall_constrainsHeightToMatchWidth() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        XCTAssertNil(view.selection, "precondition: nothing selected yet")
+
+        // Dragged 5 pixels wide but only 2 tall — Shift must stretch the
+        // height out to match the width (the larger of the two raw deltas),
+        // producing a 6x6 square (pixel indices 0...5) rather than the
+        // 6x3 rectangle a plain drag to the same point would produce.
+        dragSelectWithModifiersThroughoutGesture(on: view, fromCol: 0, fromRow: 0, toCol: 5, toRow: 2, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 5), "the shorter axis (height) must be stretched out to match the dragged width, constraining to a square")
+        XCTAssertTrue(view.selection!.contains(x: 0, y: 0))
+        XCTAssertFalse(view.selection!.contains(x: 6, y: 6), "the square's own bounds (0...5) must not be exceeded")
+    }
+
+    func testRectangleSelect_noModifierDrag_widerThanTall_staysARectangle_notConstrained() {
+        // Counterpart to the Shift test above, same drag coordinates but no
+        // modifier: confirms the square-constraint is Shift-specific, not
+        // some unconditional behavior change to the rectangle tool.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+
+        dragRectangleSelect(on: view, fromCol: 0, fromRow: 0, toCol: 5, toRow: 2, zoomScale: zoomScale)
+
+        XCTAssertFalse(view.selection!.contains(x: 5, y: 5), "without Shift, the drag must stay a free rectangle — height must NOT be stretched to match width")
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 2))
+    }
+
+    func testRectangleSelect_shiftDrag_withExistingSelection_isNotConstrainedToASquare() {
+        // Real Photoshop only aspect-locks a Shift-drag when there's no
+        // existing selection to add to (issue #52) — once a selection
+        // already exists, Shift instead means "add this new shape to it"
+        // (see `combineMode(for:)`), and the newly drawn shape stays
+        // free-form.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        // Pre-existing selection far away, so it doesn't overlap the new
+        // drag and its own shape is easy to tell apart from the new one.
+        view.selection = SelectionMask.rectangle(x0: 7, y0: 7, x1: 7, y1: 7, width: 8, height: 8)
+
+        dragSelectWithModifiersThroughoutGesture(on: view, fromCol: 0, fromRow: 0, toCol: 5, toRow: 2, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 2), "the new shape must be added exactly as dragged (0...5 x 0...2), not constrained to a square")
+        XCTAssertFalse(view.selection!.contains(x: 5, y: 5), "with an existing selection present, Shift must NOT constrain the new shape to a square")
+        XCTAssertTrue(view.selection!.contains(x: 7, y: 7), "the pre-existing selection must still be present (Shift = add)")
+    }
+
+    func testEllipseSelect_shiftDrag_noExistingSelection_widerThanTall_constrainsToACircle() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .ellipseSelect
+
+        // Dragged 7 pixels wide but only 3 tall — Shift must stretch the
+        // bounding box's height out to match its width (0...7 in both
+        // axes), turning the ellipse into a circle.
+        dragSelectWithModifiersThroughoutGesture(on: view, fromCol: 0, fromRow: 0, toCol: 7, toRow: 3, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 6), "a point well below the un-constrained 0...3 bounding box, but inside the constrained 8x8 circle, must be selected")
+    }
+
+    func testEllipseSelect_noModifierDrag_widerThanTall_staysAnEllipse_notConstrained() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .ellipseSelect
+
+        dragRectangleSelect(on: view, fromCol: 0, fromRow: 0, toCol: 7, toRow: 3, zoomScale: zoomScale)
+
+        XCTAssertFalse(view.selection!.contains(x: 4, y: 6), "without Shift, the ellipse's bounding box must stay 0...3 tall — this point must fall outside it")
+    }
+
     // MARK: - Selection tools: magic wand (issue #11 test-authoring pass)
 
     func testMouseDown_magicWandSelect_singleClick_confirmsSelectionImmediately_noDragNeeded() {
