@@ -729,7 +729,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         mainMenu.addItem(makeMenuItem(title: "選択範囲", items: [
             ("すべてを選択", #selector(selectAll), "a"),
             ("選択を解除", #selector(deselectAll), "d"),
-            ("選択範囲を反転", #selector(invertSelection), "i")
+            // "I" (uppercase), not "i" (issue #52): `NSMenuItem` matches a
+            // keyEquivalent against the character actually typed, and an
+            // uppercase letter can only be typed with Shift held — so this
+            // alone changes the shortcut to Cmd+Shift+I (⇧⌘I, shown as such
+            // in the menu) without touching `keyEquivalentModifierMask`.
+            // Freed Cmd+I up from this app-specific binding, matching
+            // Photoshop's own real shortcut for 選択範囲を反転 (Select >
+            // Inverse).
+            ("選択範囲を反転", #selector(invertSelection), "I")
         ]))
         mainMenu.addItem(makeMenuItem(title: "ウインドウ", placeholders: ["レイヤー", "プロパティ", "ヒストリー"]))
         mainMenu.addItem(makeMenuItem(title: "ヘルプ", placeholders: ["ヘルプ トピック", "paintestのバージョン情報"]))
