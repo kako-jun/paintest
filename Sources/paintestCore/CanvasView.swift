@@ -2503,13 +2503,12 @@ final class CanvasView: NSView {
 
     /// Clears `selection`'s contents to fully transparent — Delete/
     /// Backspace's whole gesture (see `keyDown`'s own case for the two
-    /// keyCodes), the keyboard equivalent of dragging the eraser tool over
-    /// the same pixels. Writes alpha 0 into every pixel of the active
-    /// layer's canvas that `selection` contains, via `PixelCanvas
+    /// keyCodes), invoking the "delete = alpha 0" internal data model issue
+    /// #5 already established. Writes alpha 0 into every pixel of the
+    /// active layer's canvas that `selection` contains, via `PixelCanvas
     /// .setPixel(x:y:color:mask:)`'s existing mask-restricted overload — the
-    /// same "delete = alpha 0" internal data model issue #5 already
-    /// established, and the same masked-write mechanism issue #11's other
-    /// selection-restricted tools (and `bucketFill` above) already use.
+    /// same masked-write mechanism issue #11's other selection-restricted
+    /// tools (and `bucketFill` above) already use.
     ///
     /// A no-op when there's no active selection (`selection == nil`):
     /// Photoshop itself clears the *whole* active layer in that case, but

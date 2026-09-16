@@ -2080,6 +2080,29 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(canvas.rawPixel(x: 0, y: 0)?.a, 255, "a modified Delete must not clear the selection")
     }
 
+    /// Regression guard for a non-rectangular selection (review should-2):
+    /// `deleteSelectionContents()` scans `selection.boundingBox` for
+    /// performance (same reasoning as `bucketFill` above), but every pixel
+    /// inside that box still goes through `PixelCanvas
+    /// .setPixel(...,mask:selection)`, so a bounding-box corner that sits
+    /// outside the ellipse's own curved boundary must stay untouched — not
+    /// get cleared just because it falls inside the box.
+    func testKeyDown_deleteKey_withEllipseSelection_leavesPixelsInsideTheBoundingBoxButOutsideTheEllipseUntouched() {
+        let view = makeViewInWindow(width: 8, height: 8)
+        view.selection = SelectionMask.ellipse(centerX: 4, centerY: 4, radiusX: 3, radiusY: 3, width: 8, height: 8)
+        let window = view.window!
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 4), "precondition: the ellipse's center is selected")
+        XCTAssertFalse(view.selection!.contains(x: 1, y: 1), "precondition: (1,1) sits inside the ellipse's bounding box but outside its curved boundary")
+        let canvasBefore = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvasBefore.rawPixel(x: 1, y: 1)?.a, 255, "precondition: fully opaque before the delete")
+
+        view.keyDown(with: keyDownEvent(keyCode: 51, in: window)) // Delete
+
+        let canvas = view.layerStack.activeLayer.canvas
+        XCTAssertEqual(canvas.rawPixel(x: 4, y: 4)?.a, 0, "inside the ellipse itself must become transparent")
+        XCTAssertEqual(canvas.rawPixel(x: 1, y: 1)?.a, 255, "inside the bounding box but outside the ellipse's curve must be left untouched")
+    }
+
     func testMouseDown_rectangleSelect_dragThenUp_confirmsRectangleSelection() {
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
