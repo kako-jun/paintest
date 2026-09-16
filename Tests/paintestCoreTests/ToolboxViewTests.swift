@@ -120,7 +120,7 @@ final class ToolboxViewTests: XCTestCase {
         XCTAssertEqual(pencil.state, .off, "selecting gradient must turn the default-on pencil off")
     }
 
-    // MARK: - Single-column layout + scroll wrapping (issue #7)
+    // MARK: - 2-column grid layout + scroll wrapping (issue #58)
 
     func testToolboxIsWrappedInScrollView() {
         let view = makeView()
@@ -133,7 +133,7 @@ final class ToolboxViewTests: XCTestCase {
             XCTFail("could not find the toolbox's scroll view")
             return
         }
-        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 21 buttons in one column run taller than the window")
+        XCTAssertTrue(scrollView.hasVerticalScroller, "the toolbox must scroll vertically since 21 buttons in a 2-column grid (11 rows) can run taller than the window")
     }
 
     func testGrid_hasTwoColumns() {
@@ -143,6 +143,18 @@ final class ToolboxViewTests: XCTestCase {
             return
         }
         XCTAssertEqual(grid.numberOfColumns, 2, "the toolbox should be a 2-column grid, matching Photoshop's 2-column toolbar layout (issue #58)")
+    }
+
+    func testGrid_21OddToolCount_fills11RowsWithTheLastRowHoldingOnlyOneButton() {
+        let view = makeView()
+        guard let grid = findGridView(in: view) else {
+            XCTFail("could not find the toolbox's grid view")
+            return
+        }
+        XCTAssertEqual(grid.numberOfRows, 11, "21 tools in a 2-column grid should fill 10 full rows plus 1 trailing row, not silently drop the odd tool out or leave a half-filled extra row")
+        let lastRow = grid.numberOfRows - 1
+        XCTAssertNotNil(grid.cell(atColumnIndex: 0, rowIndex: lastRow).contentView, "the last row's first column should hold the 21st tool's button")
+        XCTAssertNil(grid.cell(atColumnIndex: 1, rowIndex: lastRow).contentView, "the last row's second column should be empty padding since 21 tools don't divide evenly into 2 columns")
     }
 
     // MARK: - Pencil/eraser exclusive tool selection (issue #5)
@@ -399,6 +411,6 @@ final class ToolboxViewTests: XCTestCase {
     // manually verified with scratch edits (reverted before commit):
     // temporarily changing the "鉛筆" label confirmed the fallback selects
     // index 0 instead of crashing, and temporarily appending another tool
-    // (making the count odd) confirmed all 19 buttons render, including the
+    // (making the count odd) confirmed all 21 buttons render, including the
     // trailing unpaired one in its own row.
 }
