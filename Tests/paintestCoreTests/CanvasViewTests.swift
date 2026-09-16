@@ -2102,6 +2102,177 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertNil(view.selection, "a click just past polygonCloseDistance must not close the shape")
     }
 
+    func testPolygonSelect_threeClicksThenDoubleClickAnywhere_closesTheSelection() {
+        // issue #52: a double-click anywhere (not just near the first
+        // vertex) must close the polygon once >= 3 vertices are placed —
+        // AppKit's `clickCount` is what distinguishes this from a plain
+        // click, which would just append a 4th vertex instead.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let farAwayDoubleClick = windowPoint(forPixelCol: 1, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        XCTAssertNil(view.selection, "precondition: the shape isn't closed yet after only 3 clicks")
+
+        // A double-click far from the first vertex — nowhere near
+        // `polygonCloseDistance` — must still close the shape using the 3
+        // vertices already placed, not append a 4th vertex at this point.
+        view.mouseDown(with: mouseDownEvent(at: farAwayDoubleClick, in: window, clickCount: 2))
+
+        XCTAssertNotNil(view.selection, "a double-click, anywhere, with >=3 vertices placed must close and commit the selection")
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 2), "a point inside the closed triangle (v1/v2/v3, not the double-click point) must be selected")
+    }
+
+    func testPolygonSelect_twoVerticesThenDoubleClickAtThirdPoint_placesItThenClosesOnTheSecondEvent() {
+        // AppKit always delivers a double-click as *two* separate
+        // `mouseDown` calls at (approximately) the same point — `clickCount
+        // 1` first, then `clickCount 2` — never `clickCount 2` on its own
+        // (a review correction on issue #52's first pass, which had a test
+        // asserting on a single synthetic `clickCount: 2` event with only 1
+        // vertex placed beforehand; that didn't reproduce any real gesture,
+        // since a real double click's first event always appends a vertex
+        // of its own too).
+        //
+        // With exactly 2 vertices already placed via single clicks, a real
+        // double-click at a 3rd point places that 3rd vertex on its first
+        // (`clickCount 1`) event — bringing the count to the >= 3 threshold
+        // the double-click-closes guard checks — and then closes the shape
+        // immediately on the very next (`clickCount 2`) event, using that
+        // freshly-placed 3rd vertex. This is the realistic, intended path
+        // for "click, click, double-click to finish" (issue #52 item 3),
+        // not a rejected gesture.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .polygonSelect
+        let window = view.window!
+        let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
+
+        view.mouseDown(with: mouseDownEvent(at: v1, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v1, in: window))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        XCTAssertNil(view.selection, "precondition: only 2 vertices placed so far, nothing to close yet")
+
+        // First half of the double-click at v3 (`clickCount` 1): places the
+        // 3rd vertex, but must not close by itself.
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window, clickCount: 1))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        XCTAssertNil(view.selection, "the double-click's own first event only places the 3rd vertex; it must not close on its own")
+
+        // Second half of the double-click at v3 (`clickCount` 2, same
+        // point): now that >= 3 vertices exist, this closes immediately.
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window, clickCount: 2))
+
+        XCTAssertNotNil(view.selection, "the double-click's second event, arriving once >= 3 vertices exist, must close the shape")
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 2), "the closed triangle (v1/v2/v3) must be selected")
+    }
+
+    // MARK: - Selection tools: rectangle/ellipse Shift-aspect-lock (issue #52)
+
+    /// Same shape as `dragRectangleSelect` above, but — unlike that
+    /// helper — passes `modifierFlags` to the `mouseDragged` event too, not
+    /// just `mouseDown`. Needed specifically for these Shift-aspect-lock
+    /// tests: the aspect lock is read live off each `mouseDragged` event
+    /// (so pressing/releasing Shift mid-drag takes effect immediately — see
+    /// `mouseDragged(with:)`'s own comment), so a helper that only sets
+    /// Shift at `mouseDown` (real `combineMode` only needs it there) would
+    /// never trigger it, unlike a real physical Shift key held throughout
+    /// the gesture.
+    private func dragSelectWithModifiersThroughoutGesture(on view: CanvasView, fromCol: Int, fromRow: Int, toCol: Int, toRow: Int, zoomScale: Int, modifierFlags: NSEvent.ModifierFlags) {
+        let window = view.window!
+        let start = windowPoint(forPixelCol: fromCol, row: fromRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let end = windowPoint(forPixelCol: toCol, row: toRow, zoomScale: zoomScale, viewHeight: view.frame.height)
+        view.mouseDown(with: mouseDownEvent(at: start, in: window, modifierFlags: modifierFlags))
+        view.mouseDragged(with: mouseDraggedEvent(at: end, in: window, modifierFlags: modifierFlags))
+        view.mouseUp(with: mouseUpEvent(at: end, in: window, modifierFlags: modifierFlags))
+    }
+
+    func testRectangleSelect_shiftDrag_noExistingSelection_widerThanTall_constrainsHeightToMatchWidth() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        XCTAssertNil(view.selection, "precondition: nothing selected yet")
+
+        // Dragged 5 pixels wide but only 2 tall — Shift must stretch the
+        // height out to match the width (the larger of the two raw deltas),
+        // producing a 6x6 square (pixel indices 0...5) rather than the
+        // 6x3 rectangle a plain drag to the same point would produce.
+        dragSelectWithModifiersThroughoutGesture(on: view, fromCol: 0, fromRow: 0, toCol: 5, toRow: 2, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 5), "the shorter axis (height) must be stretched out to match the dragged width, constraining to a square")
+        XCTAssertTrue(view.selection!.contains(x: 0, y: 0))
+        XCTAssertFalse(view.selection!.contains(x: 6, y: 6), "the square's own bounds (0...5) must not be exceeded")
+    }
+
+    func testRectangleSelect_noModifierDrag_widerThanTall_staysARectangle_notConstrained() {
+        // Counterpart to the Shift test above, same drag coordinates but no
+        // modifier: confirms the square-constraint is Shift-specific, not
+        // some unconditional behavior change to the rectangle tool.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+
+        dragRectangleSelect(on: view, fromCol: 0, fromRow: 0, toCol: 5, toRow: 2, zoomScale: zoomScale)
+
+        XCTAssertFalse(view.selection!.contains(x: 5, y: 5), "without Shift, the drag must stay a free rectangle — height must NOT be stretched to match width")
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 2))
+    }
+
+    func testRectangleSelect_shiftDrag_withExistingSelection_isNotConstrainedToASquare() {
+        // Real Photoshop only aspect-locks a Shift-drag when there's no
+        // existing selection to add to (issue #52) — once a selection
+        // already exists, Shift instead means "add this new shape to it"
+        // (see `combineMode(for:)`), and the newly drawn shape stays
+        // free-form.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .rectangleSelect
+        // Pre-existing selection far away, so it doesn't overlap the new
+        // drag and its own shape is easy to tell apart from the new one.
+        view.selection = SelectionMask.rectangle(x0: 7, y0: 7, x1: 7, y1: 7, width: 8, height: 8)
+
+        dragSelectWithModifiersThroughoutGesture(on: view, fromCol: 0, fromRow: 0, toCol: 5, toRow: 2, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 5, y: 2), "the new shape must be added exactly as dragged (0...5 x 0...2), not constrained to a square")
+        XCTAssertFalse(view.selection!.contains(x: 5, y: 5), "with an existing selection present, Shift must NOT constrain the new shape to a square")
+        XCTAssertTrue(view.selection!.contains(x: 7, y: 7), "the pre-existing selection must still be present (Shift = add)")
+    }
+
+    func testEllipseSelect_shiftDrag_noExistingSelection_widerThanTall_constrainsToACircle() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .ellipseSelect
+
+        // Dragged 7 pixels wide but only 3 tall — Shift must stretch the
+        // bounding box's height out to match its width (0...7 in both
+        // axes), turning the ellipse into a circle.
+        dragSelectWithModifiersThroughoutGesture(on: view, fromCol: 0, fromRow: 0, toCol: 7, toRow: 3, zoomScale: zoomScale, modifierFlags: [.shift])
+
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 6), "a point well below the un-constrained 0...3 bounding box, but inside the constrained 8x8 circle, must be selected")
+    }
+
+    func testEllipseSelect_noModifierDrag_widerThanTall_staysAnEllipse_notConstrained() {
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
+        view.activeTool = .ellipseSelect
+
+        dragRectangleSelect(on: view, fromCol: 0, fromRow: 0, toCol: 7, toRow: 3, zoomScale: zoomScale)
+
+        XCTAssertFalse(view.selection!.contains(x: 4, y: 6), "without Shift, the ellipse's bounding box must stay 0...3 tall — this point must fall outside it")
+    }
+
     // MARK: - Selection tools: magic wand (issue #11 test-authoring pass)
 
     func testMouseDown_magicWandSelect_singleClick_confirmsSelectionImmediately_noDragNeeded() {
@@ -2141,6 +2312,45 @@ final class CanvasViewTests: XCTestCase {
         view.mouseDown(with: mouseDownEvent(at: targetPoint, in: view.window!))
 
         XCTAssertTrue(view.selection?.contains(x: 3, y: 2) ?? false, "(3,2) shares (2,2)'s raw active-layer RGB and must be selected — if the wand instead sampled the composite, the two pixels' very different blended appearances would exclude it")
+    }
+
+    func testMouseDown_magicWandSelect_contiguousTrue_selectsOnlyTheFloodReachableRegion() {
+        // issue #52: `magicWandContiguous` defaults to `true`, matching the
+        // wand's pre-existing (issue #11 round 3) flood-fill-only behavior
+        // — two disconnected same-color regions must NOT both get selected.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
+        let canvas = view.layerStack.activeLayer.canvas
+        canvas.setPixel(x: 1, y: 1, color: .red)
+        canvas.setPixel(x: 6, y: 6, color: .red) // same color, but not touching (1,1) — separated by white
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        XCTAssertTrue(view.magicWandContiguous, "precondition: contiguous is the default")
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(view.selection?.contains(x: 1, y: 1) ?? false)
+        XCTAssertFalse(view.selection?.contains(x: 6, y: 6) ?? false, "the disconnected red pixel must NOT be selected while contiguous is on")
+    }
+
+    func testMouseDown_magicWandSelect_contiguousFalse_selectsEveryMatchingPixelAcrossTheWholeCanvas() {
+        // issue #52: unchecking "Contiguous" selects every color-similar
+        // pixel on the canvas, connected or not — Photoshop's own toggle of
+        // the same name.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
+        let canvas = view.layerStack.activeLayer.canvas
+        canvas.setPixel(x: 1, y: 1, color: .red)
+        canvas.setPixel(x: 6, y: 6, color: .red) // same color, not touching (1,1)
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        view.magicWandContiguous = false
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(view.selection?.contains(x: 1, y: 1) ?? false)
+        XCTAssertTrue(view.selection?.contains(x: 6, y: 6) ?? false, "with contiguous off, every color-similar pixel must be selected regardless of connectivity")
+        XCTAssertFalse(view.selection?.contains(x: 0, y: 0) ?? false, "white pixels outside the tolerance must still be excluded")
     }
 
     // MARK: - Bucket fill (issue #38)

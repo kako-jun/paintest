@@ -729,7 +729,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         mainMenu.addItem(makeMenuItem(title: "選択範囲", items: [
             ("すべてを選択", #selector(selectAll), "a"),
             ("選択を解除", #selector(deselectAll), "d"),
-            ("選択範囲を反転", #selector(invertSelection), "i")
+            // "I" (uppercase), not "i" (issue #52): `NSMenuItem` matches a
+            // keyEquivalent against the character actually typed, and an
+            // uppercase letter can only be typed with Shift held — so this
+            // alone changes the shortcut to Cmd+Shift+I (⇧⌘I, shown as such
+            // in the menu) without touching `keyEquivalentModifierMask`.
+            // Freed Cmd+I up from this app-specific binding, matching
+            // Photoshop's own real shortcut for 選択範囲を反転 (Select >
+            // Inverse).
+            ("選択範囲を反転", #selector(invertSelection), "I")
         ]))
         mainMenu.addItem(makeMenuItem(title: "ウインドウ", placeholders: ["レイヤー", "プロパティ", "ヒストリー"]))
         mainMenu.addItem(makeMenuItem(title: "ヘルプ", placeholders: ["ヘルプ トピック", "paintestのバージョン情報"]))
@@ -1581,9 +1589,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 self?.canvasView.setZoomScale(scale)
             }
         case .magicWandSelect:
-            optionBarView.showMagicWandOptions(currentTolerance: canvasView.magicWandTolerance) { [weak self] tolerance in
-                self?.canvasView.magicWandTolerance = tolerance
-            }
+            // `currentContiguous`/`onContiguousChanged` (issue #52) add the
+            // "隣接ピクセルのみ" checkbox that only the magic wand gets —
+            // the `.bucketFill` case just below passes neither, so its own
+            // options bar stays tolerance-only (see
+            // `OptionBarView.showMagicWandOptions`'s doc comment).
+            optionBarView.showMagicWandOptions(
+                currentTolerance: canvasView.magicWandTolerance,
+                currentContiguous: canvasView.magicWandContiguous,
+                onToleranceChanged: { [weak self] tolerance in
+                    self?.canvasView.magicWandTolerance = tolerance
+                },
+                onContiguousChanged: { [weak self] contiguous in
+                    self?.canvasView.magicWandContiguous = contiguous
+                }
+            )
         case .bucketFill:
             // Reuses `showMagicWandOptions`'s exact UI (same "許容誤差"
             // label + slider over the same `SelectionMask.magicWand(...)`
@@ -1592,9 +1612,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // region ends up used for, so bucket fill just points it at
             // its own independent `bucketFillTolerance` property instead
             // of `magicWandTolerance`.
-            optionBarView.showMagicWandOptions(currentTolerance: canvasView.bucketFillTolerance) { [weak self] tolerance in
-                self?.canvasView.bucketFillTolerance = tolerance
-            }
+            optionBarView.showMagicWandOptions(
+                currentTolerance: canvasView.bucketFillTolerance,
+                onToleranceChanged: { [weak self] tolerance in
+                    self?.canvasView.bucketFillTolerance = tolerance
+                }
+            )
         case .pen:
             // `canvasView.penBrushSettings` is the single source of truth
             // (issue #20 — no separate `AppDelegate` copy, same as

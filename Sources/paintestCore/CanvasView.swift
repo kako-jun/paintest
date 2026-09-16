@@ -178,6 +178,17 @@ final class CanvasView: NSView {
     /// rubber-band state, since the two tools are otherwise unrelated.
     private var selectionDragStart: NSPoint?
     private var selectionDragCurrent: NSPoint?
+    /// Whether `selection` was empty (`nil`) at the moment the current
+    /// rectangle/ellipse drag started (issue #52) — captured once in
+    /// `mouseDown`, alongside `selectionDragStart`. Drives whether holding
+    /// Shift during the drag constrains the shape to a square/circle: real
+    /// Photoshop only does that when there's no existing selection to add
+    /// to (Shift-drag from a clean state has no other meaning to overload);
+    /// once a selection already exists, Shift instead means "add this new
+    /// shape to it" (see `combineMode(for:)`), so aspect-lock is skipped in
+    /// that case to keep the drawn shape free-form, matching `mouseUp`'s own
+    /// "`nil` selection is a different case" doc comment further down.
+    private var selectionDragHadNoExistingSelection = false
     /// Which modifier keys were held when the selection drag started
     /// (issue #11) — captured at `mouseDown` time (matching how real
     /// selection tools read modifiers) and consumed in `mouseUp` to decide
@@ -231,6 +242,19 @@ final class CanvasView: NSView {
     /// magnifier. `32` is an arbitrary starting default, not a value with any
     /// particular significance.
     var magicWandTolerance: Int = 32
+
+    /// The magic wand's "Contiguous" toggle (issue #52), passed straight
+    /// through to `SelectionMask.magicWand(...)`'s `contiguous` parameter —
+    /// Photoshop's own option-bar checkbox of the same name. `true` (the
+    /// default, matching `SelectionMask.magicWand`'s own default) restricts
+    /// the selection to color-similar pixels flood-reachable from the
+    /// clicked point; unchecking it selects every color-similar pixel on the
+    /// canvas regardless of whether it touches the clicked region. Bucket
+    /// fill (issue #38) deliberately has no equivalent property — a
+    /// non-contiguous *fill* is a materially different, out-of-scope
+    /// feature (global recolor), not just a selection-shape option, so this
+    /// only affects `.magicWandSelect`.
+    var magicWandContiguous: Bool = true
 
     /// The bucket fill tool's own color-similarity cutoff (issue #38), kept
     /// independent of `magicWandTolerance` above even though both feed the
@@ -418,6 +442,7 @@ final class CanvasView: NSView {
             // `magnifierDragStart` reset at the top of `mouseDown`).
             selectionDragStart = nil
             selectionDragCurrent = nil
+            selectionDragHadNoExistingSelection = false
             selectionCombineMode = nil
             lassoVertices = []
             lassoCombineMode = nil
@@ -596,6 +621,7 @@ final class CanvasView: NSView {
         magnifierDragCurrent = nil
         selectionDragStart = nil
         selectionDragCurrent = nil
+        selectionDragHadNoExistingSelection = false
         selectionCombineMode = nil
         lassoVertices = []
         lassoCombineMode = nil
@@ -2396,6 +2422,26 @@ final class CanvasView: NSView {
     /// first click) so this mapping lives in exactly one place instead of
     /// being re-derived per tool (round 2 pulled this out of the
     /// rectangle/ellipse branch below, which had it inline under round 1).
+    /// Constrains a rectangle/ellipse selection drag's end point so the box
+    /// spanned from `start` to the result has equal width and height (issue
+    /// #52's Shift-aspect-lock — see `selectionDragHadNoExistingSelection`'s
+    /// doc comment for when this is applied). Uses the *larger* of the two
+    /// raw deltas as the side length — same "which axis moved more" tie-
+    /// break the free-transform corner handles' own `keepAspect` uses in
+    /// `resizeByCorner` above — so the constrained square/circle always
+    /// reaches at least as far as the cursor along its dominant axis, each
+    /// axis extending from `start` in whichever direction that axis's raw
+    /// delta already pointed (zero stays zero, matching a plain click's
+    /// zero-size rectangle with no direction to pick).
+    private static func constrainedSquarePoint(start: NSPoint, current: NSPoint) -> NSPoint {
+        let dx = current.x - start.x
+        let dy = current.y - start.y
+        let side = max(abs(dx), abs(dy))
+        let signedX: CGFloat = dx > 0 ? side : (dx < 0 ? -side : 0)
+        let signedY: CGFloat = dy > 0 ? side : (dy < 0 ? -side : 0)
+        return NSPoint(x: start.x + signedX, y: start.y + signedY)
+    }
+
     private static func combineMode(for flags: NSEvent.ModifierFlags) -> SelectionCombineMode {
         if flags.contains(.shift) && flags.contains(.option) {
             return .intersect
@@ -2629,6 +2675,11 @@ final class CanvasView: NSView {
             let point = convert(event.locationInWindow, from: nil)
             selectionDragStart = point
             selectionDragCurrent = point
+            // Captured once, for the whole gesture (issue #52) — see
+            // `selectionDragHadNoExistingSelection`'s own doc comment for
+            // why Shift-aspect-lock depends on the selection state at the
+            // *start* of the drag rather than being re-checked every event.
+            selectionDragHadNoExistingSelection = selection == nil
             selectionCombineMode = CanvasView.combineMode(for: event.modifierFlags)
             return
         }
@@ -2646,9 +2697,24 @@ final class CanvasView: NSView {
             // A click-based state machine, independent of the lasso's
             // drag-based one (issue #11 round 2 — see `Tool.polygonSelect`'s
             // doc comment): each click either closes the shape (clicking
-            // near the first vertex, once there are at least 3) or appends
-            // a new vertex. Skips the pixel-painting path entirely, same as
-            // every other selection tool above.
+            // near the first vertex, or double-clicking anywhere, once
+            // there are at least 3 vertices already placed — issue #52) or
+            // appends a new vertex. Skips the pixel-painting path entirely,
+            // same as every other selection tool above.
+            //
+            // Double-click closing (issue #52) checked first, ahead of the
+            // "near the first vertex" check below: AppKit delivers a double
+            // click as two separate `mouseDown` calls at (approximately) the
+            // same point — `clickCount == 1`'s call already appended this
+            // gesture's latest vertex via the fallthrough path at the bottom
+            // of this branch, so `clickCount == 2`'s call only needs to
+            // close, not append a second, redundant coincident vertex on top
+            // of it (which `SelectionMask.polygon(...)`'s scan-conversion
+            // would treat as a zero-length edge — harmless, but pointless).
+            if event.clickCount >= 2, polygonVertices.count >= 3 {
+                closePolygon()
+                return
+            }
             let point = convert(event.locationInWindow, from: nil)
             if let firstPoint = polygonFirstPoint, polygonVertices.count >= 3,
                hypot(point.x - firstPoint.x, point.y - firstPoint.y) <= Self.polygonCloseDistance {
@@ -2682,7 +2748,8 @@ final class CanvasView: NSView {
                 startX: pixel.x, startY: pixel.y,
                 colorAt: { x, y in canvas.rawPixel(x: x, y: y) },
                 tolerance: magicWandTolerance,
-                width: layerStack.width, height: layerStack.height
+                width: layerStack.width, height: layerStack.height,
+                contiguous: magicWandContiguous
             )
             let mode = CanvasView.combineMode(for: event.modifierFlags)
             applyCombinedSelection(newMask, mode: mode)
@@ -3033,7 +3100,21 @@ final class CanvasView: NSView {
             return
         }
         if activeTool == .rectangleSelect || activeTool == .ellipseSelect {
-            selectionDragCurrent = convert(event.locationInWindow, from: nil)
+            var current = convert(event.locationInWindow, from: nil)
+            // Shift-aspect-lock (issue #52): only when there was no
+            // existing selection at the start of this drag (see
+            // `selectionDragHadNoExistingSelection`'s doc comment) and Shift
+            // is currently held — read live off this event, exactly like
+            // the free-transform corner handles' own `keepAspect` above, so
+            // pressing/releasing Shift mid-drag takes effect immediately.
+            // This constrains both the live rubber-band preview drawn in
+            // `draw(_:)` and the final shape built in `mouseUp(with:)`,
+            // since both read `selectionDragStart`/`selectionDragCurrent`
+            // directly rather than re-deriving the shape independently.
+            if selectionDragHadNoExistingSelection, event.modifierFlags.contains(.shift), let start = selectionDragStart {
+                current = CanvasView.constrainedSquarePoint(start: start, current: current)
+            }
+            selectionDragCurrent = current
             needsDisplay = true
             return
         }
@@ -3174,6 +3255,7 @@ final class CanvasView: NSView {
             defer {
                 selectionDragStart = nil
                 selectionDragCurrent = nil
+                selectionDragHadNoExistingSelection = false
                 selectionCombineMode = nil
                 needsDisplay = true
             }

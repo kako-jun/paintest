@@ -225,6 +225,46 @@ final class SelectionMaskTests: XCTestCase {
         XCTAssertFalse(mask.contains(x: 1, y: 1), "the far diagonal same-color pixel must not be reached through a diagonal-only path")
     }
 
+    func testMagicWand_contiguousDefaultsToTrue_matchingExistingFloodFillBehavior() {
+        // issue #52's `contiguous` parameter defaults to `true`, preserving
+        // every pre-existing (issue #11 round 3) call site's behavior
+        // without needing to pass the new parameter explicitly.
+        let colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? = { x, y in
+            (x == 0 && y == 0) || (x == 3 && y == 0) ? (r: 0, g: 0, b: 0, a: 255) : (r: 255, g: 255, b: 255, a: 255)
+        }
+        let mask = SelectionMask.magicWand(startX: 0, startY: 0, colorAt: colorAt, tolerance: 0, width: 4, height: 1)
+        XCTAssertTrue(mask.contains(x: 0, y: 0))
+        XCTAssertFalse(mask.contains(x: 3, y: 0), "the disconnected same-color pixel must not be selected by default (contiguous)")
+    }
+
+    func testMagicWand_contiguousFalse_selectsEveryMatchingPixelRegardlessOfConnectivity() {
+        // issue #52: `contiguous: false` is a flat whole-canvas scan, not a
+        // flood fill — two disconnected same-color pixels must both be
+        // selected, and a different-colored pixel in between must not be.
+        let colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? = { x, y in
+            (x == 0 && y == 0) || (x == 3 && y == 0) ? (r: 0, g: 0, b: 0, a: 255) : (r: 255, g: 255, b: 255, a: 255)
+        }
+        let mask = SelectionMask.magicWand(startX: 0, startY: 0, colorAt: colorAt, tolerance: 0, width: 4, height: 1, contiguous: false)
+        XCTAssertTrue(mask.contains(x: 0, y: 0))
+        XCTAssertTrue(mask.contains(x: 3, y: 0), "the disconnected same-color pixel must be selected when contiguous is off")
+        XCTAssertFalse(mask.contains(x: 1, y: 0), "a differently-colored pixel in between must still be excluded")
+        XCTAssertFalse(mask.contains(x: 2, y: 0))
+    }
+
+    func testMagicWand_contiguousFalse_startPixelOutOfColor_isEmpty_notACrash() {
+        // Same "no color at the start point" guard as the contiguous path's
+        // own `testMagicWand_startOutOfColor_isEmpty_notACrash` above —
+        // `contiguous: false` must hit the same early-return, not scan the
+        // canvas against a missing reference color.
+        let colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? = { _, _ in nil }
+        let mask = SelectionMask.magicWand(startX: 0, startY: 0, colorAt: colorAt, tolerance: 32, width: 4, height: 4, contiguous: false)
+        for y in 0..<4 {
+            for x in 0..<4 {
+                XCTAssertFalse(mask.contains(x: x, y: y))
+            }
+        }
+    }
+
     // MARK: - Test-authoring follow-up pass (issue #11): full observation-point
     // coverage for rectangle/ellipse/polygon/magicWand/combine/boundaryEdges,
     // filling in the gaps the round-1/2/3 "minimal sanity" comments above
