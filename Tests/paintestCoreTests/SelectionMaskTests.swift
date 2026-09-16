@@ -603,6 +603,41 @@ final class SelectionMaskTests: XCTestCase {
         XCTAssertEqual(mask.alpha(x: 0, y: 4), 0)
     }
 
+    /// Permanent regression guard for issue #56's independent review
+    /// must-1: the reviewer measured the pre-fix direct-Gaussian-convolution
+    /// `feathered(radius:)` (cost `O(width * height * radius)`) still not
+    /// completing after 5+ minutes on a 512x512 canvas at radius 200, with
+    /// no progress indicator or way to cancel since it runs synchronously on
+    /// the main thread from `mouseUp`/`keyDown`. This is the reviewer's
+    /// exact repro size/radius, run against the box-blur replacement (cost
+    /// `O(width * height)`, independent of radius — see `feathered(radius:)`
+    /// 's own doc comment) — it must complete near-instantly, not hang.
+    func testFeathered_largeRadiusOnLargeCanvas_completesQuickly_issue56ReviewPerfFix() {
+        let mask = SelectionMask.rectangle(x0: 100, y0: 100, x1: 400, y1: 400, width: 512, height: 512)
+        let start = Date()
+        let feathered = mask.feathered(radius: 200)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 3.0, "feathering a 512x512 canvas must not hang regardless of radius (issue #56 independent review must-1) — reviewer measured 5+ minutes with the pre-fix implementation")
+        XCTAssertFalse(feathered.isEmpty)
+    }
+
+    func testFeathered_radiusAboveMaxRadius_isClampedInternally_asABackstop() {
+        // `feathered(radius:)`'s own clamp to `maxRadius` (issue #56
+        // independent review must-1) — a defensive backstop for any caller
+        // that bypasses `OptionBarView`'s UI-level clamp (the primary one).
+        // A radius far past `maxRadius` must produce the exact same result
+        // as `maxRadius` itself, not a different (and potentially far more
+        // expensive) blur.
+        let mask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
+        let atMax = mask.feathered(radius: SelectionMask.maxRadius)
+        let wayAboveMax = mask.feathered(radius: SelectionMask.maxRadius * 100)
+        for y in 0..<20 {
+            for x in 0..<20 {
+                XCTAssertEqual(wayAboveMax.alpha(x: x, y: y), atMax.alpha(x: x, y: y), "mismatch at (\(x), \(y))")
+            }
+        }
+    }
+
     func testFeathered_zeroRadius_isUnchangedCopy() {
         let mask = SelectionMask.rectangle(x0: 5, y0: 5, x1: 14, y1: 14, width: 20, height: 20)
         let feathered = mask.feathered(radius: 0)
@@ -736,12 +771,21 @@ final class SelectionMaskTests: XCTestCase {
     }
 
     func testMagicWand_withAntiAlias_softensTheFloodFilledBoundary() {
+        // A wider square (12x12, unlike #testMagicWand_withoutAntiAlias's
+        // 6x6) than the other magic-wand tests in this file — needed so the
+        // "deep interior, unaffected by the softening" sample point below
+        // sits outside `feathered(radius:)`'s box-blur support radius
+        // (issue #56 independent review must-1's perf fix switched
+        // `magicWand`'s own `antiAlias` — implemented via `feathered(radius:
+        // magicWandAntiAliasRadius)`, see that constant's doc comment — from
+        // a direct Gaussian convolution to a 3-pass box blur, which has a
+        // slightly wider effective reach for the same nominal radius).
         func colorAt(_ x: Int, _ y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
             guard x >= 0, x < 20, y >= 0, y < 20 else { return nil }
-            let inSquare = (5...10).contains(x) && (5...10).contains(y)
+            let inSquare = (5...16).contains(x) && (5...16).contains(y)
             return inSquare ? (255, 0, 0, 255) : (0, 0, 255, 255)
         }
-        let mask = SelectionMask.magicWand(startX: 7, startY: 7, colorAt: colorAt, tolerance: 10, width: 20, height: 20, antiAlias: true)
+        let mask = SelectionMask.magicWand(startX: 10, startY: 10, colorAt: colorAt, tolerance: 10, width: 20, height: 20, antiAlias: true)
         var sawPartialCoverage = false
         for y in 0..<20 {
             for x in 0..<20 {
@@ -751,7 +795,7 @@ final class SelectionMaskTests: XCTestCase {
         }
         XCTAssertTrue(sawPartialCoverage, "expected the flood-filled square's boundary to gain some partial coverage")
         // Deep inside the flood-filled square, unaffected by the softening.
-        XCTAssertEqual(mask.alpha(x: 7, y: 7), 255)
+        XCTAssertEqual(mask.alpha(x: 10, y: 10), 255)
     }
 
     // MARK: - Combining with partial coverage (issue #56 fuzzy-logic generalization)

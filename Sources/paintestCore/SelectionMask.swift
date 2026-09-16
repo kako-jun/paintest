@@ -389,59 +389,107 @@ final class SelectionMask {
     /// byte, matching this type's "existing boolean-mask callers keep their
     /// exact behavior" compatibility rule (see the type's own doc comment).
     ///
-    /// Implemented as a two-pass (horizontal, then vertical) separable
-    /// Gaussian blur — `radius` is used directly as the Gaussian's sigma,
-    /// with the kernel truncated at `±3σ` (the point past which a Gaussian's
-    /// contribution is negligible) — over this mask's coverage rescaled to
-    /// `0...1`. A coordinate outside the canvas contributes `0` (unselected)
-    /// to the blur, the same as it does everywhere else `SelectionMask`
-    /// treats "outside the canvas" as "unselected" (see `contains(x:y:)`'s
-    /// doc comment) — so feathering a selection that touches the canvas edge
+    /// `radius` is clamped to `maxRadius` (issue #56 independent review
+    /// must-1) as a defensive backstop — see that constant's own doc
+    /// comment for why, and `OptionBarView`'s Feather field for the primary,
+    /// UI-level clamp a caller normally hits first.
+    ///
+    /// Implemented as three passes of a separable *box* blur (horizontal,
+    /// then vertical, repeated three times), not a direct Gaussian
+    /// convolution — three uniform-radius box blurs are a standard, widely
+    /// used approximation of a true Gaussian (see e.g. Kovesi's "Fast
+    /// Almost-Gaussian Filtering"), close enough for a selection's soft edge
+    /// that no caller/test here can tell the difference. This is a
+    /// deliberate replacement for an earlier direct-convolution
+    /// implementation (issue #56 independent review must-1): that version's
+    /// cost was `O(width * height * radius)` — a naive Gaussian kernel sized
+    /// to `radius` re-summed at every pixel — which the reviewer measured
+    /// hanging for 5+ minutes with no progress indicator or way to cancel at
+    /// radius 200 on a mere 512x512 canvas (paintest allows canvases up to
+    /// 4096x4096). Each box-blur pass here instead uses a *sliding-window*
+    /// running sum (`boxBlurred1D(...)`) — add the pixel entering the
+    /// window, remove the one leaving it — which costs `O(width * height)`
+    /// per pass *regardless of the box's own radius*, so an arbitrarily
+    /// large Feather value costs the same as a small one.
+    ///
+    /// Each box's radius is derived from `radius` (used as the Gaussian's
+    /// notional sigma, same convention the direct-convolution version used)
+    /// via the standard `d = sqrt(12·sigma²/n + 1)` box-diameter formula for
+    /// `n` box-blur passes — here `n == 3`, this method's own pass count.
+    ///
+    /// A coordinate outside the canvas contributes `0` (unselected) to the
+    /// blur, the same as it does everywhere else `SelectionMask` treats
+    /// "outside the canvas" as "unselected" (see `contains(x:y:)`'s doc
+    /// comment) — so feathering a selection that touches the canvas edge
     /// softens that edge too, rather than wrapping or clamping.
     func feathered(radius: Double) -> SelectionMask {
         guard radius > 0 else { return copy() }
-        let sigma = radius
-        let kernelRadius = max(1, Int((sigma * 3).rounded(.up)))
-        var kernel = [Double](repeating: 0, count: kernelRadius * 2 + 1)
-        var kernelSum = 0.0
-        for offset in -kernelRadius...kernelRadius {
-            let weight = exp(-Double(offset * offset) / (2 * sigma * sigma))
-            kernel[offset + kernelRadius] = weight
-            kernelSum += weight
-        }
-        for i in 0..<kernel.count { kernel[i] /= kernelSum }
+        let sigma: Double = min(radius, Self.maxRadius)
+        let sigmaSquared: Double = sigma * sigma
+        let boxDiameterSquared: Double = 12.0 * sigmaSquared / 3.0 + 1.0
+        let boxDiameter: Double = boxDiameterSquared.squareRoot()
+        let roundedBoxRadius: Double = ((boxDiameter - 1.0) / 2.0).rounded()
+        let boxRadius: Int = max(1, Int(roundedBoxRadius))
 
-        let source = coverage.map { Double($0) / 255.0 }
-
-        // Horizontal pass.
-        var horizontal = [Double](repeating: 0, count: width * height)
-        for y in 0..<height {
-            let rowStart = y * width
-            for x in 0..<width {
-                var accumulator = 0.0
-                for offset in -kernelRadius...kernelRadius {
-                    let sx = x + offset
-                    guard sx >= 0, sx < width else { continue }
-                    accumulator += source[rowStart + sx] * kernel[offset + kernelRadius]
-                }
-                horizontal[rowStart + x] = accumulator
-            }
+        var current = coverage.map { Double($0) / 255.0 }
+        for _ in 0..<3 {
+            current = Self.boxBlurred1D(current, lineLength: width, lineCount: height, radius: boxRadius, stride: 1, lineStride: width)
+            current = Self.boxBlurred1D(current, lineLength: height, lineCount: width, radius: boxRadius, stride: width, lineStride: 1)
         }
-
-        // Vertical pass.
-        var result = [UInt8](repeating: 0, count: width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                var accumulator = 0.0
-                for offset in -kernelRadius...kernelRadius {
-                    let sy = y + offset
-                    guard sy >= 0, sy < height else { continue }
-                    accumulator += horizontal[sy * width + x] * kernel[offset + kernelRadius]
-                }
-                result[y * width + x] = UInt8(max(0, min(255, (accumulator * 255).rounded())))
-            }
-        }
+        let result = current.map { UInt8(max(0, min(255, ($0 * 255).rounded()))) }
         return SelectionMask(width: width, height: height, coverage: result)
+    }
+
+    /// The largest Feather radius `feathered(radius:)` will actually use
+    /// (issue #56 independent review must-1) — not a performance necessity
+    /// any more (see `feathered(radius:)`'s own doc comment: the
+    /// sliding-window box blur it now uses costs the same regardless of
+    /// radius), but a sane UI-level ceiling all the same: a value far past
+    /// this fully flattens any realistic selection's coverage to a uniform
+    /// haze rather than a recognizable soft edge, so there's nothing a
+    /// larger number would usefully express.
+    static let maxRadius: Double = 100
+
+    /// One box-blur pass over a flat buffer addressed as `lineCount` lines
+    /// of `lineLength` samples each, generalizing "blur every row
+    /// horizontally" and "blur every column vertically" into the same
+    /// implementation (`stride`/`lineStride` pick which): `stride` is the
+    /// distance between consecutive samples *within* a line (`1` for a row,
+    /// `width` for a column), `lineStride` is the distance between the
+    /// start of one line and the next (`width` for a row, `1` for a
+    /// column).
+    ///
+    /// Uses a running sum that slides across each line — add the sample
+    /// entering the `2 * radius + 1`-wide window, remove the one leaving it
+    /// — rather than re-summing the whole window at every sample. That's
+    /// what makes this `O(lineLength * lineCount)` total, independent of
+    /// `radius` (see `feathered(radius:)`'s own doc comment for why that
+    /// independence is the whole point). A sample position outside
+    /// `0..<lineLength` contributes `0` to the window, matching
+    /// `feathered(radius:)`'s "outside the canvas counts as unselected, no
+    /// wrap/clamp" contract.
+    private static func boxBlurred1D(_ source: [Double], lineLength: Int, lineCount: Int, radius: Int, stride: Int, lineStride: Int) -> [Double] {
+        var result = [Double](repeating: 0, count: source.count)
+        let windowSize = Double(radius * 2 + 1)
+        for line in 0..<lineCount {
+            let lineStart = line * lineStride
+            var sum = 0.0
+            for offset in -radius...radius where offset >= 0 && offset < lineLength {
+                sum += source[lineStart + offset * stride]
+            }
+            for position in 0..<lineLength {
+                result[lineStart + position * stride] = sum / windowSize
+                let leaving = position - radius
+                let entering = position + radius + 1
+                if leaving >= 0, leaving < lineLength {
+                    sum -= source[lineStart + leaving * stride]
+                }
+                if entering >= 0, entering < lineLength {
+                    sum += source[lineStart + entering * stride]
+                }
+            }
+        }
+        return result
     }
 
     // MARK: - Combining

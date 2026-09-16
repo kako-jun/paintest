@@ -620,11 +620,25 @@ final class OptionBarView: NSView {
     /// rather than leaving the previous value silently in place, matching
     /// how a blank/garbled Feather entry reads most naturally as "no
     /// feather". Negative input clamps to `0` — a negative blur radius is
-    /// meaningless. Either way, the field is reformatted back through
+    /// meaningless.
+    ///
+    /// Clamped to `SelectionMask.maxRadius` at the *upper* end too (issue
+    /// #56 independent review must-1): an unbounded Feather value typed
+    /// here is the concrete way a user could hit the performance hang the
+    /// review measured (5+ minutes, no progress indicator, no cancel) before
+    /// `SelectionMask.feathered(radius:)` itself was rewritten to a
+    /// radius-independent box blur — this UI-level clamp is the first line
+    /// of defense a typed value actually hits, and `feathered(radius:)`'s
+    /// own clamp to the same constant is the backstop for any other caller.
+    ///
+    /// Either way (fallback or clamp), the field is reformatted back through
     /// `featherString(_:)` so what's displayed always matches the value
-    /// actually applied.
+    /// actually applied — typing "99999" visibly snaps back to
+    /// `SelectionMask.maxRadius` rather than silently capping the applied
+    /// value while the field still reads "99999".
     @objc private func featherFieldChanged(_ sender: NSTextField) {
-        let feather = max(0, Double(sender.stringValue) ?? 0)
+        let parsed = Double(sender.stringValue) ?? 0
+        let feather = max(0, min(SelectionMask.maxRadius, parsed))
         sender.stringValue = Self.featherString(feather)
         onFeatherChanged?(feather)
     }
