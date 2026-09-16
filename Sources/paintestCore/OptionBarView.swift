@@ -36,6 +36,10 @@ final class OptionBarView: NSView {
     /// names run much longer than "3200%".
     private static let textFontPopUpWidth: CGFloat = 160
     private static let textSizeSliderWidth: CGFloat = 90
+    /// The Feather numeric field's width (issue #56) — narrow, matching a
+    /// short "0"–"999"-ish pixel-radius entry, not a whole sentence the way
+    /// `textFontPopUpWidth` needs to accommodate.
+    private static let featherFieldWidth: CGFloat = 44
 
     /// The magic wand's current-value readout (issue #11, round 3) — kept as
     /// a stored reference (unlike the zoom popup, which reads its own
@@ -97,6 +101,25 @@ final class OptionBarView: NSView {
     private var onPenOpacityChanged: ((Double) -> Void)?
     private var onPenFlowChanged: ((Double) -> Void)?
 
+    /// The Feather numeric field's stored reference (issue #56) — same
+    /// "stored reference, re-normalized after every edit" pattern as
+    /// `toleranceValueLabel`, needed so `featherFieldChanged(_:)` can write
+    /// the clamped/reformatted value straight back into the field it read
+    /// from.
+    private var featherField: NSTextField?
+
+    /// Fired when the Feather field commits a new value (issue #56, one of
+    /// the five selection tools' shared option-bar controls — see
+    /// `showSelectionOptions`). `AppDelegate` forwards the new value straight
+    /// into `CanvasView.selectionFeather`.
+    private var onFeatherChanged: ((Double) -> Void)?
+    /// Fired when the Anti-alias checkbox toggles (issue #56). `AppDelegate`
+    /// forwards the new value straight into `CanvasView.selectionAntiAlias`.
+    /// `nil` when the bar is showing the Feather-only layout (the rectangle
+    /// marquee has no diagonal edges to anti-alias — see
+    /// `showSelectionOptions`'s own doc comment).
+    private var onAntiAliasChanged: ((Bool) -> Void)?
+
     init() {
         super.init(frame: .zero)
         wantsLayer = true
@@ -155,15 +178,36 @@ final class OptionBarView: NSView {
     /// feature — see `CanvasView.magicWandContiguous`'s doc comment), so
     /// passing `nil` there keeps that layout exactly as it was before this
     /// issue.
+    ///
+    /// `currentFeather`/`onFeatherChanged` and `currentAntiAlias`/
+    /// `onAntiAliasChanged` (issue #56) append the same Feather field +
+    /// Anti-alias checkbox `showSelectionOptions` shows the other four
+    /// selection tools, after the Contiguous checkbox — the magic wand is
+    /// itself one of the five selection tools issue #56 covers, so it needs
+    /// both sets of controls in one bar rather than choosing between this
+    /// method and `showSelectionOptions`. `currentFeather` defaults to `nil`,
+    /// which omits both Feather and Anti-alias entirely: bucket fill (this
+    /// method's other caller) reuses the tolerance-only layout unmodified,
+    /// since bucket fill paints dot-exact pixels and has no selection
+    /// boundary of its own for Feather/Anti-alias to soften.
     func showMagicWandOptions(
         currentTolerance: Int,
         currentContiguous: Bool? = nil,
+        currentFeather: Double? = nil,
+        currentAntiAlias: Bool? = nil,
         onToleranceChanged: @escaping (Int) -> Void,
-        onContiguousChanged: ((Bool) -> Void)? = nil
+        onContiguousChanged: ((Bool) -> Void)? = nil,
+        onFeatherChanged: ((Double) -> Void)? = nil,
+        onAntiAliasChanged: ((Bool) -> Void)? = nil
     ) {
         clear()
         self.onToleranceChanged = onToleranceChanged
         self.onContiguousChanged = onContiguousChanged
+        // `onFeatherChanged`/`onAntiAliasChanged` (issue #56) are wired by
+        // `addFeatherAntiAliasControls` further down, only once both it and
+        // `currentFeather` are confirmed non-`nil` — not here — so a caller
+        // that omits Feather (bucket fill) leaves both `nil`, matching
+        // `clear()`'s own reset.
 
         let label = NSTextField(labelWithString: "許容誤差")
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -197,19 +241,141 @@ final class OptionBarView: NSView {
             valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
 
-        guard let currentContiguous else { return }
-        let contiguousCheckbox = NSButton(
-            checkboxWithTitle: "隣接ピクセルのみ",
-            target: self,
-            action: #selector(contiguousCheckboxChanged(_:))
+        // Tracks whichever control ended up rightmost so far, so the
+        // Contiguous checkbox and/or the Feather/Anti-alias controls below
+        // each chain off the *actual* previous control instead of always
+        // assuming `valueLabel` — needed because `currentContiguous == nil`
+        // (bucket fill) skips the checkbox entirely, and issue #56's
+        // Feather/Anti-alias controls need to land after whichever of
+        // `valueLabel`/`contiguousCheckbox` is actually on screen.
+        var trailingAnchor = valueLabel.trailingAnchor
+
+        if let currentContiguous {
+            let contiguousCheckbox = NSButton(
+                checkboxWithTitle: "隣接ピクセルのみ",
+                target: self,
+                action: #selector(contiguousCheckboxChanged(_:))
+            )
+            contiguousCheckbox.translatesAutoresizingMaskIntoConstraints = false
+            contiguousCheckbox.state = currentContiguous ? .on : .off
+            addSubview(contiguousCheckbox)
+            NSLayoutConstraint.activate([
+                contiguousCheckbox.leadingAnchor.constraint(equalTo: trailingAnchor, constant: Self.penGroupSpacing),
+                contiguousCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+            trailingAnchor = contiguousCheckbox.trailingAnchor
+        }
+
+        guard let currentFeather, let onFeatherChanged else { return }
+        addFeatherAntiAliasControls(
+            currentFeather: currentFeather,
+            currentAntiAlias: currentAntiAlias,
+            leadingAnchor: trailingAnchor,
+            leadingSpacing: Self.penGroupSpacing,
+            onFeatherChanged: onFeatherChanged,
+            onAntiAliasChanged: onAntiAliasChanged
         )
-        contiguousCheckbox.translatesAutoresizingMaskIntoConstraints = false
-        contiguousCheckbox.state = currentContiguous ? .on : .off
-        addSubview(contiguousCheckbox)
+    }
+
+    /// Populates the bar with the selection tools' shared Feather/Anti-alias
+    /// controls (issue #56): a "ぼかし (Feather)" label + numeric text field
+    /// over `CanvasView.selectionFeather`'s pixel-radius range, and — when
+    /// `currentAntiAlias` is non-`nil` — an "アンチエイリアス" checkbox after
+    /// it. Same "rebuilt from scratch on every call" pattern as
+    /// `showZoomPresets`/`showMagicWandOptions` above.
+    ///
+    /// `currentAntiAlias`/`onAntiAliasChanged` default to `nil`, which omits
+    /// the checkbox entirely — same "`nil` omits this part of the layout"
+    /// convention `showMagicWandOptions`'s own `currentContiguous` already
+    /// uses. `AppDelegate` calls this with `nil` only for the rectangle
+    /// marquee: its selection boundary is always axis-aligned, so
+    /// `SelectionMask.rectangle(...)` has no `antiAlias` parameter for a
+    /// checkbox here to drive (see that method's own doc comment — issue
+    /// #56's anti-aliasing only applies to the ellipse/lasso/polygon/magic-
+    /// wand tools' non-axis-aligned boundaries). Every other selection tool
+    /// passes a real value, showing both controls.
+    func showSelectionOptions(
+        currentFeather: Double,
+        currentAntiAlias: Bool? = nil,
+        onFeatherChanged: @escaping (Double) -> Void,
+        onAntiAliasChanged: ((Bool) -> Void)? = nil
+    ) {
+        clear()
+        addFeatherAntiAliasControls(
+            currentFeather: currentFeather,
+            currentAntiAlias: currentAntiAlias,
+            leadingAnchor: leadingAnchor,
+            leadingSpacing: Self.horizontalPadding,
+            onFeatherChanged: onFeatherChanged,
+            onAntiAliasChanged: onAntiAliasChanged
+        )
+    }
+
+    /// Appends the Feather field (and, when `currentAntiAlias` is non-`nil`,
+    /// the Anti-alias checkbox right after it) starting at `leadingAnchor`
+    /// (issue #56) — factored out because these two controls are shared by
+    /// two different call sites: `showSelectionOptions` above (the
+    /// rectangle/ellipse/lasso/polygon tools, where Feather/Anti-alias are
+    /// the *only* controls in the bar) and `showMagicWandOptions` below
+    /// (where they come *after* that method's own tolerance/contiguous
+    /// controls, in the same bar — the magic wand is itself one of the five
+    /// selection tools issue #56 covers, not a separate layout). Also wires
+    /// `onFeatherChanged`/`onAntiAliasChanged` itself, so neither caller
+    /// needs to repeat that.
+    private func addFeatherAntiAliasControls(
+        currentFeather: Double,
+        currentAntiAlias: Bool?,
+        leadingAnchor: NSLayoutXAxisAnchor,
+        leadingSpacing: CGFloat,
+        onFeatherChanged: @escaping (Double) -> Void,
+        onAntiAliasChanged: ((Bool) -> Void)?
+    ) {
+        self.onFeatherChanged = onFeatherChanged
+        self.onAntiAliasChanged = onAntiAliasChanged
+
+        let label = NSTextField(labelWithString: "ぼかし(Feather)")
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let field = NSTextField(frame: .zero)
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.alignment = .right
+        field.stringValue = Self.featherString(currentFeather)
+        field.target = self
+        field.action = #selector(featherFieldChanged(_:))
+        featherField = field
+
+        addSubview(label)
+        addSubview(field)
         NSLayoutConstraint.activate([
-            contiguousCheckbox.leadingAnchor.constraint(equalTo: valueLabel.trailingAnchor, constant: Self.penGroupSpacing),
-            contiguousCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor)
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingSpacing),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            field.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: Self.controlSpacing),
+            field.centerYAnchor.constraint(equalTo: centerYAnchor),
+            field.widthAnchor.constraint(equalToConstant: Self.featherFieldWidth)
         ])
+
+        guard let currentAntiAlias else { return }
+        let antiAliasCheckbox = NSButton(
+            checkboxWithTitle: "アンチエイリアス",
+            target: self,
+            action: #selector(antiAliasCheckboxChanged(_:))
+        )
+        antiAliasCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        antiAliasCheckbox.state = currentAntiAlias ? .on : .off
+        addSubview(antiAliasCheckbox)
+        NSLayoutConstraint.activate([
+            antiAliasCheckbox.leadingAnchor.constraint(equalTo: field.trailingAnchor, constant: Self.penGroupSpacing),
+            antiAliasCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    /// Formats a Feather radius for the numeric field (issue #56) — `%g`
+    /// prints a whole number plainly ("0", "12") and trims a fractional
+    /// one's trailing zeros ("2.5"), unlike a fixed-precision `%.1f` which
+    /// would print every whole value as "12.0".
+    private static func featherString(_ value: Double) -> String {
+        String(format: "%g", value)
     }
 
     /// Populates the bar with the pen tool's brush detail controls (issue
@@ -428,6 +594,9 @@ final class OptionBarView: NSView {
         onTextSizeChanged = nil
         onTextOrientationChanged = nil
         textSizeValueLabel = nil
+        onFeatherChanged = nil
+        onAntiAliasChanged = nil
+        featherField = nil
     }
 
     @objc private func toleranceSliderChanged(_ sender: NSSlider) {
@@ -443,6 +612,28 @@ final class OptionBarView: NSView {
     /// `selectedSegment` rather than assuming any particular raw value.
     @objc private func contiguousCheckboxChanged(_ sender: NSButton) {
         onContiguousChanged?(sender.state == .on)
+    }
+
+    /// Fired when the Feather field commits (Return, or focus loss — an
+    /// `NSTextField`'s own default `action`-firing behavior, issue #56).
+    /// Unparseable text (empty field, stray characters) falls back to `0`
+    /// rather than leaving the previous value silently in place, matching
+    /// how a blank/garbled Feather entry reads most naturally as "no
+    /// feather". Negative input clamps to `0` — a negative blur radius is
+    /// meaningless. Either way, the field is reformatted back through
+    /// `featherString(_:)` so what's displayed always matches the value
+    /// actually applied.
+    @objc private func featherFieldChanged(_ sender: NSTextField) {
+        let feather = max(0, Double(sender.stringValue) ?? 0)
+        sender.stringValue = Self.featherString(feather)
+        onFeatherChanged?(feather)
+    }
+
+    /// Fired when the Anti-alias checkbox toggles (issue #56). Same
+    /// `sender.state == .on` comparison as `contiguousCheckboxChanged(_:)`
+    /// above.
+    @objc private func antiAliasCheckboxChanged(_ sender: NSButton) {
+        onAntiAliasChanged?(sender.state == .on)
     }
 
     @objc private func penSizeSliderChanged(_ sender: NSSlider) {

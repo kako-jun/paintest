@@ -266,6 +266,34 @@ final class CanvasView: NSView {
     /// "`AppDelegate` keeps `OptionBarView`'s slider in sync" wiring.
     var bucketFillTolerance: Int = 32
 
+    /// The current Feather radius (issue #56), fed straight into
+    /// `SelectionMask.feathered(radius:)` right after any of the five
+    /// selection tools (rectangle/ellipse/lasso/polygon/magic wand) builds
+    /// its own mask. `0` (the default) means "no feather" — an unmodified,
+    /// hard-edged mask, matching every pre-#56 selection exactly.
+    ///
+    /// Deliberately a single shared property across all five selection
+    /// tools rather than one independent property per tool (unlike
+    /// `magicWandTolerance`/`bucketFillTolerance`'s deliberate separation
+    /// above): Feather/Anti-alias are a property of "the selection currently
+    /// being drawn", not of a specific tool's own identity the way a
+    /// tolerance cutoff is, and giving all five one shared setting keeps the
+    /// option bar's behavior predictable (switch tools, the same Feather/
+    /// Anti-alias values carry over) without five times the plumbing for a
+    /// distinction this app doesn't otherwise need. Scoped down from
+    /// Photoshop's own "each tool remembers its own Feather" behavior —
+    /// documented here as a deliberate simplification (issue #56).
+    var selectionFeather: Double = 0
+
+    /// The current Anti-alias toggle (issue #56), passed as `antiAlias:` to
+    /// `SelectionMask.ellipse(...)`/`polygon(...)`/`magicWand(...)` — the
+    /// three selection-shape constructors with a non-axis-aligned boundary
+    /// (rectangle's own edges are always axis-aligned, so it has no
+    /// `antiAlias` parameter to feed this into; only `selectionFeather`
+    /// applies to the rectangle marquee). Same "one shared property across
+    /// every tool it applies to" simplification as `selectionFeather` above.
+    var selectionAntiAlias: Bool = false
+
     /// The gradient tool's in-progress drag (issue #41), in view-space
     /// coordinates for drawing the preview line. The final paint operation
     /// converts these to pixel coordinates and delegates all gradient math
@@ -2454,6 +2482,18 @@ final class CanvasView: NSView {
         }
     }
 
+    /// Applies the shared `selectionFeather` setting (issue #56) to a
+    /// freshly built shape mask, before it's combined into `selection` —
+    /// every one of the five selection tools' finalize steps calls this on
+    /// its own `newMask` right after building it (mirroring how they all
+    /// funnel through `applyCombinedSelection(_:mode:)` just below).
+    /// `SelectionMask.feathered(radius:)` already returns an unmodified copy
+    /// for `radius <= 0`, so this is a no-op wrapper (not a conditional
+    /// branch of its own) for the default, un-feathered case.
+    private func applyingSelectionFeather(_ mask: SelectionMask) -> SelectionMask {
+        mask.feathered(radius: selectionFeather)
+    }
+
     /// Combines `newMask` into the current `selection` per `mode`
     /// (`.replace` when `nil`), then normalizes an empty result back to
     /// `nil` — shared by every selection tool's finalize step (rectangle/
@@ -2494,8 +2534,8 @@ final class CanvasView: NSView {
             needsDisplay = true
         }
         guard polygonVertices.count >= 3 else { return }
-        let newMask = SelectionMask.polygon(vertices: polygonVertices, width: layerStack.width, height: layerStack.height)
-        applyCombinedSelection(newMask, mode: polygonCombineMode)
+        let newMask = SelectionMask.polygon(vertices: polygonVertices, width: layerStack.width, height: layerStack.height, antiAlias: selectionAntiAlias)
+        applyCombinedSelection(applyingSelectionFeather(newMask), mode: polygonCombineMode)
         onEditCompleted?("選択範囲")
     }
 
@@ -2749,10 +2789,11 @@ final class CanvasView: NSView {
                 colorAt: { x, y in canvas.rawPixel(x: x, y: y) },
                 tolerance: magicWandTolerance,
                 width: layerStack.width, height: layerStack.height,
-                contiguous: magicWandContiguous
+                contiguous: magicWandContiguous,
+                antiAlias: selectionAntiAlias
             )
             let mode = CanvasView.combineMode(for: event.modifierFlags)
-            applyCombinedSelection(newMask, mode: mode)
+            applyCombinedSelection(applyingSelectionFeather(newMask), mode: mode)
             needsDisplay = true
             // The magic wand's whole gesture is this one click (issue #19,
             // matching #11's own "no drag/mouseUp handling" doc comment on
@@ -3282,7 +3323,7 @@ final class CanvasView: NSView {
                 let centerY = Double(minY + maxY + 1) / 2
                 let radiusX = Double(maxX - minX + 1) / 2
                 let radiusY = Double(maxY - minY + 1) / 2
-                newMask = SelectionMask.ellipse(centerX: centerX, centerY: centerY, radiusX: radiusX, radiusY: radiusY, width: layerStack.width, height: layerStack.height)
+                newMask = SelectionMask.ellipse(centerX: centerX, centerY: centerY, radiusX: radiusX, radiusY: radiusY, width: layerStack.width, height: layerStack.height, antiAlias: selectionAntiAlias)
             }
 
             // For combine math (union/subtract/intersect), a `nil` existing
@@ -3301,7 +3342,7 @@ final class CanvasView: NSView {
             // result collapses back to `nil` rather than staying a real,
             // all-`false` mask (issue #11, decision made ahead of
             // implementation) — see `applyCombinedSelection`'s doc comment.
-            applyCombinedSelection(newMask, mode: selectionCombineMode)
+            applyCombinedSelection(applyingSelectionFeather(newMask), mode: selectionCombineMode)
             onEditCompleted?("選択範囲")
             return
         }
@@ -3318,8 +3359,8 @@ final class CanvasView: NSView {
             // just a stray click), an incomplete lasso path is simply
             // discarded without touching `selection` at all.
             guard lassoVertices.count >= 3 else { return }
-            let newMask = SelectionMask.polygon(vertices: lassoVertices, width: layerStack.width, height: layerStack.height)
-            applyCombinedSelection(newMask, mode: lassoCombineMode)
+            let newMask = SelectionMask.polygon(vertices: lassoVertices, width: layerStack.width, height: layerStack.height, antiAlias: selectionAntiAlias)
+            applyCombinedSelection(applyingSelectionFeather(newMask), mode: lassoCombineMode)
             onEditCompleted?("選択範囲")
             return
         }
