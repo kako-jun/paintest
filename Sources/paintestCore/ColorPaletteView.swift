@@ -1,10 +1,12 @@
 import AppKit
 
 /// The current foreground/background color indicator that classic Paint
-/// shows at the bottom-left, as two overlapping squares (issue #2). Clicking
-/// either square picks that color via `ColorPickerDialog` (issue #5); a
-/// small "reset to default" button in the free corner above the squares
-/// resets both to black/white.
+/// shows at the bottom-left, as two overlapping squares (issue #2): the
+/// foreground swatch top-left (front, on top), the background swatch
+/// bottom-right (back), matching the diagonal Photoshop uses (issue #60).
+/// Clicking either square picks that color via `ColorPickerDialog` (issue
+/// #5); a small "reset to default" button in the free corner below the
+/// squares resets both to black/white.
 final class CurrentColorIndicatorView: NSView {
     var foregroundColor: NSColor = .black
     var backgroundColor: NSColor = .white
@@ -18,12 +20,16 @@ final class CurrentColorIndicatorView: NSView {
 
     private static let swatchSide: CGFloat = 20
 
-    // Small, borderless, tucked into the corner above the overlapping
-    // squares: with `swatchSide` 20, the squares' combined bounding box is
-    // vertically centered and 32pt tall (see `swatchRects()`), so any view
-    // taller than ~40pt (every real `colorBarHeight` is) leaves an empty
-    // strip along the top edge for this button to sit in without
-    // overlapping the swatches.
+    // Small, borderless, tucked into the free corner below the overlapping
+    // squares (issue #60: front top-left, back bottom-right leaves the
+    // bottom-left corner empty): with `swatchSide` 20, the squares'
+    // combined bounding box is vertically centered and 32pt tall (see
+    // `swatchRects()`), leaving a margin of (H - 32) / 2 above and below
+    // it. The button occupies that margin's bottom 14pt (12pt tall, 2pt
+    // inset from the edge), so it only clears the swatches once that
+    // margin is at least 14pt, i.e. any view H >= 60pt (every real
+    // `colorBarHeight` is) leaves an empty strip along the bottom edge for
+    // this button to sit in without overlapping the swatches.
     private let resetButton: NSButton = {
         let image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: "既定の色に戻す") ?? NSImage()
         let button = NSButton(image: image, target: nil, action: nil)
@@ -40,7 +46,7 @@ final class CurrentColorIndicatorView: NSView {
         resetButton.target = self
         resetButton.action = #selector(resetTapped)
         NSLayoutConstraint.activate([
-            resetButton.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            resetButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
             resetButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             resetButton.widthAnchor.constraint(equalToConstant: 12),
             resetButton.heightAnchor.constraint(equalToConstant: 12)
@@ -58,10 +64,14 @@ final class CurrentColorIndicatorView: NSView {
     /// The two overlapping squares' rects, in this view's own coordinate
     /// space. Shared between `draw(_:)` and `mouseDown(with:)` (issue #5)
     /// so the click hit-test always matches what's actually drawn.
+    ///
+    /// Diagonal matches Photoshop (issue #60): foreground (front) top-left,
+    /// background (back) bottom-right. AppKit views are bottom-left-origin
+    /// (not flipped) here, so "top" is the larger `y`.
     private func swatchRects() -> (front: CGRect, back: CGRect) {
         let side = Self.swatchSide
-        let back = CGRect(x: bounds.midX - 4, y: bounds.midY - 4, width: side, height: side)
-        let front = CGRect(x: bounds.midX - side + 4, y: bounds.midY - side + 4, width: side, height: side)
+        let front = CGRect(x: bounds.midX - side + 4, y: bounds.midY - 4, width: side, height: side)
+        let back = CGRect(x: bounds.midX - 4, y: bounds.midY - side + 4, width: side, height: side)
         return (front, back)
     }
 

@@ -22,9 +22,12 @@ final class CurrentColorIndicatorViewTests: XCTestCase {
     // `mouseDownEvent` helpers.
     //
     // Geometry mirrors `CurrentColorIndicatorView.swatchRects()` (side
-    // 20pt) at a 100x100 view size, so `bounds.midX == bounds.midY == 50`:
-    //   - back square:  x in [46, 66), y in [46, 66)
-    //   - front square: x in [34, 54), y in [34, 54)
+    // 20pt) at a 100x100 view size, so `bounds.midX == bounds.midY == 50`.
+    // Diagonal matches Photoshop (issue #60): front top-left, back
+    // bottom-right (AppKit views here are bottom-left-origin, not
+    // flipped, so "top" is the larger `y`):
+    //   - front square: x in [34, 54), y in [46, 66)
+    //   - back square:  x in [46, 66), y in [34, 54)
     //   - overlap:      x in [46, 54), y in [46, 54) — front wins there
 
     private func makeViewInWindow(width: CGFloat = 100, height: CGFloat = 100) -> CurrentColorIndicatorView {
@@ -64,7 +67,7 @@ final class CurrentColorIndicatorViewTests: XCTestCase {
         view.onForegroundSwatchTapped = { foregroundFired += 1 }
         view.onBackgroundSwatchTapped = { backgroundFired += 1 }
 
-        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 36, y: 36), in: view.window!))
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 36, y: 60), in: view.window!))
 
         XCTAssertEqual(foregroundFired, 1)
         XCTAssertEqual(backgroundFired, 0)
@@ -77,7 +80,7 @@ final class CurrentColorIndicatorViewTests: XCTestCase {
         view.onForegroundSwatchTapped = { foregroundFired += 1 }
         view.onBackgroundSwatchTapped = { backgroundFired += 1 }
 
-        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 60, y: 60), in: view.window!))
+        view.mouseDown(with: mouseDownEvent(at: NSPoint(x: 60, y: 36), in: view.window!))
 
         XCTAssertEqual(backgroundFired, 1)
         XCTAssertEqual(foregroundFired, 0)
