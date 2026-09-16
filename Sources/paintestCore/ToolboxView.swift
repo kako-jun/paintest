@@ -1,25 +1,31 @@
 import AppKit
 
-/// Photoshop's left-hand toolbox: a single vertical column of tool icons
-/// (issue #7; was a 2-column grid under issue #2). Pencil, eraser, pen, the
-/// eyedropper, the magnifier, the rectangle/ellipse/lasso/polygon/magic-
-/// wand select tools, crop, bucket fill, gradient, and text are wired to real
-/// behavior (issues #5, #10, #14, #13, #11, #21, #38, #41, #42) — clicking any
-/// of them fires `onToolSelected` and exclusively toggles that button's
-/// pressed state against the others' — so every other button here stays a
-/// purely visual placeholder with no target/action, same as before. Text
-/// was previously its own disabled-but-unwired placeholder (issue #43,
-/// `isEnabled = false` with no target/action) until issue #42 gave it a
-/// real implementation; it now gets the same target/action wiring as every
-/// other wired tool below, with no special-cased disabling left over.
+/// Photoshop's left-hand toolbox: a 2-column grid of tool icons (issue #58;
+/// was a single column under issue #7, which itself had replaced the
+/// original 2-column grid from issue #2 — #7's "Photoshop is single-column"
+/// premise didn't account for Photoshop's own chevron toggle between 1- and
+/// 2-column toolbars, so #58 reverts to the 2-column layout as an equally
+/// valid Photoshop look while keeping every tool/wiring change added since
+/// #7). Pencil, eraser, pen, the eyedropper, the magnifier, the
+/// rectangle/ellipse/lasso/polygon/magic-wand select tools, crop, bucket
+/// fill, gradient, and text are wired to real behavior (issues #5, #10,
+/// #14, #13, #11, #21, #38, #41, #42) — clicking any of them fires
+/// `onToolSelected` and exclusively toggles that button's pressed state
+/// against the others' — so every other button here stays a purely visual
+/// placeholder with no target/action, same as before. Text was previously
+/// its own disabled-but-unwired placeholder (issue #43, `isEnabled = false`
+/// with no target/action) until issue #42 gave it a real implementation;
+/// it now gets the same target/action wiring as every other wired tool
+/// below, with no special-cased disabling left over.
 /// The pencil cell renders pressed (`state == .on`) by default so the
-/// column still communicates "this is the active tool" the way the
+/// grid still communicates "this is the active tool" the way the
 /// reference screenshots do.
 ///
-/// A single column of 21 icons runs taller than the window at typical
-/// sizes, so (like `DocumentTabBarView`) the column is wrapped in a
-/// vertically-scrolling `NSScrollView` rather than widened back into extra
-/// columns.
+/// 21 icons in a 2-column grid (11 rows, the last row holding a single
+/// leftover button) still runs taller than the window at typical sizes, so
+/// (like `DocumentTabBarView`) the grid is wrapped in a vertically-
+/// scrolling `NSScrollView` — but with roughly half the row count of the
+/// single-column layout, the scroll distance shrinks accordingly.
 final class ToolboxView: NSView {
     private struct ToolDescriptor {
         let symbol: String
@@ -34,10 +40,10 @@ final class ToolboxView: NSView {
         let tool: Tool?
     }
 
-    // Top to bottom, one per row, matching Photoshop's single-column
-    // toolbar layout. Crop sits right after the five selection tools and
-    // before eraser (issue #21), mirroring where Photoshop's own toolbox
-    // places its crop tool relative to its selection tool group.
+    // Row-major, 2 per row, matching Photoshop's 2-column toolbar layout.
+    // Crop sits right after the five selection tools and before eraser
+    // (issue #21), mirroring where Photoshop's own toolbox places its crop
+    // tool relative to its selection tool group.
     private static let tools: [ToolDescriptor] = [
         ToolDescriptor(symbol: "lasso", label: "投げ縄選択", tool: .lassoSelect),
         ToolDescriptor(symbol: "hexagon.dashed", label: "多角形選択", tool: .polygonSelect),
@@ -85,18 +91,20 @@ final class ToolboxView: NSView {
 
     init() {
         super.init(frame: .zero)
-        buildColumn()
+        buildGrid()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private func buildColumn() {
-        let grid = NSGridView(numberOfColumns: 1, rows: 0)
+    private func buildGrid() {
+        let grid = NSGridView(numberOfColumns: 2, rows: 0)
         grid.rowSpacing = 1
+        grid.columnSpacing = 1
         grid.translatesAutoresizingMaskIntoConstraints = false
 
+        var rowButtons: [NSButton] = []
         for (index, tool) in Self.tools.enumerated() {
             let button = makeButton(for: tool, isPencil: index == Self.pencilIndex)
             if let wiredTool = tool.tool {
@@ -109,15 +117,30 @@ final class ToolboxView: NSView {
                 button.target = self
                 button.action = #selector(toolButtonTapped(_:))
             }
-            grid.addRow(with: [button])
+            rowButtons.append(button)
+            if rowButtons.count == 2 {
+                grid.addRow(with: rowButtons)
+                rowButtons = []
+            }
+        }
+        // `tools` currently has an odd count (21), so this fires once for
+        // the trailing pencil-adjacent button. NSGridView accepts fewer
+        // views than there are columns and pads the remaining cell as
+        // empty, so a leftover single button is rendered safely instead of
+        // being silently dropped (mirrors the guard from issue #2's
+        // original 2-column grid).
+        if !rowButtons.isEmpty {
+            grid.addRow(with: rowButtons)
         }
 
-        grid.column(at: 0).width = Self.buttonSide
+        for column in 0..<2 {
+            grid.column(at: column).width = Self.buttonSide
+        }
 
         // Wrapped in a scroll view (same pattern as `DocumentTabBarView`):
-        // 21 buttons in a single column run taller than the window at
-        // typical sizes, so the column scrolls vertically instead of
-        // widening back into extra columns.
+        // even at 2 columns, 21 buttons (11 rows) can run taller than the
+        // window at typical sizes, so the grid scrolls vertically instead
+        // of widening back into extra columns.
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
