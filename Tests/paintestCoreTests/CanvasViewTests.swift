@@ -1995,8 +1995,8 @@ final class CanvasViewTests: XCTestCase {
     func testPolygonSelect_threeClicksThenDoubleClickAnywhere_closesTheSelection() {
         // issue #52: a double-click anywhere (not just near the first
         // vertex) must close the polygon once >= 3 vertices are placed —
-        // AppKit's `clickCount` distinguishes it from a plain click, which
-        // still just appends a 4th vertex (see the counterpart test below).
+        // AppKit's `clickCount` is what distinguishes this from a plain
+        // click, which would just append a 4th vertex instead.
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.activeTool = .polygonSelect
@@ -2023,25 +2023,50 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertTrue(view.selection!.contains(x: 4, y: 2), "a point inside the closed triangle (v1/v2/v3, not the double-click point) must be selected")
     }
 
-    func testPolygonSelect_doubleClickWithOnlyTwoVertices_doesNotClose_addsAThirdVertexInstead() {
-        // The double-click shortcut only applies once >= 3 vertices already
-        // exist (issue #52) — same threshold the "click near first vertex"
-        // path already enforces. With only 2 vertices placed, this call's
-        // first mouseDown (clickCount 1, matching how AppKit actually
-        // delivers a double click — see the closing test above) appends the
-        // 3rd vertex; nothing has closed the shape yet.
+    func testPolygonSelect_twoVerticesThenDoubleClickAtThirdPoint_placesItThenClosesOnTheSecondEvent() {
+        // AppKit always delivers a double-click as *two* separate
+        // `mouseDown` calls at (approximately) the same point — `clickCount
+        // 1` first, then `clickCount 2` — never `clickCount 2` on its own
+        // (a review correction on issue #52's first pass, which had a test
+        // asserting on a single synthetic `clickCount: 2` event with only 1
+        // vertex placed beforehand; that didn't reproduce any real gesture,
+        // since a real double click's first event always appends a vertex
+        // of its own too).
+        //
+        // With exactly 2 vertices already placed via single clicks, a real
+        // double-click at a 3rd point places that 3rd vertex on its first
+        // (`clickCount 1`) event — bringing the count to the >= 3 threshold
+        // the double-click-closes guard checks — and then closes the shape
+        // immediately on the very next (`clickCount 2`) event, using that
+        // freshly-placed 3rd vertex. This is the realistic, intended path
+        // for "click, click, double-click to finish" (issue #52 item 3),
+        // not a rejected gesture.
         let zoomScale = 4
         let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale)
         view.activeTool = .polygonSelect
         let window = view.window!
         let v1 = windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
         let v2 = windowPoint(forPixelCol: 6, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height)
+        let v3 = windowPoint(forPixelCol: 6, row: 6, zoomScale: zoomScale, viewHeight: view.frame.height)
 
         view.mouseDown(with: mouseDownEvent(at: v1, in: window))
         view.mouseUp(with: mouseUpEvent(at: v1, in: window))
-        view.mouseDown(with: mouseDownEvent(at: v2, in: window, clickCount: 2))
+        view.mouseDown(with: mouseDownEvent(at: v2, in: window))
+        view.mouseUp(with: mouseUpEvent(at: v2, in: window))
+        XCTAssertNil(view.selection, "precondition: only 2 vertices placed so far, nothing to close yet")
 
-        XCTAssertNil(view.selection, "a double-click with fewer than 3 vertices placed must not close the shape")
+        // First half of the double-click at v3 (`clickCount` 1): places the
+        // 3rd vertex, but must not close by itself.
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window, clickCount: 1))
+        view.mouseUp(with: mouseUpEvent(at: v3, in: window))
+        XCTAssertNil(view.selection, "the double-click's own first event only places the 3rd vertex; it must not close on its own")
+
+        // Second half of the double-click at v3 (`clickCount` 2, same
+        // point): now that >= 3 vertices exist, this closes immediately.
+        view.mouseDown(with: mouseDownEvent(at: v3, in: window, clickCount: 2))
+
+        XCTAssertNotNil(view.selection, "the double-click's second event, arriving once >= 3 vertices exist, must close the shape")
+        XCTAssertTrue(view.selection!.contains(x: 4, y: 2), "the closed triangle (v1/v2/v3) must be selected")
     }
 
     // MARK: - Selection tools: rectangle/ellipse Shift-aspect-lock (issue #52)
