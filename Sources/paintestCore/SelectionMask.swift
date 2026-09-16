@@ -168,15 +168,20 @@ final class SelectionMask {
         return mask
     }
 
-    /// A flood-filled selection starting at `(startX, startY)` (issue #11,
-    /// round 3 of 3: the magic wand). Grows outward through 4-connected
-    /// neighbors (up/down/left/right only — no diagonals, unlike a typical
-    /// paint-bucket's optional 8-connected mode, which is explicitly out of
-    /// scope for this issue) so long as each candidate pixel's color is
-    /// within `tolerance` of the *start* pixel's color — not its immediate
-    /// neighbor's, matching how Photoshop's (non-"contiguous variance")
-    /// magic wand samples a single reference color for the whole selection
-    /// rather than letting small step-by-step drifts chain across a gradient.
+    /// A selection of every pixel within `tolerance` of `(startX, startY)`'s
+    /// own color, either flood-filled outward from that point (`contiguous:
+    /// true`, the default) or scanned across the whole canvas regardless of
+    /// connectivity (`contiguous: false`, issue #52) — Photoshop's own
+    /// "Contiguous" option-bar checkbox for its magic wand tool.
+    ///
+    /// When `contiguous` grows outward through 4-connected neighbors (up/
+    /// down/left/right only — no diagonals, unlike a typical paint-bucket's
+    /// optional 8-connected mode, which is explicitly out of scope for this
+    /// issue) so long as each candidate pixel's color is within `tolerance`
+    /// of the *start* pixel's color — not its immediate neighbor's, matching
+    /// how Photoshop's (non-"contiguous variance") magic wand samples a
+    /// single reference color for the whole selection rather than letting
+    /// small step-by-step drifts chain across a gradient.
     ///
     /// Color difference is the sum of the absolute per-channel differences
     /// across R, G, and B (a simple Manhattan/L1 distance — cheaper than a
@@ -202,13 +207,29 @@ final class SelectionMask {
         startX: Int, startY: Int,
         colorAt: (Int, Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)?,
         tolerance: Int,
-        width: Int, height: Int
+        width: Int, height: Int,
+        contiguous: Bool = true
     ) -> SelectionMask {
         let mask = SelectionMask(width: width, height: height)
         guard let startColor = colorAt(startX, startY) else { return mask }
 
         func colorDistance(_ a: (r: UInt8, g: UInt8, b: UInt8, a: UInt8), _ b: (r: UInt8, g: UInt8, b: UInt8, a: UInt8)) -> Int {
             abs(Int(a.r) - Int(b.r)) + abs(Int(a.g) - Int(b.g)) + abs(Int(a.b) - Int(b.b))
+        }
+
+        // Non-contiguous mode (issue #52): no flood fill at all, just a
+        // flat scan over every pixel on the canvas — connectivity to
+        // `(startX, startY)` doesn't matter, only color similarity does, so
+        // this skips `visited`/the stack entirely and returns early rather
+        // than falling through into flood-fill machinery it wouldn't use.
+        guard contiguous else {
+            for y in 0..<height {
+                for x in 0..<width {
+                    guard let color = colorAt(x, y), colorDistance(color, startColor) <= tolerance else { continue }
+                    mask.setSelected(true, x: x, y: y)
+                }
+            }
+            return mask
         }
 
         var visited = Array(repeating: false, count: width * height)

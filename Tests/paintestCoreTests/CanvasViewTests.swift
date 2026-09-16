@@ -2179,6 +2179,45 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertTrue(view.selection?.contains(x: 3, y: 2) ?? false, "(3,2) shares (2,2)'s raw active-layer RGB and must be selected — if the wand instead sampled the composite, the two pixels' very different blended appearances would exclude it")
     }
 
+    func testMouseDown_magicWandSelect_contiguousTrue_selectsOnlyTheFloodReachableRegion() {
+        // issue #52: `magicWandContiguous` defaults to `true`, matching the
+        // wand's pre-existing (issue #11 round 3) flood-fill-only behavior
+        // — two disconnected same-color regions must NOT both get selected.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
+        let canvas = view.layerStack.activeLayer.canvas
+        canvas.setPixel(x: 1, y: 1, color: .red)
+        canvas.setPixel(x: 6, y: 6, color: .red) // same color, but not touching (1,1) — separated by white
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        XCTAssertTrue(view.magicWandContiguous, "precondition: contiguous is the default")
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(view.selection?.contains(x: 1, y: 1) ?? false)
+        XCTAssertFalse(view.selection?.contains(x: 6, y: 6) ?? false, "the disconnected red pixel must NOT be selected while contiguous is on")
+    }
+
+    func testMouseDown_magicWandSelect_contiguousFalse_selectsEveryMatchingPixelAcrossTheWholeCanvas() {
+        // issue #52: unchecking "Contiguous" selects every color-similar
+        // pixel on the canvas, connected or not — Photoshop's own toggle of
+        // the same name.
+        let zoomScale = 4
+        let view = makeViewInWindow(width: 8, height: 8, zoomScale: zoomScale) // solid white background
+        let canvas = view.layerStack.activeLayer.canvas
+        canvas.setPixel(x: 1, y: 1, color: .red)
+        canvas.setPixel(x: 6, y: 6, color: .red) // same color, not touching (1,1)
+        view.activeTool = .magicWandSelect
+        view.magicWandTolerance = 0
+        view.magicWandContiguous = false
+
+        view.mouseDown(with: mouseDownEvent(at: windowPoint(forPixelCol: 1, row: 1, zoomScale: zoomScale, viewHeight: view.frame.height), in: view.window!))
+
+        XCTAssertTrue(view.selection?.contains(x: 1, y: 1) ?? false)
+        XCTAssertTrue(view.selection?.contains(x: 6, y: 6) ?? false, "with contiguous off, every color-similar pixel must be selected regardless of connectivity")
+        XCTAssertFalse(view.selection?.contains(x: 0, y: 0) ?? false, "white pixels outside the tolerance must still be excluded")
+    }
+
     // MARK: - Bucket fill (issue #38)
 
     func testMouseDown_bucketFill_singleClick_fillsConnectedRegionWithForegroundColor() {

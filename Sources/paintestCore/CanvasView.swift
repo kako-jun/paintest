@@ -228,6 +228,19 @@ final class CanvasView: NSView {
     /// particular significance.
     var magicWandTolerance: Int = 32
 
+    /// The magic wand's "Contiguous" toggle (issue #52), passed straight
+    /// through to `SelectionMask.magicWand(...)`'s `contiguous` parameter —
+    /// Photoshop's own option-bar checkbox of the same name. `true` (the
+    /// default, matching `SelectionMask.magicWand`'s own default) restricts
+    /// the selection to color-similar pixels flood-reachable from the
+    /// clicked point; unchecking it selects every color-similar pixel on the
+    /// canvas regardless of whether it touches the clicked region. Bucket
+    /// fill (issue #38) deliberately has no equivalent property — a
+    /// non-contiguous *fill* is a materially different, out-of-scope
+    /// feature (global recolor), not just a selection-shape option, so this
+    /// only affects `.magicWandSelect`.
+    var magicWandContiguous: Bool = true
+
     /// The bucket fill tool's own color-similarity cutoff (issue #38), kept
     /// independent of `magicWandTolerance` above even though both feed the
     /// same `SelectionMask.magicWand(...)` — a user might want a looser
@@ -2507,7 +2520,8 @@ final class CanvasView: NSView {
                 startX: pixel.x, startY: pixel.y,
                 colorAt: { x, y in canvas.rawPixel(x: x, y: y) },
                 tolerance: magicWandTolerance,
-                width: layerStack.width, height: layerStack.height
+                width: layerStack.width, height: layerStack.height,
+                contiguous: magicWandContiguous
             )
             let mode = CanvasView.combineMode(for: event.modifierFlags)
             applyCombinedSelection(newMask, mode: mode)

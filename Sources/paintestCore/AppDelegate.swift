@@ -1574,9 +1574,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 self?.canvasView.setZoomScale(scale)
             }
         case .magicWandSelect:
-            optionBarView.showMagicWandOptions(currentTolerance: canvasView.magicWandTolerance) { [weak self] tolerance in
-                self?.canvasView.magicWandTolerance = tolerance
-            }
+            // `currentContiguous`/`onContiguousChanged` (issue #52) add the
+            // "隣接ピクセルのみ" checkbox that only the magic wand gets —
+            // the `.bucketFill` case just below passes neither, so its own
+            // options bar stays tolerance-only (see
+            // `OptionBarView.showMagicWandOptions`'s doc comment).
+            optionBarView.showMagicWandOptions(
+                currentTolerance: canvasView.magicWandTolerance,
+                currentContiguous: canvasView.magicWandContiguous,
+                onToleranceChanged: { [weak self] tolerance in
+                    self?.canvasView.magicWandTolerance = tolerance
+                },
+                onContiguousChanged: { [weak self] contiguous in
+                    self?.canvasView.magicWandContiguous = contiguous
+                }
+            )
         case .bucketFill:
             // Reuses `showMagicWandOptions`'s exact UI (same "許容誤差"
             // label + slider over the same `SelectionMask.magicWand(...)`
@@ -1585,9 +1597,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // region ends up used for, so bucket fill just points it at
             // its own independent `bucketFillTolerance` property instead
             // of `magicWandTolerance`.
-            optionBarView.showMagicWandOptions(currentTolerance: canvasView.bucketFillTolerance) { [weak self] tolerance in
-                self?.canvasView.bucketFillTolerance = tolerance
-            }
+            optionBarView.showMagicWandOptions(
+                currentTolerance: canvasView.bucketFillTolerance,
+                onToleranceChanged: { [weak self] tolerance in
+                    self?.canvasView.bucketFillTolerance = tolerance
+                }
+            )
         case .pen:
             // `canvasView.penBrushSettings` is the single source of truth
             // (issue #20 — no separate `AppDelegate` copy, same as

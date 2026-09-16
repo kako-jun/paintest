@@ -81,6 +81,14 @@ final class OptionBarView: NSView {
     /// `CanvasView.magicWandTolerance`.
     private var onToleranceChanged: ((Int) -> Void)?
 
+    /// Fired when the magic wand's "隣接ピクセルのみ" (Contiguous) checkbox
+    /// toggles (issue #52). `AppDelegate` forwards the new value straight
+    /// into `CanvasView.magicWandContiguous`. `nil` when the bar is showing
+    /// the tolerance-only layout (bucket fill reuses `showMagicWandOptions`
+    /// but has no contiguous option of its own — see that method's doc
+    /// comment).
+    private var onContiguousChanged: ((Bool) -> Void)?
+
     /// Fired when the pen tool's size/hardness/opacity/flow sliders move
     /// (issue #20). `AppDelegate` forwards each new value straight into the
     /// matching field of `CanvasView.penBrushSettings`.
@@ -136,9 +144,26 @@ final class OptionBarView: NSView {
     /// readout of the current value. Same "rebuilt from scratch on every
     /// call" pattern as `showZoomPresets` above — no incremental
     /// "just update the selection" path to keep in sync separately.
-    func showMagicWandOptions(currentTolerance: Int, onToleranceChanged: @escaping (Int) -> Void) {
+    ///
+    /// `currentContiguous`/`onContiguousChanged` (issue #52) add a
+    /// "隣接ピクセルのみ" checkbox after the tolerance controls — Photoshop's
+    /// own magic-wand-only "Contiguous" option. Both default to `nil`,
+    /// which omits the checkbox entirely: `AppDelegate` also reuses this
+    /// same method for the bucket fill tool's own tolerance slider (see its
+    /// call site's doc comment), and bucket fill has no contiguous option
+    /// of its own (non-contiguous *fill* is a different, out-of-scope
+    /// feature — see `CanvasView.magicWandContiguous`'s doc comment), so
+    /// passing `nil` there keeps that layout exactly as it was before this
+    /// issue.
+    func showMagicWandOptions(
+        currentTolerance: Int,
+        currentContiguous: Bool? = nil,
+        onToleranceChanged: @escaping (Int) -> Void,
+        onContiguousChanged: ((Bool) -> Void)? = nil
+    ) {
         clear()
         self.onToleranceChanged = onToleranceChanged
+        self.onContiguousChanged = onContiguousChanged
 
         let label = NSTextField(labelWithString: "許容誤差")
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -170,6 +195,20 @@ final class OptionBarView: NSView {
 
             valueLabel.leadingAnchor.constraint(equalTo: slider.trailingAnchor, constant: Self.controlSpacing),
             valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+
+        guard let currentContiguous else { return }
+        let contiguousCheckbox = NSButton(
+            checkboxWithTitle: "隣接ピクセルのみ",
+            target: self,
+            action: #selector(contiguousCheckboxChanged(_:))
+        )
+        contiguousCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        contiguousCheckbox.state = currentContiguous ? .on : .off
+        addSubview(contiguousCheckbox)
+        NSLayoutConstraint.activate([
+            contiguousCheckbox.leadingAnchor.constraint(equalTo: valueLabel.trailingAnchor, constant: Self.penGroupSpacing),
+            contiguousCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
 
@@ -375,6 +414,7 @@ final class OptionBarView: NSView {
         subviews.forEach { $0.removeFromSuperview() }
         onZoomPresetSelected = nil
         onToleranceChanged = nil
+        onContiguousChanged = nil
         toleranceValueLabel = nil
         onPenSizeChanged = nil
         onPenHardnessChanged = nil
@@ -394,6 +434,15 @@ final class OptionBarView: NSView {
         let tolerance = Int(sender.doubleValue.rounded())
         toleranceValueLabel?.stringValue = "\(tolerance)"
         onToleranceChanged?(tolerance)
+    }
+
+    /// Fired when the magic wand's "隣接ピクセルのみ" checkbox toggles
+    /// (issue #52). `sender.state` is an `NSControl.StateValue`, not a
+    /// `Bool`, so this compares against `.on` the same way
+    /// `textOrientationChanged(_:)` below compares its segmented control's
+    /// `selectedSegment` rather than assuming any particular raw value.
+    @objc private func contiguousCheckboxChanged(_ sender: NSButton) {
+        onContiguousChanged?(sender.state == .on)
     }
 
     @objc private func penSizeSliderChanged(_ sender: NSSlider) {
