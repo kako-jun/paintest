@@ -124,6 +124,128 @@ final class CanvasViewTests: XCTestCase {
         XCTAssertEqual(view.zoomScale, 4, "an invalid zoom value must be ignored, not clamped or applied")
     }
 
+    // MARK: - intrinsicContentSize (issue #79)
+    //
+    // `intrinsicContentSize` is what tells Auto Layout how big `canvasView`
+    // should be once it actually manages the view's frame — but Auto Layout
+    // only consults it at all once `AppDelegate` sets `canvasView
+    // .translatesAutoresizingMaskIntoConstraints = false`. These tests cover
+    // the override itself (a plain computed property, testable in isolation
+    // regardless of any view hierarchy); the Auto Layout wiring tests further
+    // below cover the other half — that the override's value actually
+    // reaches `canvasView.frame` once real constraints are in play.
+
+    func testIntrinsicContentSize_defaultZoom_matchesLayerStackSizeTimesZoomScale() {
+        let view = makeView() // 8x8 layerStack, default zoom scale 4
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 32, height: 32))
+    }
+
+    func testIntrinsicContentSize_isNeverZero_forANonEmptyLayerStack() {
+        let view = makeView()
+        XCTAssertGreaterThan(view.intrinsicContentSize.width, 0, "a zero intrinsicContentSize is exactly what left canvasView undrawable/unclickable pre-#79")
+        XCTAssertGreaterThan(view.intrinsicContentSize.height, 0)
+    }
+
+    func testIntrinsicContentSize_afterZoomIn_scalesUpWithTheNewZoomScale() {
+        let view = makeView()
+        view.zoomIn() // 4 -> 8
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 64, height: 64))
+    }
+
+    func testIntrinsicContentSize_afterZoomOut_scalesDownWithTheNewZoomScale() {
+        let view = makeView()
+        view.zoomOut() // 4 -> 2
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 16, height: 16))
+    }
+
+    func testIntrinsicContentSize_afterSetZoomScale_reflectsTheNewScale() {
+        let view = makeView()
+        view.setZoomScale(16)
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 128, height: 128))
+    }
+
+    func testIntrinsicContentSize_afterReplaceLayerStack_reflectsTheNewLayerStacksSize() {
+        let view = makeView()
+        view.replaceLayerStack(LayerStack(width: 20, height: 10))
+        XCTAssertEqual(view.intrinsicContentSize, NSSize(width: 80, height: 40), "default zoom scale is 4")
+    }
+
+    // MARK: - Auto Layout wiring in an NSScrollView (issue #79)
+    //
+    // `AppDelegate` itself can't be unit tested directly — a whole
+    // `NSApplicationDelegate` that builds a real window/menu bar, not
+    // practical to unit test directly (same limitation `OptionBarViewTests`'
+    // own "AppDelegate.updateOptionBar(for:)'s per-tool wiring, mirrored"
+    // section already documents) — so these tests instead reproduce
+    // `AppDelegate.applicationDidFinishLaunching`'s exact `canvasView`/
+    // `scrollView` wiring (documentView assignment, `translatesAutoresizing
+    // MaskIntoConstraints = false`, and the top/leading constraints pinning
+    // `canvasView` to the clip view) and confirm it actually resolves
+    // `canvasView`'s frame away from `.zero` — the root symptom of issue #79
+    // (a permanently zero-size, undrawable, unclickable canvas).
+
+    func testAutoLayoutWiring_translatesAutoresizingMaskFalsePlusConstraints_yieldsNonZeroFrameMatchingIntrinsicContentSize() {
+        let view = makeView() // 8x8 layerStack, default zoom scale 4 -> 32x32 intrinsic size
+        view.translatesAutoresizingMaskIntoConstraints = false
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        scrollView.documentView = view
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            view.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor)
+        ])
+
+        scrollView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(view.frame.size, NSSize(width: 32, height: 32), "once Auto Layout actually manages canvasView's frame, it must be driven by intrinsicContentSize, not stay .zero")
+    }
+
+    func testAutoLayoutWiring_zoomChangeAfterLayout_growsTheResolvedFrameToTheNewIntrinsicContentSize() {
+        let view = makeView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        scrollView.documentView = view
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            view.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor)
+        ])
+        scrollView.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.frame.size, NSSize(width: 32, height: 32), "precondition: laid out at the default zoom")
+
+        view.zoomIn() // 4 -> 8; calls invalidateIntrinsicContentSize() internally
+        scrollView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(view.frame.size, NSSize(width: 64, height: 64), "invalidateIntrinsicContentSize() must make Auto Layout re-solve the frame at the new zoom, not leave it stuck at the old size")
+    }
+
+    func testAutoLayoutWiring_leavingTranslatesAutoresizingMaskAtItsDefault_reproducesTheIssue79ZeroFrameBug() {
+        // Documents the actual pre-fix bug as a regression guard: without
+        // `translatesAutoresizingMaskIntoConstraints = false`, AppKit's
+        // autoresizing-mask-derived constraints permanently pin canvasView's
+        // size to whatever its frame was at `init` time (`.zero`, per
+        // `CanvasView.init`'s `super.init(frame: .zero)`) — Auto Layout never
+        // consults `intrinsicContentSize` at all, even with the exact same
+        // top/leading constraints activated below. If this test ever starts
+        // failing (the frame becomes non-zero without the flag), AppKit's own
+        // default behavior has changed and the AppDelegate fix this guards
+        // may no longer be load-bearing — but as of issue #79 it is.
+        let view = makeView()
+        // Deliberately NOT setting translatesAutoresizingMaskIntoConstraints
+        // — reproduces the pre-fix AppDelegate wiring.
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        scrollView.documentView = view
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            view.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor)
+        ])
+
+        scrollView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(view.frame, .zero, "documents issue #79: without translatesAutoresizingMaskIntoConstraints = false, canvasView's frame stays .zero forever, regardless of intrinsicContentSize or any constraint activated on it")
+    }
+
     // MARK: - Per-document zoom independence across tab switches (issue #15 follow-up)
     //
     // `CanvasView` itself only ever holds one `zoomScale` at a time — the

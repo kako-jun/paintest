@@ -23,6 +23,20 @@ public func runPaintestApp(initialFileURL: URL? = nil) {
     app.run()
 }
 
+/// An `NSClipView` that reports itself as flipped, so the scroll view
+/// anchors an undersized `documentView` (`canvasView`) to its top-left
+/// corner instead of its bottom-left corner (issue #79) — the exact same fix
+/// `ToolboxView`'s own private `FlippedClipView` applies to its `NSGridView`
+/// documentView for the identical reason (issue #71); see that type's own
+/// doc comment for the full empirical explanation (a plain `NSClipView`
+/// anchors undersized content to its own bottom-left origin regardless of
+/// any top-anchor constraint placed on the document view itself). Declared
+/// separately here (rather than reusing `ToolboxView`'s) because Swift's
+/// `private` on a top-level declaration is file-scoped, not module-scoped.
+private final class FlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // Set from `runPaintestApp(initialFileURL:)` (issue #72); consumed once,
     // at the end of `applicationDidFinishLaunching`, via `openDocument(from:)`.
@@ -147,6 +161,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         displayedDocument = initialDocument
 
         canvasView = CanvasView(layerStack: documentManager.activeDocument.layerStack)
+        // Without this, `canvasView` (the scroll view's `documentView`) keeps
+        // AppKit's default `true`, which means Auto Layout never manages its
+        // frame at all — its `intrinsicContentSize` override (`layerStack
+        // .width * zoomScale`) is then simply never consulted, and the view's
+        // frame stays permanently `.zero` (its `init(frame: .zero)` value):
+        // no visible canvas, no drawable area, no mouse hit-testing at all
+        // (issue #79). Every other top-level view built in this method
+        // already sets this (`optionBarView`, `documentTabBarView`,
+        // `toolboxView`, `scrollView` itself, `rightPanelGroup`, `colorBar`,
+        // `statusBar`) — `canvasView` was the one view that had never been
+        // given the same treatment. See the constraints activated right
+        // after `scrollView.documentView = canvasView` below for the other
+        // half of the fix: `translatesAutoresizingMaskIntoConstraints =
+        // false` alone isn't enough — Auto Layout also needs at least a
+        // top/leading anchor to actually position the view, since
+        // `intrinsicContentSize` only supplies its *size*, not its origin.
+        canvasView.translatesAutoresizingMaskIntoConstraints = false
         canvasView.onZoomChanged = { [weak self] scale in
             self?.zoomLabelField?.stringValue = "\(scale)x"
             // Keeps the magnifier's options-bar dropdown in sync with
@@ -205,6 +236,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
 
         scrollView = NSScrollView()
+        // Must be assigned before `documentView` below: `NSScrollView` sets
+        // up its default `NSClipView` at init time, and swapping the clip
+        // view out after a documentView is already installed risks losing
+        // that document view's wiring into the (old) clip view — same
+        // ordering requirement `ToolboxView.buildGrid()`'s own
+        // `FlippedClipView` follows.
+        //
+        // `FlippedClipView` itself (issue #79, same fix as issue #71's
+        // `ToolboxView.FlippedClipView`): a plain, non-flipped `NSClipView`
+        // anchors an undersized `documentView` to its own bottom-left
+        // origin — confirmed for `ToolboxView`'s grid by pixel-sampling a
+        // real screenshot — regardless of any top/leading-anchor constraint
+        // placed on the document view itself. A 64x64 canvas at zoom 1
+        // (4096 view points) is very often smaller than the scroll view's
+        // visible area, so without this, the canvas would render bottom-
+        // anchored instead of top-anchored the moment it's smaller than the
+        // window, even after the `translatesAutoresizingMaskIntoConstraints`
+        // fix above makes its frame non-zero in the first place.
+        scrollView.contentView = FlippedClipView()
         scrollView.hasVerticalScroller = true
         // No horizontal scroller (issue #22): with it enabled, AppKit
         // permanently reserves a scroller-track strip along the *bottom*
@@ -223,6 +273,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         scrollView.allowsMagnification = false
         scrollView.documentView = canvasView
         scrollView.backgroundColor = .windowBackgroundColor
+        // Pins `canvasView`'s top-left corner to the clip view's top-left
+        // corner (issue #79) — the other half of this fix, alongside
+        // `translatesAutoresizingMaskIntoConstraints = false` above.
+        // `canvasView.intrinsicContentSize` (`layerStack.width * zoomScale`,
+        // `layerStack.height * zoomScale`) already fully determines its
+        // *size*, so only its *origin* needs pinning here — exactly the same
+        // "pin one corner, let intrinsicContentSize own the size" pattern
+        // `ToolboxView.buildGrid()`'s own `grid.topAnchor`/`grid
+        // .centerXAnchor` constraints use for its `NSGridView` documentView
+        // (issue #58), rather than `LayerPanelView`/`DocumentTabBarView`'s
+        // leading+trailing+top pattern — those two want their `FlippedStack
+        // View` to always fill the clip view's *width* and only grow in
+        // height, whereas the canvas's width is just as zoom-dependent as its
+        // height and must never be stretched to fill the viewport.
+        // `invalidateIntrinsicContentSize()` (already called from
+        // `zoomIn()`/`zoomOut()`/`setZoomScale(_:)`/`replaceLayerStack(_:)`)
+        // is what makes Auto Layout re-solve `canvasView`'s frame against
+        // these two constraints whenever the zoom level or the active
+        // document's canvas size changes.
+        NSLayoutConstraint.activate([
+            canvasView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            canvasView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor)
+        ])
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
